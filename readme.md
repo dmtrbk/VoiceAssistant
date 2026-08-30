@@ -35,7 +35,6 @@ Voiceassistant/
     ├── restart.py               # Самоперезапуск службы через systemd
     ├── web_search.py            # Поиск в браузере (Google, Яндекс)
     └── xiaomi_bulb.py           # Управление смарт-лампой Yeelight/Xiaomi
-
 ---
 
 ## ⚡ Быстрая установка (Автоматическая)
