@@ -1,0 +1,15 @@
+#EXTM3U
+#EXTINF:-1,Радио Рекорд
+https://radiorecord.hostingradio.ru/rr_main96.aacp
+#EXTINF:-1,Европа Плюс
+http://europaplus.hostingradio.ru:8014/europaplus320.mp3
+#EXTINF:-1,Дорожное Радио
+http://emgregion.hostingradio.ru:8064/moscow.dorognoe.mp3
+#EXTINF:-1,Ретро ФМ
+http://europaplus.hostingradio.ru:8014/retro320.mp3
+#EXTINF:-1,Наше Радио
+https://nashe1.hostingradio.ru:80/nashe-128.mp3
+#EXTINF:-1,Вести ФМ
+http://icecast.vgtrk.cdnvideo.ru/vestifm_mp3_128kbps
+#EXTINF:-1,Радио Маяк
+https://icecast-vgtrk.cdnvideo.ru/mayakfm_aac_64kbps

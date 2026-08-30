@@ -1,0 +1,10 @@
+vosk
+sounddevice
+python-dotenv
+PySide6
+scikit-learn
+groq
+opencv-python
+wikipedia-api
+requests
+aiohttp
