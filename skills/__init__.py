@@ -10,7 +10,8 @@ from .audacious import AudaciousSkill
 from .web_search import WebSearchSkill       
 from .maps_search import MapsSearchSkill  
 from .telegram import TelegramSkill
-from .restart import RestartSkill       # <-- 1. Импортируем навык перезагрузки
+from .restart import RestartSkill
+from .pentagon import PentagonSkill       # <-- 1. Импортируем новый навык
 
 # Создаем экземпляры навыков
 system_skill = SystemSkill()                 
@@ -23,12 +24,14 @@ audacious_skill = AudaciousSkill()
 web_search_skill = WebSearchSkill()          
 maps_search_skill = MapsSearchSkill()  
 telegram_skill = TelegramSkill()
-restart_skill = RestartSkill()         # <-- 2. Инициализируем навык перезагрузки
+restart_skill = RestartSkill()
+pentagon_skill = PentagonSkill()         # <-- 2. Инициализируем объект навыка
 
 # Очередь приоритетов опроса навыков.
 ALL_SKILLS = [
     local_nlu_skill,
-    restart_skill,                     # <-- 3. Помещаем в начало приоритета
+    restart_skill,
+    pentagon_skill,                    # <-- 3. Добавляем в список навыков
     security_skill,
     datetime_skill,
     xiaomi_bulb_skill,
