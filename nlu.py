@@ -4,7 +4,7 @@ import os
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INTENTS_PATH = os.path.join(BASE_DIR, "intents.json")
@@ -18,13 +18,13 @@ class NLUClassifier:
 
     def _load_intents(self) -> dict:
         if not os.path.exists(self.intents_path):
-            logging.error(f"Файл не найден: {self.intents_path}")
+            logger.error(f"Файл не найден: {self.intents_path}")
             return {}
         try:
             with open(self.intents_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            logging.error(f"Ошибка чтения {self.intents_path}: {e}")
+            logger.error(f"Ошибка чтения {self.intents_path}: {e}")
             return {}
 
     def train(self) -> bool:
@@ -48,7 +48,7 @@ class NLUClassifier:
 
         self.classifier = LogisticRegression(C=10.0, max_iter=500, random_state=42)
         self.classifier.fit(X_vectorized, y)
-        logging.info("[NLU] Модель распознавания успешно обучена.")
+        logger.info("[NLU] Модель распознавания успешно обучена.")
         return True
 
     def predict(self, text: str):

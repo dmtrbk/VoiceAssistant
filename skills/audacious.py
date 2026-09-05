@@ -7,8 +7,10 @@ import random
 import time
 import subprocess
 from skills.base import BaseSkill, RequestContext
-from volume_control import VolumeController  
-from skills.ai_chat import log_system_action 
+from volume_control import VolumeController
+from skills.ai_chat import log_system_action
+from player_control import start_player_session, stop_player_session
+from triggers import MUSIC_VOLUME_HINTS 
 
 RADIO_STATIONS = {
     "рекорд": {
@@ -75,30 +77,24 @@ class AudaciousSkill(BaseSkill):
         self.vol_ctrl = VolumeController()
 
     def _start_playback(self, target_path: str):
-        script_on = os.path.expanduser("~/.scripts/player_on.sh")
-        
-        if os.path.exists(script_on):
-            subprocess.Popen(["systemd-run", "--user", "--scope", "bash", script_on], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        started = start_player_session()
+        if started:
             time.sleep(0.8)
-            subprocess.Popen(["audacious", "-p", target_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            subprocess.Popen(["audacious", "-p", target_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            ["audacious", "-p", target_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def _stop_playback(self):
-        script_off = os.path.expanduser("~/.scripts/player_off.sh")
-        if os.path.exists(script_off):
-            subprocess.Popen(["systemd-run", "--user", "--scope", "bash", script_off], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            subprocess.Popen(["audtool", "--playback-stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.Popen(["pkill", "audacious"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.Popen(["pkill", "glava"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stop_player_session()
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
         
         volume_keywords = ["громче", "тише", "громкость плюс", "громкость минус", "громкость"]
         has_volume_cmd = any(w in text for w in volume_keywords)
-        has_music_mention = any(w in text for w in ["музыка", "музыку", "плеер", "плеере"])
+        has_music_mention = any(w in text for w in MUSIC_VOLUME_HINTS)
         
         if has_volume_cmd and has_music_mention:
             return True
@@ -137,7 +133,7 @@ class AudaciousSkill(BaseSkill):
         playlist_path = os.path.join(base_dir, "radio_playlist.m3u")
 
         # Шаг громкости изменен на 15%
-        if any(w in text for w in ["громче", "громкость плюс"]) and any(w in text for w in ["музыка", "музыку", "плеер"]):
+        if any(w in text for w in ["громче", "громкость плюс"]) and any(w in text for w in MUSIC_VOLUME_HINTS):
             current_vol = self.vol_ctrl.get_current_volume()
             if current_vol is not None:
                 new_vol = min(current_vol + 15, 100)
@@ -145,7 +141,7 @@ class AudaciousSkill(BaseSkill):
                 log_system_action(f"Пользователь увеличил громкость музыки до {new_vol}%")
             return
 
-        if any(w in text for w in ["тише", "громкость минус"]) and any(w in text for w in ["музыка", "музыку", "плеер"]):
+        if any(w in text for w in ["тише", "громкость минус"]) and any(w in text for w in MUSIC_VOLUME_HINTS):
             current_vol = self.vol_ctrl.get_current_volume()
             if current_vol is not None:
                 new_vol = max(current_vol - 15, 0)

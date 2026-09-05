@@ -1,8 +1,7 @@
 import os
 import urllib.parse
-import subprocess
-import logging
 from skills.base import BaseSkill, RequestContext
+from browser import open_url
 
 # Словарь для конвертации числительных (включая основные падежи и порядковые формы)
 RU_NUMS = {
@@ -181,21 +180,4 @@ class MapsSearchSkill(BaseSkill):
                 context.speak(f"Ищу на Google Картах: {query}")
                 maps_url = f"https://www.google.com/maps/search/?api=1&query={encoded_query}"
 
-        self._open_in_browser(maps_url)
-
-    def _open_in_browser(self, url: str) -> None:
-        try:
-            subprocess.Popen(
-                ["google-chrome-stable", url], 
-                stdout=subprocess.DEVNULL, 
-                stderr=subprocess.DEVNULL
-            )
-        except FileNotFoundError:
-            try:
-                subprocess.Popen(
-                    ["xdg-open", url], 
-                    stdout=subprocess.DEVNULL, 
-                    stderr=subprocess.DEVNULL
-                )
-            except Exception as e:
-                logging.error(f"[MapsSearch] Не удалось открыть карту: {e}")
+        open_url(maps_url)

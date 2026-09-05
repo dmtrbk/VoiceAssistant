@@ -2,9 +2,8 @@
 
 import os
 import urllib.parse
-import subprocess
-import logging
 from skills.base import BaseSkill, RequestContext
+from browser import open_url
 
 class WebSearchSkill(BaseSkill):
     """Навык для поиска информации в интернете и управления браузером."""
@@ -49,24 +48,6 @@ class WebSearchSkill(BaseSkill):
         
         return has_search or has_browser or has_ai
 
-    def _open_url(self, url: str) -> None:
-        """Вспомогательный метод запуска браузера (Google Chrome или системный по умолчанию)."""
-        try:
-            subprocess.Popen(
-                ["google-chrome-stable", url], 
-                stdout=subprocess.DEVNULL, 
-                stderr=subprocess.DEVNULL
-            )
-        except FileNotFoundError:
-            try:
-                subprocess.Popen(
-                    ["xdg-open", url], 
-                    stdout=subprocess.DEVNULL, 
-                    stderr=subprocess.DEVNULL
-                )
-            except Exception as e:
-                logging.error(f"[WebSearch] Не удалось открыть браузер: {e}")
-
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
         
@@ -74,34 +55,34 @@ class WebSearchSkill(BaseSkill):
         # Явный запрос на Gemini
         if any(w in text for w in ["джемини", "gemini"]):
             context.speak("Открываю нейросеть Gemini в браузере.")
-            self._open_url("https://gemini.google.com")
+            open_url("https://gemini.google.com")
             return
             
         # Явный запрос на Алису
         if any(w in text for w in ["алису", "алиса"]):
             context.speak("Открываю нейросеть Алиса ИИ в браузере.")
-            self._open_url("https://alice.yandex.ru")
+            open_url("https://alice.yandex.ru")
             return
 
         # Общий запрос на ИИ (открываем то, что настроено по умолчанию)
         if any(w in text for w in ["включи ии", "открой ии", "запусти ии", "открой нейросеть", "нейросеть"]):
             if self.ai_provider == "gemini":
                 context.speak("Открываю нейросеть Gemini в браузере.")
-                self._open_url("https://gemini.google.com")
+                open_url("https://gemini.google.com")
             else:
                 context.speak("Открываю нейросеть Алиса ИИ в браузере.")
-                self._open_url("https://alice.yandex.ru")
+                open_url("https://alice.yandex.ru")
             return
 
         # 2. Простое открытие главной страницы поисковиков или браузера
         if any(w in text for w in ["открой яндекс", "запусти яндекс", "включи яндекс"]):
             context.speak("Открываю Яндекс.")
-            self._open_url("https://ya.ru")
+            open_url("https://ya.ru")
             return
 
         if any(w in text for w in ["открой гугл", "запусти гугл", "включи гугл"]):
             context.speak("Открываю Google.")
-            self._open_url("https://www.google.com")
+            open_url("https://www.google.com")
             return
 
         if any(w in text for w in ["открой браузер", "запусти браузер", "включи браузер", "браузер"]):
@@ -110,7 +91,7 @@ class WebSearchSkill(BaseSkill):
                 context.speak("Открываю браузер.")
                 # В качестве домашней страницы открываем выбранный по умолчанию поисковик
                 start_url = "https://ya.ru" if self.search_provider == "yandex" else "https://www.google.com"
-                self._open_url(start_url)
+                open_url(start_url)
                 return
 
         # 3. Поиск информации в интернете
@@ -149,6 +130,6 @@ class WebSearchSkill(BaseSkill):
                         context.speak(f"Ищу в Яндексе: {query}")
                         search_url = f"https://ya.ru/search/?text={encoded_query}"
                     
-                self._open_url(search_url)
+                open_url(search_url)
             else:
                 context.speak("Что именно вы хотите найти?")

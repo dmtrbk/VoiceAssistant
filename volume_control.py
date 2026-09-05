@@ -8,8 +8,22 @@ import threading
 
 class VolumeController:
     """Модуль управления автоматическим приглушением громкости (ducking) в плеере Audacious с защитой от сбоев."""
-    
+
+    _instance = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls):
+        with cls._instance_lock:
+            if cls._instance is None:
+                inst = super().__new__(cls)
+                inst._initialized = False
+                cls._instance = inst
+            return cls._instance
+
     def __init__(self):
+        if getattr(self, "_initialized", False):
+            return
+        self._initialized = True
         self.lock = threading.Lock()
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.cache_path = os.path.join(base_dir, "volume_cache.json")

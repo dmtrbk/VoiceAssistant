@@ -17,10 +17,13 @@ except ImportError:
 
 class SurveillanceThread(threading.Thread):
     """Поток для анализа изображения с веб-камеры."""
-    def __init__(self, save_dir="/home/real/VoiceAssistant/surveillance_snaps"):
+    def __init__(self, save_dir=None):
         super().__init__()
         self.daemon = True
         self._stop_event = threading.Event()
+        if save_dir is None:
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            save_dir = os.path.join(project_root, "surveillance_snaps")
         self.save_dir = os.path.expanduser(save_dir)
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
@@ -52,10 +55,14 @@ class SurveillanceThread(threading.Thread):
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
         ret, frame1 = cap.read()
-        if ret:
-            frame1_resized = cv2.resize(frame1, (320, 240))
-            frame1_gray = cv2.cvtColor(frame1_resized, cv2.COLOR_BGR2GRAY)
-            frame1_blur = cv2.GaussianBlur(frame1_gray, (5, 5), 0)
+        if not ret:
+            logging.error("[Охрана] Не удалось получить кадр с камеры.")
+            cap.release()
+            return
+
+        frame1_resized = cv2.resize(frame1, (320, 240))
+        frame1_gray = cv2.cvtColor(frame1_resized, cv2.COLOR_BGR2GRAY)
+        frame1_blur = cv2.GaussianBlur(frame1_gray, (5, 5), 0)
 
         last_analysis_time = 0.0
         analysis_interval = 1.5
@@ -157,8 +164,11 @@ class SecuritySkill(BaseSkill):
             
             if self.surveillance_thread is not None and self.surveillance_thread.is_alive():
                 self.surveillance_thread.stop()
-                self.surveillance_thread.join()
-                self.surveillance_thread = None
+                self.surveillance_thread.join(timeout=5.0)
+                if self.surveillance_thread.is_alive():
+                    logging.warning("[Охрана] Поток наблюдения не остановился за 5 секунд.")
+                else:
+                    self.surveillance_thread = None
                 
             context.speak("С возвращением! Система видеонаблюдения отключена.")
             send_telegram_notification("🔓 Режим охраны успешно отключен. Хозяин дома.")

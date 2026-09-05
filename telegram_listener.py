@@ -3,6 +3,7 @@
 import os
 import time
 import logging
+import threading
 import requests
 from dotenv import load_dotenv
 from commands import execute as execute_command
@@ -47,13 +48,18 @@ def run_telegram_listener():
                 if chat_id == str(ALLOWED_CHAT_ID) and text:
                     logging.info(f"[Telegram Command]: {text}")
 
-                    # Callback перехватывает фразы, которые ассистент произносит в reply
-                    def telegram_speak(reply_text: str):
+                    # Callback перехватывает фразы, которые ассистент произносит в reply.
+                    # chat_id фиксируем аргументом по умолчанию, иначе замыкание увидит следующее значение из цикла.
+                    def telegram_speak(reply_text: str, _chat_id=chat_id):
                         logging.info(f"[Telegram Reply]: {reply_text}")
-                        send_reply(chat_id, reply_text)
+                        send_reply(_chat_id, reply_text)
 
-                    # Передаем команду и коллбэк в маршрутизатор
-                    execute_command(text, speak_callback=telegram_speak)
+                    threading.Thread(
+                        target=execute_command,
+                        args=(text,),
+                        kwargs={"speak_callback": telegram_speak},
+                        daemon=True,
+                    ).start()
 
         except Exception as e:
             logging.error(f"[Telegram Error]: {e}")

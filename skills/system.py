@@ -5,7 +5,8 @@ import re
 import random
 import logging
 import subprocess
-import shutil  # <-- Для проверки установленных в системе программ
+import shutil
+import time
 import wikipediaapi
 from skills.base import BaseSkill, RequestContext
 
@@ -16,7 +17,10 @@ SUCCESS_RESPONSES = [
 
 class SystemSkill(BaseSkill):
     """Навык для управления операционной системой Linux (громкость, утилиты, выключение)."""
-    
+
+    def __init__(self):
+        self._shutdown_pending_until = 0.0
+
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
         triggers = [
@@ -153,8 +157,13 @@ class SystemSkill(BaseSkill):
             return
 
         if any(w in text for w in ["выключ", "отключ"]) and any(w in text for w in ["компьютер", "пк"]):
-            context.speak("Выключаю компьютер. До свидания!")
-            import time
-            time.sleep(1)
-            subprocess.Popen(["shutdown", "now"])
+            now = time.time()
+            if now < self._shutdown_pending_until:
+                self._shutdown_pending_until = 0.0
+                context.speak("Выключаю компьютер. До свидания!")
+                time.sleep(1)
+                subprocess.Popen(["shutdown", "now"])
+            else:
+                self._shutdown_pending_until = now + 20
+                context.speak("Чтобы выключить компьютер, повторите команду.")
             return

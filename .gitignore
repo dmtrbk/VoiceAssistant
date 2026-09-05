@@ -2,6 +2,7 @@
 venv/
 .venv/
 .env
+!.env.example
 __pycache__/
 *.pyc
 logs/
@@ -9,3 +10,6 @@ model/*
 piper
 skills/__pycache__
 surveillance_snaps/
+*.tmp
+skills/chat_history_cache.json
+skills/shared_events.json

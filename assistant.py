@@ -48,11 +48,33 @@ from vosk import KaldiRecognizer, Model
 import commands
 from indicator import run_gui, status_queue
 from volume_control import VolumeController
+from player_control import emergency_silence
+from triggers import (
+    is_quick_command,
+    is_emergency_stop,
+    is_hold_interrupt,
+    is_sleep_command,
+    is_music_volume_command,
+    is_filler,
+)
 
 WAKE_WORDS = ["джарвис", "дарвис", "сервис", "жарис", "умник"]
 
 SAMPLERATE = 16000
-ATTENTION_TIMEOUT = 4
+
+
+def _read_attention_timeout() -> float:
+    raw = os.getenv("ATTENTION_TIMEOUT", "4")
+    try:
+        value = float(raw)
+        if value <= 0:
+            return 4.0
+        return value
+    except (TypeError, ValueError):
+        return 4.0
+
+
+ATTENTION_TIMEOUT = _read_attention_timeout()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "model")
 
@@ -83,6 +105,7 @@ is_speaking = False
 is_thinking = False  # Предотвращает отключение внимания во время обработки ИИ-запроса
 playback_interrupted = False
 is_active = False
+asked_to_repeat = False  # Один мягкий переспрос на сессию при междометии
 last_active_time = 0.0
 last_speak_end_time = 0.0  # Время окончания речи (для защиты от эхо)
 play_process = None  # Ссылка на текущий запущенный процесс воспроизведения paplay
@@ -123,6 +146,52 @@ def stop_speaking(to_idle=True):
     clear_audio_queue()
     if to_idle:
         status_queue.put("idle")
+
+
+def go_idle():
+    """Полный сон сессии: idle, сброс переспроса, музыка обратно."""
+    global is_active, asked_to_repeat
+    is_active = False
+    asked_to_repeat = False
+    status_queue.put("idle")
+    volume_ctrl.restore()
+
+
+def keep_session_alive():
+    """Сессия остаётся слушать, таймер внимания обновляется."""
+    global is_active, last_active_time
+    is_active = True
+    last_active_time = time.time()
+    status_queue.put("listening")
+
+
+def handle_emergency_stop(recognizer):
+    """«стоп»: гасим TTS, медиа и сессию."""
+    stop_speaking(to_idle=True)
+    emergency_silence()
+    with recognizer_lock:
+        recognizer.Reset()
+    go_idle()
+    logging.info("[Сессия] Аварийная остановка.")
+
+
+def handle_sleep(recognizer):
+    """«спать» / «отбой»: сессия в idle, медиа не трогаем."""
+    stop_speaking(to_idle=True)
+    with recognizer_lock:
+        recognizer.Reset()
+    go_idle()
+    logging.info("[Сессия] Команда сна. Возврат в ожидание.")
+
+
+def handle_hold_interrupt(recognizer):
+    """«замолчи»: стоп TTS, сессия жива, дакинг не снимаем."""
+    stop_speaking(to_idle=False)
+    with recognizer_lock:
+        recognizer.Reset()
+    keep_session_alive()
+    logging.info("[Сессия] Прерывание речи, слушаю дальше.")
+
 
 def speak(text, recognizer=None):
     """Синтезирует аудио в файл на ОЗУ-диске и проигрывает его в асинхронном режиме."""
@@ -221,41 +290,43 @@ def execute_command_async(cmd_text, safe_speak_func):
     """Асинхронный запуск выполнения команды в фоновом потоке, чтобы не блокировать STТ."""
     def run():
         global is_thinking, last_active_time, is_active
-        
-        # Полный список триггеров для беззвучных быстрых команд
-        quick_triggers = [
-            "громче", "тише", "громкость плюс", "громкость минус",
-            "следующий", "предыдущий", "вперед", "назад", "дальше", "прошлый трек", "следующий трек", "трек",
-            "пауза", "плей", "играй", "возобнови",
-            "выключи музыку", "выруби музыку", "останови музыку", "тишина"
-        ]
-        is_quick = any(w in cmd_text for w in quick_triggers)
-        
+
+        was_active = is_active
+        is_quick = is_quick_command(cmd_text)
+
         # Если команда быстрая, передаем пустую функцию вместо озвучки (блокируем синтез Piper)
         active_speak = (lambda text: None) if is_quick else safe_speak_func
-        
+
         status_queue.put("thinking")
         is_thinking = True
-        
-        # Выполняем команду
-        commands.execute(cmd_text, active_speak)
-        
+
+        should_sleep = commands.execute(cmd_text, active_speak)
+
         is_thinking = False
         last_active_time = time.time()
-        
-        # После выполнения сбрасываем активность и восстанавливаем состояние
+
+        if should_sleep:
+            go_idle()
+            logging.info("[Сессия] Прощание. Уход в сон.")
+            return
+
+        # Быстрая команда не гасит сессию, если она уже была активна.
+        # Громкость плеера восстанавливаем только при уходе в idle.
         if is_quick:
-            is_active = False
-            status_queue.put("idle")
-            
-            # --- ЗАЩИТА: Не сбрасываем громкость плеера, если мы только что её настраивали ---
-            is_music_volume_cmd = any(w in cmd_text for w in ["громче", "тише", "громкость"]) and any(w in cmd_text for w in ["музыка", "музыку", "плеер"])
-            if not is_music_volume_cmd:
-                volume_ctrl.restore()
+            if was_active:
+                is_active = True
+                last_active_time = time.time()
+                if not is_speaking:
+                    status_queue.put("listening")
+            else:
+                is_active = False
+                status_queue.put("idle")
+                if not is_music_volume_command(cmd_text):
+                    volume_ctrl.restore()
         else:
             if not is_speaking:
                 status_queue.put("listening" if is_active else "idle")
-                
+
     threading.Thread(target=run, daemon=True).start()
 
 def timeout_monitor():
@@ -266,14 +337,12 @@ def timeout_monitor():
         # Проверяем тайм-аут, только если активны, НЕ говорим и НЕ ожидаем ответ от ИИ (заморозка таймера)
         if is_active and not is_speaking and not is_thinking:
             if time.time() - last_active_time > ATTENTION_TIMEOUT:
-                is_active = False
-                status_queue.put("idle")
+                go_idle()
                 logging.info("[Система] Время ожидания истекло. Возврат в спящий режим.")
-                volume_ctrl.restore()  # Восстанавливаем громкость музыки при сне
 
 def main():
     """Основной рабочий цикл ассистента"""
-    global is_active, last_active_time
+    global is_active, last_active_time, asked_to_repeat
 
     if not os.path.exists(MODEL_PATH):
         logging.critical(f"Папка с моделью Vosk не найдена по пути: {MODEL_PATH}")
@@ -289,8 +358,12 @@ def main():
     vosk_model = Model(MODEL_PATH)
     recognizer = KaldiRecognizer(vosk_model, SAMPLERATE)
     
-    logging.info(f"[Система] Ассистент готов. Позовите: {', '.join(WAKE_WORDS)}")
+    logging.info(
+        f"[Система] Ассистент готов. Позовите: {', '.join(WAKE_WORDS)}. "
+        f"Тайм-аут внимания: {ATTENTION_TIMEOUT:g} с."
+    )
     is_active = False
+    asked_to_repeat = False
     last_active_time = 0.0
 
     def safe_speak(text):
@@ -325,34 +398,31 @@ def main():
                 if not text:
                     continue
 
-                # Срочная остановка всегда в приоритете (гасит речь, loopback, audacious и Glava)
-                if "стоп" in text or "замолчи" in text:
-                    stop_speaking(to_idle=True)
-                    
-                    # Мягкое выключение Audacious и Glava через скрипт пользователя
-                    script_off = os.path.expanduser("~/.scripts/player_off.sh")
-                    if os.path.exists(script_off):
-                        subprocess.Popen(["systemd-run", "--user", "--scope", "bash", script_off], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    else:
-                        subprocess.Popen(["audtool", "--playback-stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        subprocess.Popen(["pkill", "audacious"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        subprocess.Popen(["pkill", "glava"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Сессионные команды: авария / сон / стоп TTS. «тишина» сюда не входит.
+                if is_emergency_stop(text):
+                    handle_emergency_stop(recognizer)
+                    continue
 
-                    subprocess.Popen(["pactl", "unload-module", "module-loopback"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    with recognizer_lock:
-                        recognizer.Reset()
-                    is_active = False
-                    volume_ctrl.restore()  # Восстанавливаем оригинальную громкость
+                if is_sleep_command(text):
+                    handle_sleep(recognizer)
+                    continue
+
+                if is_hold_interrupt(text):
+                    handle_hold_interrupt(recognizer)
                     continue
 
                 detected_wake_word = get_wake_word(text)
 
-                # Во время озвучки игнорируем любые фразы, кроме тех, что содержат имя активации
+                # Во время озвучки: wake всегда; без wake — только если сессия уже жива.
                 if is_speaking:
                     if detected_wake_word:
                         stop_speaking(to_idle=False)
                         is_active = True
-                        volume_ctrl.duck()  # Приглушаем при переактивации
+                        asked_to_repeat = False
+                        volume_ctrl.duck()
+                    elif is_active and not is_filler(text):
+                        stop_speaking(to_idle=False)
+                        keep_session_alive()
                     else:
                         continue
 
@@ -361,10 +431,21 @@ def main():
                     if detected_wake_word:
                         phrase = text.split(detected_wake_word, 1)[-1].strip()
                         if phrase:
-                            execute_command_async(phrase, safe_speak)
+                            if is_filler(phrase):
+                                if not asked_to_repeat:
+                                    asked_to_repeat = True
+                                    safe_speak("Повторите, пожалуйста")
+                                last_active_time = time.time()
+                            else:
+                                execute_command_async(phrase, safe_speak)
                         else:
                             safe_speak(random.choice(ACTIVATION_PHRASES))
                             last_active_time = time.time()
+                    elif is_filler(text):
+                        if not asked_to_repeat:
+                            asked_to_repeat = True
+                            safe_speak("Повторите, пожалуйста")
+                        last_active_time = time.time()
                     else:
                         execute_command_async(text, safe_speak)
 
@@ -372,27 +453,27 @@ def main():
                 else:
                     if detected_wake_word:
                         phrase = text.split(detected_wake_word, 1)[-1].strip()
-                        
-                        # Проверяем, является ли произнесенная фраза быстрой командой
-                        quick_triggers = [
-                            "громче", "тише", "громкость плюс", "громкость минус",
-                            "следующий", "предыдущий", "вперед", "назад", "дальше", "прошлый трек", "следующий трек", "трек",
-                            "пауза", "плей", "играй", "возобнови",
-                            "выключи музыку", "выруби музыку", "останови музыку", "тишина"
-                        ]
-                        is_quick_phrase = phrase and any(w in phrase for w in quick_triggers)
-                        
+
+                        is_quick_phrase = bool(phrase) and is_quick_command(phrase)
+
                         if is_quick_phrase:
-                            # Быстрая команда из сна выполняется без приглушения и без удержания активности
+                            # Быстрая команда из сна: без удержания сессии (is_active остаётся False)
                             execute_command_async(phrase, safe_speak)
                         else:
                             # Обычная команда — активируем ассистента и приглушаем звук плеера
                             is_active = True
-                            status_queue.put("listening")  
+                            asked_to_repeat = False
+                            status_queue.put("listening")
                             volume_ctrl.duck()
-                            
+
                             if phrase:
-                                execute_command_async(phrase, safe_speak)
+                                if is_filler(phrase):
+                                    if not asked_to_repeat:
+                                        asked_to_repeat = True
+                                        safe_speak("Повторите, пожалуйста")
+                                    last_active_time = time.time()
+                                else:
+                                    execute_command_async(phrase, safe_speak)
                             else:
                                 safe_speak(random.choice(ACTIVATION_PHRASES))
                                 last_active_time = time.time()
@@ -404,23 +485,20 @@ def main():
                 partial_text = partial_res.get("partial", "").lower().strip()
                 
                 if partial_text:
-                    if "стоп" in partial_text or "замолчи" in partial_text:
-                        stop_speaking(to_idle=True)
-                        
-                        # Мягкое выключение Audacious и Glava через скрипт пользователя
-                        script_off = os.path.expanduser("~/.scripts/player_off.sh")
-                        if os.path.exists(script_off):
-                            subprocess.Popen(["systemd-run", "--user", "--scope", "bash", script_off], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        else:
-                            subprocess.Popen(["audtool", "--playback-stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            subprocess.Popen(["pkill", "audacious"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            subprocess.Popen(["pkill", "glava"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    # Короткие обрывки — шум или эхо, не трогаем сессию
+                    if len(partial_text) < 4:
+                        continue
 
-                        subprocess.Popen(["pactl", "unload-module", "module-loopback"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        with recognizer_lock:
-                            recognizer.Reset()
-                        is_active = False
-                        volume_ctrl.restore()  # Восстанавливаем оригинальную громкость
+                    if is_emergency_stop(partial_text):
+                        handle_emergency_stop(recognizer)
+                        continue
+
+                    if is_sleep_command(partial_text):
+                        handle_sleep(recognizer)
+                        continue
+
+                    if is_hold_interrupt(partial_text):
+                        handle_hold_interrupt(recognizer)
                         continue
 
                     # Если ассистент говорит и услышал имя активации, мгновенно останавливаем речь
@@ -428,8 +506,9 @@ def main():
                     if is_speaking and detected_wake_word:
                         stop_speaking(to_idle=False)
                         is_active = True
+                        asked_to_repeat = False
                         status_queue.put("listening")
-                        volume_ctrl.duck()  # Приглушаем при переактивации
+                        volume_ctrl.duck()
                         continue
 
 if __name__ == "__main__":

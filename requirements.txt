@@ -7,4 +7,5 @@ groq
 opencv-python
 wikipedia-api
 requests
-aiohttp
+yeelight
+python-miio

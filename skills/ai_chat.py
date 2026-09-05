@@ -5,6 +5,7 @@ import datetime
 import logging
 import asyncio
 import re
+import threading
 from typing import Callable, List, Dict, Any
 
 from dotenv import load_dotenv
@@ -15,28 +16,31 @@ from skills.base import BaseSkill, RequestContext
 from groq import AsyncGroq
 
 SHARED_EVENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_events.json")
+_EVENTS_LOCK = threading.Lock()
+_HISTORY_LOCK = threading.Lock()
 
 
 def log_system_action(action_text: str) -> None:
     """Глобальная функция записи системных событий (атомарная запись)."""
-    events: List[Dict[str, Any]] = []
-    if os.path.exists(SHARED_EVENTS_PATH):
+    with _EVENTS_LOCK:
+        events: List[Dict[str, Any]] = []
+        if os.path.exists(SHARED_EVENTS_PATH):
+            try:
+                with open(SHARED_EVENTS_PATH, "r", encoding="utf-8") as f:
+                    events = json.load(f)
+            except Exception:
+                events = []
+
+        events.append({"time": time.time(), "action": action_text})
+        events = events[-5:]
+
+        temp_path = SHARED_EVENTS_PATH + ".tmp"
         try:
-            with open(SHARED_EVENTS_PATH, "r", encoding="utf-8") as f:
-                events = json.load(f)
-        except Exception:
-            events = []
-
-    events.append({"time": time.time(), "action": action_text})
-    events = events[-5:]
-
-    temp_path = SHARED_EVENTS_PATH + ".tmp"
-    try:
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(events, f, ensure_ascii=False, indent=2)
-        os.replace(temp_path, SHARED_EVENTS_PATH)
-    except Exception as e:
-        logging.error(f"[Events] Ошибка атомарной записи события: {e}")
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(events, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, SHARED_EVENTS_PATH)
+        except Exception as e:
+            logging.error(f"[Events] Ошибка атомарной записи события: {e}")
 
 
 class AIChatSkill(BaseSkill):
@@ -153,23 +157,25 @@ class AIChatSkill(BaseSkill):
                 pass
 
     def _get_recent_system_events(self) -> str:
-        if not os.path.exists(SHARED_EVENTS_PATH):
-            return ""
-        try:
-            with open(SHARED_EVENTS_PATH, "r", encoding="utf-8") as f:
-                events = json.load(f)
+        with _EVENTS_LOCK:
+            if not os.path.exists(SHARED_EVENTS_PATH):
+                return ""
+            try:
+                with open(SHARED_EVENTS_PATH, "r", encoding="utf-8") as f:
+                    events = json.load(f)
+            except Exception as e:
+                logging.error(f"[Groq] Ошибка чтения событий: {e}")
+                return ""
 
-            valid_events = []
-            current_time = time.time()
-            for ev in events:
-                if current_time - ev.get("time", 0) < 3600:
-                    dt = datetime.datetime.fromtimestamp(ev["time"])
-                    valid_events.append(f"[{dt.strftime('%H:%M')}] {ev['action']}")
+        valid_events = []
+        current_time = time.time()
+        for ev in events:
+            if current_time - ev.get("time", 0) < 3600:
+                dt = datetime.datetime.fromtimestamp(ev["time"])
+                valid_events.append(f"[{dt.strftime('%H:%M')}] {ev['action']}")
 
-            if valid_events:
-                return "\n[ФАКТЫ О ДЕЙСТВИЯХ ПОЛЬЗОВАТЕЛЯ]: " + ", ".join(valid_events)
-        except Exception as e:
-            logging.error(f"[Groq] Ошибка чтения событий: {e}")
+        if valid_events:
+            return "\n[ФАКТЫ О ДЕЙСТВИЯХ ПОЛЬЗОВАТЕЛЯ]: " + ", ".join(valid_events)
         return ""
 
     def _clean_tts_text(self, text: str) -> str:
@@ -214,7 +220,7 @@ class AIChatSkill(BaseSkill):
             context.speak("Извините, облачный модуль общения сейчас недоступен.")
             return
 
-        raw_text = getattr(context, "text", None) or getattr(context, "command", None) or getattr(context, "raw_text", "")
+        raw_text = context.raw_text
         text = str(raw_text).strip()
 
         if not text:
@@ -235,11 +241,13 @@ class AIChatSkill(BaseSkill):
 
     async def _async_execute(self, text: str, speak_func: Callable[[str], None]) -> None:
         current_time = time.time()
-        if current_time - self.last_interaction_time > 600:
-            self.reset_chat()
-
-        self.last_interaction_time = current_time
-        self.history.append({"role": "user", "content": text})
+        with _HISTORY_LOCK:
+            if current_time - self.last_interaction_time > 600:
+                self.reset_chat()
+            self.last_interaction_time = current_time
+            self.history.append({"role": "user", "content": text})
+            history_snapshot = list(self.history)
+            summary_snapshot = self.summary_text
 
         now = datetime.datetime.now()
         days_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
@@ -249,14 +257,14 @@ class AIChatSkill(BaseSkill):
             f"[СИСТЕМА: Время {now.strftime('%H:%M')}, {day_of_week}, {now.strftime('%d.%m.%Y')}. "
             "ПРАВИЛО: Сарказм, без markdown, без тегов think, только текст для синтезатора.]"
         )
-        if self.summary_text:
-            dynamic_system_message += f"\n[СЖАТАЯ ПАМЯТЬ БЕСЕДЫ: {self.summary_text}]"
+        if summary_snapshot:
+            dynamic_system_message += f"\n[СЖАТАЯ ПАМЯТЬ БЕСЕДЫ: {summary_snapshot}]"
 
         system_events = self._get_recent_system_events()
         if system_events:
             dynamic_system_message += system_events
 
-        messages_for_api = self.history.copy()
+        messages_for_api = history_snapshot
         messages_for_api.insert(-1, {"role": "system", "content": dynamic_system_message})
 
         try:
@@ -277,7 +285,8 @@ class AIChatSkill(BaseSkill):
                 logging.warning("[Groq] Пустой ответ после очистки.")
                 speak_func("Я затрудняюсь с ответом.")
 
-            self.history.append({"role": "assistant", "content": cleaned_reply})
+            with _HISTORY_LOCK:
+                self.history.append({"role": "assistant", "content": cleaned_reply})
             await self._summarize_and_trim_history()
             await self._save_history_async()
 

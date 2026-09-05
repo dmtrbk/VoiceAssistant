@@ -1,0 +1,19 @@
+#EXTM3U
+#EXTINF:-1,Радио Рекорд
+http://online.radiorecord.ru:8101/rr_128
+#EXTINF:-1,Европа Плюс
+http://ep128.hostingradio.ru:8030/ep128
+#EXTINF:-1,Дорожное Радио
+http://dorognoe.hostingradio.ru:8000/dorognoe
+#EXTINF:-1,Ретро ФМ
+http://retroserver.streamr.ru:8043/retro128
+#EXTINF:-1,Наше Радио
+http://nashe1.hostingradio.ru/nashe-128.mp3
+#EXTINF:-1,Наше Радио - Панки Хой!
+http://nashe1.hostingradio.ru/nashepunks.mp3
+#EXTINF:-1,Наше Радио - Щас Спою!
+http://nashe1.hostingradio.ru/nashesongs.mp3
+#EXTINF:-1,Вести ФМ
+http://icecast.vgtrk.cdnvideo.ru/vestifm_mp3_128kbps
+#EXTINF:-1,Радио Маяк
+http://icecast.vgtrk.cdnvideo.ru/mayakfm_mp3_128kbps

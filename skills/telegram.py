@@ -69,12 +69,13 @@ class TelegramSkill(BaseSkill):
         
         if is_close_command:
             context.speak("Закрываю Телеграм.")
-            # Мягко завершаем все возможные процессы Telegram в один вызов pkill
-            subprocess.Popen(
-                ["pkill", "-f", "-i", "telegram"], 
-                stdout=subprocess.DEVNULL, 
-                stderr=subprocess.DEVNULL
-            )
+            # comm в Linux — 15 символов, поэтому telegram-desktop обрезается.
+            for name in ("telegram-desktop", "telegram-deskto", "Telegram"):
+                subprocess.Popen(
+                    ["pkill", "-x", name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
         else:
             # Пытаемся автоматически найти способ запуска Telegram в системе
             cmd = self._find_telegram_cmd()
