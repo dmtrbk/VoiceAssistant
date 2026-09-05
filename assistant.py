@@ -58,7 +58,7 @@ from triggers import (
     is_filler,
 )
 
-WAKE_WORDS = ["алиса", "алис", "алисочка", "яндекс", "джарвис", "умник"]
+WAKE_WORDS = ["джарвис", "умник"]
 
 SAMPLERATE = 16000
 
@@ -270,20 +270,9 @@ def speak(text, recognizer=None):
         status_queue.put("listening" if is_active else "idle")
 
 def get_wake_word(text):
-    # Шаг 1: Нормализация типичных фонетических ошибок модели в имена активации
+    # Шаг 1: Нормализация типичных фонетических ошибок модели в имена активации (Джарвис / Умник)
     cleaned_text = (
-        text.replace("олиса", "алиса")
-        .replace("элиса", "алиса")
-        .replace("алисо", "алиса")
-        .replace("алису", "алиса")
-        .replace("алисе", "алиса")
-        .replace("алисой", "алиса")
-        .replace("алисия", "алиса")
-        .replace("алеся", "алиса")
-        .replace("алися", "алиса")
-        .replace("яндекса", "яндекс")
-        .replace("яндексу", "яндекс")
-        .replace("дарвис", "джарвис")
+        text.replace("дарвис", "джарвис")
         .replace("сервис", "джарвис")
         .replace("жарис", "джарвис")
         .replace("жарвис", "джарвис")
@@ -294,6 +283,7 @@ def get_wake_word(text):
         .replace("джарви", "джарвис")
         .replace("умника", "умник")
         .replace("умнику", "умник")
+        .replace("умником", "умник")
     )
     
     for word in WAKE_WORDS:
