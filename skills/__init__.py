@@ -1,17 +1,21 @@
 # skills/__init__.py
 
-from .system import SystemSkill        
+from .system import SystemSkill
 from .security import SecuritySkill
 from .ai_chat import AIChatSkill
 from .local_nlu import LocalNLUSkill
 from .datetime_skill import DateTimeSkill
 from .xiaomi_bulb import XiaomiBulbSkill
-from .audacious import AudaciousSkill        
-from .web_search import WebSearchSkill       
-from .maps_search import MapsSearchSkill  
+from .audacious import AudaciousSkill
+from .web_search import WebSearchSkill
+from .maps_search import MapsSearchSkill
 from .telegram import TelegramSkill
 from .restart import RestartSkill
 from .pentagon import PentagonSkill
+from .weather import WeatherSkill
+from .timer import TimerSkill
+from .calculator import CalculatorSkill
+from .jokes_facts import JokesAndFactsSkill
 
 system_skill = SystemSkill()
 security_skill = SecuritySkill()
@@ -25,13 +29,22 @@ maps_search_skill = MapsSearchSkill()
 telegram_skill = TelegramSkill()
 restart_skill = RestartSkill()
 pentagon_skill = PentagonSkill()
+weather_skill = WeatherSkill()
+timer_skill = TimerSkill()
+calculator_skill = CalculatorSkill()
+jokes_skill = JokesAndFactsSkill()
 
-# Узкие навыки раньше локального NLU и Groq, чтобы приветствие не перехватывало команды.
+# Приоритет навыков: специализированные узкие навыки обрабатываются первыми,
+# затем локальный NLU (приветствия, прощания), и в конце fallback — диалоговый ИИ Groq.
 ALL_SKILLS = [
     restart_skill,
     pentagon_skill,
     security_skill,
+    timer_skill,
+    calculator_skill,
+    weather_skill,
     datetime_skill,
+    jokes_skill,
     xiaomi_bulb_skill,
     audacious_skill,
     web_search_skill,

@@ -121,7 +121,7 @@ class SecuritySkill(BaseSkill):
         text = context.raw_text
         triggers = [
             "я ухожу", "включи охрану", "активируй охрану", "режим охраны",
-            "я пришел", "выключи охрану", "отключи охрану", "я дома", "ирина я тут"
+            "я пришел", "выключи охрану", "отключи охрану", "я дома", "джарвис я тут", "я тут"
         ]
         return any(w in text for w in triggers)
 
@@ -159,7 +159,7 @@ class SecuritySkill(BaseSkill):
                 self.surveillance_thread.start()
             return
 
-        if any(w in text for w in ["я пришел", "выключи охрану", "отключи охрану", "я дома", "ирина я тут"]):
+        if any(w in text for w in ["я пришел", "выключи охрану", "отключи охрану", "я дома", "джарвис я тут", "я тут"]):
             self.control_screens(True)
             
             if self.surveillance_thread is not None and self.surveillance_thread.is_alive():

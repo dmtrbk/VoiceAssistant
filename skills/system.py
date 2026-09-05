@@ -23,8 +23,12 @@ class SystemSkill(BaseSkill):
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
+
+        # Исключаем вопросы о личности ("кто ты", "кто ты такой", "ты кто"), чтобы они шли в NLU/диалог
+        is_identity = any(phrase in text for phrase in ["кто ты", "кто вы", "ты кто", "как тебя зовут"])
+        has_wiki = False if is_identity else any(w in text for w in ["википедия", "что такое", "кто такой", "кто такая"])
+
         triggers = [
-            "википедия", "что такое", "кто такой", "кто такая",
             "терминал", "файлы", "проводник", "настройки",
             "громче", "громкость плюс", "тише", "громкость минус",
             "ютуб", "youtube",
@@ -34,7 +38,7 @@ class SystemSkill(BaseSkill):
             "тик ток", "тиктоку", "tiktok", "шахматы", "chess"
         ]
         is_shutdown = any(w in text for w in ["выключ", "отключ"]) and any(w in text for w in ["компьютер", "пк"])
-        return any(w in text for w in triggers) or is_shutdown
+        return has_wiki or any(w in text for w in triggers) or is_shutdown
 
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()

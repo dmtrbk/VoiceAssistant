@@ -127,7 +127,7 @@ class XiaomiBulbSkill(BaseSkill):
         
         if not self.bulb_ip:
             context.speak(
-                "Чтобы я могла управлять лампочкой, пожалуйста, пропишите её айпи адрес "
+                "Чтобы я мог управлять лампочкой, пожалуйста, пропишите её айпи адрес "
                 "в файле .env в переменной XIAOMI_BULB_IP."
             )
             return
@@ -154,8 +154,8 @@ class XiaomiBulbSkill(BaseSkill):
                 log_system_action("Пользователь выключил умный свет")
                 context.speak(random.choice([
                     "Выключил свет. Теперь можно и отдохнуть в темноте.",
-                    "Потушила свет. Как скажете.",
-                    "Выключила лампу. Надеюсь, вы не споткнётесь в темноте.",
+                    "Потушил свет. Как скажете.",
+                    "Выключил лампу. Надеюсь, вы не споткнётесь в темноте.",
                     "Свет выключен."
                 ]))
                 return
@@ -164,9 +164,9 @@ class XiaomiBulbSkill(BaseSkill):
                 self._turn_on()
                 log_system_action("Пользователь включил умный свет")
                 context.speak(random.choice([
-                    "Включила свет. Да будет свет!",
+                    "Включил свет. Да будет свет!",
                     "Освещение включено. Так гораздо лучше.",
-                    "Зажгла лампу. Теперь всё видно.",
+                    "Зажёг лампу. Теперь всё видно.",
                     "Свет горит."
                 ]))
                 return
@@ -182,7 +182,7 @@ class XiaomiBulbSkill(BaseSkill):
                 if 1 <= val <= 100:
                     self._set_brightness(val)
                     log_system_action(f"Пользователь установил яркость света на {val} процентов")
-                    context.speak(f"Установила яркость лампочки на {val} процентов.")
+                    context.speak(f"Установил яркость лампочки на {val} процентов.")
                 else:
                     context.speak("Яркость можно установить только в диапазоне от одного до ста процентов.")
                 return
@@ -192,7 +192,7 @@ class XiaomiBulbSkill(BaseSkill):
                 new_bright = min(current_bright + 25, 100)
                 self._set_brightness(new_bright)
                 log_system_action(f"Пользователь сделал свет ярче, теперь яркость {new_bright} процентов")
-                context.speak(f"Сделала светлее. Сейчас яркость {new_bright} процентов.")
+                context.speak(f"Сделал светлее. Сейчас яркость {new_bright} процентов.")
                 return
 
             if any(w in text for w in ["тусклее", "убавь", "темнее", "потише"]):
@@ -200,11 +200,11 @@ class XiaomiBulbSkill(BaseSkill):
                 new_bright = max(current_bright - 25, 1)
                 self._set_brightness(new_bright)
                 log_system_action(f"Пользователь сделал свет тусклее, теперь яркость {new_bright} процентов")
-                context.speak(f"Сделала свет тусклее. Установила яркость на {new_bright} процентов.")
+                context.speak(f"Сделал свет тусклее. Установил яркость на {new_bright} процентов.")
                 return
 
             context.speak(
-                "Я поняла, что вы хотите настроить лампочку, но не поняла точную команду. "
+                "Я понял, что вы хотите настроить лампочку, но не понял точную команду. "
                 "Попробуйте сказать 'выключи свет' или 'яркость пятьдесят'."
             )
 

@@ -39,7 +39,8 @@ class WebSearchSkill(BaseSkill):
         # Триггеры для ИИ
         ai_triggers = [
             "включи ии", "открой ии", "запусти ии", "открой нейросеть", "нейросеть",
-            "открой алису", "включи алису", "открой джемини", "открой gemini", "включи gemini"
+            "открой нейросеть алиса", "включи нейросеть алиса", "открой яндекс алису",
+            "открой джемини", "открой gemini", "включи gemini"
         ]
         
         has_search = any(trigger in text for trigger in search_triggers)
@@ -58,9 +59,9 @@ class WebSearchSkill(BaseSkill):
             open_url("https://gemini.google.com")
             return
             
-        # Явный запрос на Алису
-        if any(w in text for w in ["алису", "алиса"]):
-            context.speak("Открываю нейросеть Алиса ИИ в браузере.")
+        # Явный запрос на веб-версию нейросети Алиса
+        if any(w in text for w in ["нейросеть алиса", "яндекс алис"]):
+            context.speak("Открываю веб-версию нейросети Алиса в браузере.")
             open_url("https://alice.yandex.ru")
             return
 

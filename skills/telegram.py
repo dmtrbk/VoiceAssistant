@@ -92,4 +92,4 @@ class TelegramSkill(BaseSkill):
                     "[Telegram] Не удалось обнаружить Telegram в системе. "
                     "Проверены: домашняя папка, PATH, flatpak, snap."
                 )
-                context.speak("Я не смогла найти установленный Телеграм в вашей системе.")
+                context.speak("Я не смог найти установленный Телеграм в вашей системе.")

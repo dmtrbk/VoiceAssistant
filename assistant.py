@@ -58,7 +58,7 @@ from triggers import (
     is_filler,
 )
 
-WAKE_WORDS = ["джарвис", "дарвис", "сервис", "жарис", "умник"]
+WAKE_WORDS = ["алиса", "алис", "алисочка", "яндекс", "джарвис", "умник"]
 
 SAMPLERATE = 16000
 
@@ -81,7 +81,8 @@ MODEL_PATH = os.path.join(BASE_DIR, "model")
 # Конфигурация Piper TTS
 PIPER_DIR = os.path.join(BASE_DIR, "piper")
 PIPER_EXE = os.path.join(PIPER_DIR, "piper")
-PIPER_MODEL = os.path.join(PIPER_DIR, "models", "ru_RU-dmitri-medium.onnx")
+PIPER_MODEL_NAME = os.getenv("PIPER_MODEL", "ru_RU-dmitri-medium.onnx")
+PIPER_MODEL = os.path.join(PIPER_DIR, "models", PIPER_MODEL_NAME)
 
 # Оптимизация дискового ввода-вывода (RAM-диск)
 if os.path.exists("/dev/shm"):
@@ -89,8 +90,8 @@ if os.path.exists("/dev/shm"):
 else:
     TEMP_AUDIO_PATH = os.path.join(BASE_DIR, "tts_output.wav")
 
-VOICE_SPEED = "0.95" 
-VOICE_SPEAKER = None 
+VOICE_SPEED = os.getenv("VOICE_SPEED", "1.0")
+VOICE_SPEAKER = os.getenv("VOICE_SPEAKER", None)
 
 audio_queue = queue.Queue()
 
@@ -111,14 +112,14 @@ last_speak_end_time = 0.0  # Время окончания речи (для за
 play_process = None  # Ссылка на текущий запущенный процесс воспроизведения paplay
 
 ACTIVATION_PHRASES = [
-    "Да, я слушаю.",
-    "На связи.",
-    "Да, повелитель.",
-    "Я тут.",
-    "Слушаю вас.",
+    "Да?",
+    "Слушаю вас",
+    "Я здесь",
+    "Тут я",
+    "На связи!",
     "Чем помочь?",
-    "Я готов.",
-    "Да-да!"
+    "Да-да, слушаю",
+    "Готов к работе"
 ]
 
 def clear_audio_queue():
@@ -269,8 +270,31 @@ def speak(text, recognizer=None):
         status_queue.put("listening" if is_active else "idle")
 
 def get_wake_word(text):
-    # Шаг 1: Нормализация типичных фонетических ошибок модели в слово "джарвис"
-    cleaned_text = text.replace("дарвис", "джарвис").replace("сервис", "джарвис").replace("жарис", "джарвис")
+    # Шаг 1: Нормализация типичных фонетических ошибок модели в имена активации
+    cleaned_text = (
+        text.replace("олиса", "алиса")
+        .replace("элиса", "алиса")
+        .replace("алисо", "алиса")
+        .replace("алису", "алиса")
+        .replace("алисе", "алиса")
+        .replace("алисой", "алиса")
+        .replace("алисия", "алиса")
+        .replace("алеся", "алиса")
+        .replace("алися", "алиса")
+        .replace("яндекса", "яндекс")
+        .replace("яндексу", "яндекс")
+        .replace("дарвис", "джарвис")
+        .replace("сервис", "джарвис")
+        .replace("жарис", "джарвис")
+        .replace("жарвис", "джарвис")
+        .replace("джарвиса", "джарвис")
+        .replace("джарвису", "джарвис")
+        .replace("джарвисе", "джарвис")
+        .replace("джарвисом", "джарвис")
+        .replace("джарви", "джарвис")
+        .replace("умника", "умник")
+        .replace("умнику", "умник")
+    )
     
     for word in WAKE_WORDS:
         if word in cleaned_text:
@@ -434,7 +458,7 @@ def main():
                             if is_filler(phrase):
                                 if not asked_to_repeat:
                                     asked_to_repeat = True
-                                    safe_speak("Повторите, пожалуйста")
+                                    safe_speak("Не расслышал, повторите, пожалуйста")
                                 last_active_time = time.time()
                             else:
                                 execute_command_async(phrase, safe_speak)
@@ -444,7 +468,7 @@ def main():
                     elif is_filler(text):
                         if not asked_to_repeat:
                             asked_to_repeat = True
-                            safe_speak("Повторите, пожалуйста")
+                            safe_speak("Не расслышал, повторите, пожалуйста")
                         last_active_time = time.time()
                     else:
                         execute_command_async(text, safe_speak)
@@ -470,7 +494,7 @@ def main():
                                 if is_filler(phrase):
                                     if not asked_to_repeat:
                                         asked_to_repeat = True
-                                        safe_speak("Повторите, пожалуйста")
+                                        safe_speak("Не расслышал, повторите, пожалуйста")
                                     last_active_time = time.time()
                                 else:
                                     execute_command_async(phrase, safe_speak)

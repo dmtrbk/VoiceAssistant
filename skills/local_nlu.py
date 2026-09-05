@@ -16,9 +16,7 @@ class LocalNLUSkill(BaseSkill):
         self.nlu_engine.train()
 
     def can_handle(self, context: RequestContext) -> bool:
-        if context.confidence <= 0.85:
-            return False
-        if context.intent not in self.nlu_engine.intents:
+        if not context.intent or context.intent not in self.nlu_engine.intents:
             return False
         examples = [
             example.lower().strip()
@@ -28,7 +26,9 @@ class LocalNLUSkill(BaseSkill):
         if not examples:
             return False
         text = context.raw_text.lower().strip()
-        return bool(get_close_matches(text, examples, n=1, cutoff=0.55))
+        if text in examples:
+            return True
+        return context.confidence >= 0.65 and bool(get_close_matches(text, examples, n=1, cutoff=0.55))
 
     def execute(self, context: RequestContext) -> None:
         intent = context.intent

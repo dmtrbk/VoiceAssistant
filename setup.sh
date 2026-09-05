@@ -43,7 +43,7 @@ ENV_EXAMPLE="$PROJECT_DIR/.env.example"
 if [ ! -f "$ENV_EXAMPLE" ]; then
     echo "[+] Создаю .env.example..."
     cat << 'EOF' > "$ENV_EXAMPLE"
-# Groq — облачный диалог (обязательно для навыка ИИ)
+# Groq — облачный диалог (обязательно для навыка ИИ, диалог в стиле Алисы)
 GROQ_API_KEY=
 GROQ_MODEL=groq/compound-mini
 
@@ -51,11 +51,18 @@ GROQ_MODEL=groq/compound-mini
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
+# Голос синтеза Piper TTS: ru_RU-dmitri-medium.onnx (мужской голос Дмитрия), ru_RU-ruslan-medium.onnx, ru_RU-irina-medium.onnx
+PIPER_MODEL=ru_RU-dmitri-medium.onnx
+VOICE_SPEED=1.0
+
+# Город по умолчанию для прогноза погоды
+DEFAULT_CITY=Москва
+
 # Лампа Xiaomi / Yeelight (опционально)
 XIAOMI_BULB_IP=
 XIAOMI_BULB_TOKEN=
 
-# Сессия внимания, секунды. Если переменная не задана, в коде используется 4.
+# Сессия внимания, секунды. По умолчанию 12.
 ATTENTION_TIMEOUT=12
 
 # Поиск и карты: yandex или google

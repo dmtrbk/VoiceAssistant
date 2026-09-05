@@ -1,23 +1,28 @@
-# Голосовой ассистент (Manjaro GNOME)
+# Голосовой ассистент «Джарвис» (Manjaro GNOME)
 
-Локальный голосовой ассистент для **Manjaro Linux** с сессией **GNOME**: распознавание **Vosk**, синтез **Piper TTS**, виджет-сфера на **PySide6**, плеер **Audacious**, локальный NLU и диалог через **Groq**.
+Локальный голосовой ассистент **Джарвис** для **Manjaro Linux** с сессией **GNOME**: оффлайн-распознавание речи **Vosk**, качественный мужской синтез речи **Piper TTS (Dmitri)**, диалоговые способности в живом и сообразительном стиле Алисы, интерактивный виджет-сфера на **PySide6**, плеер **Audacious**, локальный NLU и облачный диалоговый интеллект через **Groq**.
 
 Точка входа: `assistant.py` (микрофон + GUI + фоновый Telegram-слушатель). Команды из Telegram-бота обрабатывает тот же маршрутизатор, что и голос.
 
-**Среда разработки и поддержки:** Manjaro Linux, GNOME (обычно Wayland). Пакеты — `pacman` или `pamac`. Звук — PipeWire (`wpctl`). Служба — `systemd --user`. Установщик (`setup.sh`) рассчитан на эту связку.
+**Среда разработки и поддержки:** Manjaro Linux, GNOME (Wayland / XWayland). Пакеты — `pacman` или `pamac`. Звук — PipeWire (`wpctl`). Служба — `systemd --user`. Установщик (`setup.sh`) рассчитан на эту связку.
 
 ---
 
 ## Возможности
 
-- Активация по имени, сессия внимания с тайм-аутом из `.env`
-- Системная громкость (PipeWire / `wpctl`) отдельно от громкости плеера (`audtool`)
-- Музыка и радио через Audacious; приглушение плеера на время сессии (ducking до 20%)
-- Поиск в браузере, карты и маршруты (Яндекс по умолчанию)
-- Охрана: веб-камера, снимки в Telegram
-- Лампа Xiaomi / Yeelight
-- Перезапуск службы `voice-assistant.service`
-- Произвольные вопросы уходят в Groq, если узкий навык не сработал
+- **Личность и голос:** Мужской голос Piper (`ru_RU-dmitri-medium.onnx`), активация по имени «Джарвис» или «Умник», общение в мужском роде («рад», «понял», «сделал», «готов»), живой диалог в стиле Алисы (остроумие, сообразительность, лёгкая ирония).
+- **Сессия внимания (Attention Timeout):** После обращения ассистент слушает последующие команды без повторения имени (тайм-аут из `.env`, по умолчанию 12 с).
+- **Barge-in (Мгновенное перебивание):** Возможность прервать длинную речь ассистента именем или командами «стоп» / «замолчи» / «спать».
+- **Погода (Open-Meteo):** Точный прогноз на сегодня и завтра с деталями об осадках, зонте, ветре и температуре для любого города без обязательного API-ключа.
+- **Таймеры:** Фоновый отсчет времени («поставь таймер на 5 минут», «сколько осталось») с голосовым оповещением по окончании.
+- **Быстрый калькулятор:** Мгновенный расчет математических выражений, корней, степеней, процентов и словесных чисел без задержки на LLM.
+- **Развлечения:** Анекдоты, интересные факты, тосты, сказки, мудрые цитаты и комплименты.
+- **Музыка, радио и звуки природы:** Радиостанции (Рекорд, Европа Плюс, Дорожное, Наше и др.), звуки природы (шум дождя, лес, море, костер), локальная музыка из `~/Музыка`; автоматическое приглушение плеера (ducking до 20%) во время диалога.
+- **Поиск и карты:** Яндекс / Google Поиск, Яндекс / Google Карты и автоматическое построение маршрутов.
+- **Охрана:** Веб-камера, детекция движения через OpenCV, снимки тревоги в Telegram.
+- **Умный дом:** Лампы Xiaomi / Yeelight (включение, выключение, яркость прописью и цифрами).
+- **Системное управление:** Регулировка громкости PipeWire (`wpctl`), запуск/закрытие утилит (`htop`, `neofetch`, `gnome-system-monitor`), статьи Википедии.
+- **Диалог с памятью (Groq):** Свободное общение на любые темы с удержанием контекста и историей беседы.
 
 ---
 
@@ -25,74 +30,68 @@
 
 ```
 VoiceAssistant/
-├── assistant.py              # Оркестратор: Vosk, Piper, сессия, GUI
+├── assistant.py              # Оркестратор: Vosk, Piper (Dmitri), сессия, GUI
 ├── telegram_listener.py      # Входящие команды Telegram Bot API
-├── commands.py               # Маршрутизатор по навыкам
-├── triggers.py               # Общие фразы: стоп / замолчи / спать / тишина
+├── commands.py               # Маршрутизатор по цепочке навыков
+├── triggers.py               # Общие триггеры: стоп / замолчи / спать / тишина
 ├── player_control.py         # Старт/стоп Audacious и Glava, авария «стоп»
 ├── browser.py                # Открытие URL (Chrome, иначе xdg-open)
-├── volume_control.py         # Ducking громкости Audacious
-├── indicator.py              # Сфера статусов на PySide6
-├── nlu.py                    # TF-IDF + LogisticRegression
-├── intents.json              # greeting, farewell, coin
-├── setup.sh                  # Установка окружения и systemd
-├── requirements.txt
-├── .env.example
-├── .env                      # Секреты, не в git
+├── volume_control.py         # Ducking громкости Audacious (кэш на диске)
+├── indicator.py              # Интерактивная сфера статусов на PySide6
+├── nlu.py                    # TF-IDF + LogisticRegression на n-граммах
+├── intents.json              # Базовые интенты (приветствия, прощания, монетка, личность)
+├── setup.sh                  # Скрипт автоустановки окружения и systemd
+├── requirements.txt          # Python-зависимости
+├── .env.example              # Пример переменных окружения
+├── .env                      # Конфигурация и API-ключи (не в git)
 ├── model/                    # Модель Vosk (не в git)
-├── piper/                    # Бинарник Piper и .onnx (не в git)
+├── piper/                    # Бинарник Piper и .onnx модели (не в git)
 └── skills/
     ├── __init__.py           # Регистрация и порядок навыков
-    ├── restart.py
-    ├── pentagon.py           # cmatrix («пентагон» / «матрица»)
-    ├── security.py
-    ├── datetime_skill.py
-    ├── xiaomi_bulb.py
-    ├── audacious.py
-    ├── web_search.py
-    ├── maps_search.py
-    ├── telegram.py           # Приложение Telegram Desktop
-    ├── system.py
-    ├── local_nlu.py
-    └── ai_chat.py            # Groq, fallback в конце цепочки
+    ├── weather.py            # Погода и прогноз (Open-Meteo)
+    ├── timer.py              # Таймеры и будильники
+    ├── calculator.py         # Быстрый калькулятор и математика
+    ├── jokes_facts.py        # Анекдоты, факты, тосты, сказки, комплименты
+    ├── datetime_skill.py     # Дата, время, день недели
+    ├── audacious.py          # Музыка, радио и звуки природы
+    ├── web_search.py         # Поиск в интернете (Яндекс / Google)
+    ├── maps_search.py        # Карты и маршруты (Яндекс / Google Карты)
+    ├── xiaomi_bulb.py        # Умная лампа Xiaomi / Yeelight
+    ├── security.py           # Видеонаблюдение и тревожные снимки
+    ├── system.py             # Системные команды и утилиты
+    ├── restart.py            # Перезапуск службы
+    ├── pentagon.py           # Анимация cmatrix («пентагон» / «матрица»)
+    ├── telegram.py           # Запуск Telegram Desktop
+    ├── local_nlu.py          # Локальные быстрые ответы
+    └── ai_chat.py            # Groq (диалог в стиле Алисы, персона Джарвис)
 ```
-
-Каталога карточек навыков (SKILL_CARD) нет.
 
 ---
 
 ## Требования
 
-**ОС:** Manjaro Linux, сессия GNOME. Виджет-сфера рассчитан на XWayland в этой сессии.
+**ОС:** Manjaro Linux, сессия GNOME (Wayland / XWayland).
 
-**Системные пакеты (ядро, `pacman` / `pamac`):**
+**Системные пакеты (`pacman` / `pamac`):**
 
 - Python 3, `portaudio`, `alsa-utils`
 - PipeWire: `pipewire`, `pipewire-pulse`, `wireplumber` (`wpctl`), `libpulse` (`paplay`, `pactl`)
 - `audacious`, `audacious-plugins` (`audtool`)
 - `gnome-terminal`, `nautilus`, `gnome-system-monitor`, `htop`, `neofetch`
 - `cmatrix` (навык «пентагон»)
-- `tk` (чёрная заставка охраны)
-- `git`, `wget`, `unzip`, `libxcb`, `xorg-xhost`
+- `tk` (заставка режима охраны)
+- `git`, `wget`, `unzip`, `tar`, `libxcb`, `xorg-xhost`
 
-**По желанию (не из официального репозитория или не обязательны):**
+**Модели (скачиваются автоматически в `setup.sh`):**
 
-- Google Chrome (`google-chrome-stable`) — поиск и карты
-- `telegram-desktop` — голосовое «открой телеграм»
-- `glava` — визуализация; запускается из `~/.scripts/player_on.sh`, если скрипт есть
-
-**Модели (кладём в проект, в git не входят):**
-
-- Vosk: `model/` (например `vosk-model-small-ru-0.22`)
-- Piper: `piper/piper` и `piper/models/ru_RU-dmitri-medium.onnx`
-
-**Python:** зависимости из `requirements.txt` в `.venv`.
+- Vosk: `model/` (`vosk-model-small-ru-0.22`)
+- Piper TTS: `piper/piper` и `piper/models/ru_RU-dmitri-medium.onnx` (мужской голос Дмитрия)
 
 ---
 
 ## Установка
 
-### Автоматически
+### Автоматически (рекомендуется)
 
 ```bash
 cd ~/VoiceAssistant
@@ -100,9 +99,9 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-Скрипт ставит пакеты, создаёт `.venv`, ставит pip-зависимости, скачивает Vosk и Piper если их нет, пишет user-unit systemd, создаёт `.env` из `.env.example` **только если `.env` ещё нет**. Существующий `.env` не трогает.
+Скрипт установит системные пакеты, создаст `.venv`, установит pip-зависимости, скачает модели Vosk и Piper Dmitri, настроит user-unit systemd и создаст файл `.env`.
 
-Дальше заполните ключи в `.env` и запустите службу:
+После установки заполните ключи в `.env` и запустите службу:
 
 ```bash
 systemctl --user start voice-assistant.service
@@ -125,22 +124,19 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 cp -n .env.example .env
-# отредактируйте .env — ключи не коммить
+# Отредактируйте .env
 ```
 
-Модель Vosk (если папки `model/am` ещё нет):
-
+Загрузка моделей:
 ```bash
+# Модель Vosk
 mkdir -p model
 wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
 unzip vosk-model-small-ru-0.22.zip
-mv vosk-model-small-ru-0.22/* model/
+cp -a vosk-model-small-ru-0.22/. model/
 rm -rf vosk-model-small-ru-0.22 vosk-model-small-ru-0.22.zip
-```
 
-Piper (голос Dmitri Medium). Архив распаковывается во временную папку, содержимое копируется в `./piper` — так не затирается уже лежащая модель:
-
-```bash
+# Piper TTS (голос Dmitri)
 mkdir -p piper/models
 tmpdir="$(mktemp -d)"
 (
@@ -157,63 +153,32 @@ wget -O piper/models/ru_RU-dmitri-medium.onnx.json \
   https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx.json
 ```
 
-`setup.sh` делает ту же загрузку и пропускает её, если бинарник и `.onnx` уже есть.
-
 ---
 
 ## Переменные `.env`
 
-Имена и смысл. Значения-секреты в README и `.env.example` не пишутся.
-
-| Переменная | Назначение | Если не задана |
+| Переменная | Назначение | Значение по умолчанию |
 |---|---|---|
-| `GROQ_API_KEY` | Ключ Groq для диалога | Навык ИИ недоступен |
+| `GROQ_API_KEY` | API-ключ Groq для диалогового ИИ | `—` (модуль ИИ отключен) |
 | `GROQ_MODEL` | Модель Groq | `groq/compound-mini` |
-| `TELEGRAM_BOT_TOKEN` | Бот: команды и охрана | Слушатель не стартует |
-| `TELEGRAM_CHAT_ID` | Разрешённый чат | Слушатель не стартует |
-| `XIAOMI_BULB_IP` | IP лампы | Навык света попросит прописать IP |
-| `XIAOMI_BULB_TOKEN` | Токен miio; без него — протокол Yeelight | Yeelight по IP |
-| `ATTENTION_TIMEOUT` | Сколько секунд слушать после последней активности | **4** (в примере — **12**) |
-| `SEARCH_PROVIDER` | Поиск по умолчанию: `yandex` / `google` | `yandex` |
-| `MAPS_PROVIDER` | Карты: `yandex` / `google` | `yandex` |
-| `AI_PROVIDER` | «открой нейросеть»: `yandex` (Алиса) / `gemini` | `yandex` |
-
-`ATTENTION_TIMEOUT=12` — рекомендуемое значение в `.env.example`. Пока переменной нет, код берёт 4 секунды. Таймер не тикает, пока ассистент говорит или ждёт ответ Groq.
+| `TELEGRAM_BOT_TOKEN` | Токен Telegram-бота для команд и охраны | `—` (слушатель не стартует) |
+| `TELEGRAM_CHAT_ID` | Авторизованный Chat ID пользователя | `—` (слушатель не стартует) |
+| `XIAOMI_BULB_IP` | IP-адрес умной лампы | `—` |
+| `XIAOMI_BULB_TOKEN` | Токен miio (если пустой — протокол Yeelight) | `—` |
+| `ATTENTION_TIMEOUT` | Длительность сессии внимания в секундах | `12` |
+| `SEARCH_PROVIDER` | Поисковик: `yandex` или `google` | `yandex` |
+| `MAPS_PROVIDER` | Карты: `yandex` или `google` | `yandex` |
+| `AI_PROVIDER` | Браузерный ИИ по команде «открой нейросеть» | `yandex` (Алиса) |
+| `DEFAULT_CITY` | Город по умолчанию для прогноза погоды | `Москва` |
+| `PIPER_MODEL` | Имя .onnx файла голоса в `piper/models/` | `ru_RU-dmitri-medium.onnx` |
+| `VOICE_SPEED` | Скорость синтеза речи (1.0 = стандартная) | `1.0` |
 
 ---
 
-## systemd
+## Управление через systemd
 
-User-unit для сессии GNOME. Имя: `voice-assistant.service`  
+Служба: `voice-assistant.service`  
 Файл: `~/.config/systemd/user/voice-assistant.service`
-
-```ini
-[Unit]
-Description=Voice Assistant Service
-After=network.target sound.target pipewire.service graphical-session.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/real/VoiceAssistant
-ExecStart=/home/real/VoiceAssistant/.venv/bin/python assistant.py
-Restart=always
-RestartSec=3
-Environment=PYTHONUNBUFFERED=1
-Environment=LANG=ru_RU.UTF-8
-Environment=LC_ALL=ru_RU.UTF-8
-Environment=DISPLAY=:0
-Environment=WAYLAND_DISPLAY=wayland-0
-Environment=XDG_CURRENT_DESKTOP=GNOME
-Environment=DESKTOP_SESSION=gnome
-Environment=XDG_SESSION_TYPE=wayland
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-
-[Install]
-WantedBy=default.target
-```
-
-`setup.sh` подставляет фактический каталог проекта и UID вместо `1000`.
 
 ```bash
 systemctl --user daemon-reload
@@ -224,102 +189,21 @@ systemctl --user status voice-assistant.service
 journalctl --user -u voice-assistant.service -f
 ```
 
-Перезапуск голосом: «перезагрузись», «перезапустись», «рестарт» — внутри вызывается тот же `systemctl --user restart voice-assistant.service`.
-
-Виртуальное окружение — **`.venv`**, не `venv`.
+Перезапуск голосом: «перезагрузись», «перезапустись», «рестарт» — выполняет `systemctl --user restart voice-assistant.service`.
 
 ---
 
-## Плеер (опционально)
+## Основные команды
 
-Если есть `~/.scripts/player_on.sh` и `player_off.sh`, ассистент запускает их через `systemd-run --user --scope`. Иначе при остановке: `audtool --playback-stop` и точечный `pkill -x` для `audacious` / `glava`. Существующие скрипты установщик не перезаписывает.
+- **Активация:** «Джарвис» или «Умник».
+- **Сессия и прерывания:** «стоп» (аварийная остановка), «замолчи» (пауза речи), «спать» (уход в ожидание), «тишина» (стоп музыки).
+- **Погода:** «какая погода», «погода в Санкт-Петербурге», «будет ли дождь завтра».
+- **Таймеры:** «поставь таймер на 5 минут», «сколько осталось на таймере», «сбрось таймер».
+- **Калькулятор:** «сколько будет 25 умножить на 4», «корень из 144», «20 процентов от 500».
+- **Развлечения:** «расскажи анекдот», «интересный факт», «скажи тост», «расскажи сказку».
+- **Музыка и звуки:** «включи музыку», «включи радио Рекорд», «включи шум дождя», «пауза», «следующий трек».
+- **Поиск и карты:** «найди в интернете [запрос]», «где находится [адрес]», «как проехать до [место]».
+- **Охрана и умный дом:** «включи охрану», «джарвис я тут», «включи свет», «яркость 50».
+- **Свободный диалог:** любые вопросы, поддержание беседы, рассуждения через Groq LLM.
 
----
-
-## Как пользоваться
-
-**Имена активации:** «Джарвис», «Дарвис», «Сервис», «Жарис», «Умник».
-
-После имени можно сразу сказать команду. Пока сессия жива, следующие фразы можно без имени. По тайм-ауту — снова idle, громкость плеера возвращается.
-
-Быстрые команды (громкость, пауза, трек, «тишина») из сна **не удерживают** сессию.
-
-### Сессия и речь (важно не путать)
-
-| Фраза | Что происходит |
-|---|---|
-| **стоп** | Авария: гасит TTS, останавливает медиа и loopback, сессия в idle |
-| **замолчи**, **подожди**, **хватит говорить** | Стоп TTS, сессия жива, приглушение музыки не снимается |
-| **спать**, **отбой**, **все хватит** | Сессия в idle, громкость плеера назад, музыку не стопает |
-| **тишина**, **выключи музыку** | Только плеер (навык Audacious). Это не «замолчи» |
-
-Прощание NLU («пока», «до свидания», «выход») тоже уводит сессию в сон.
-
-### Громкость
-
-- **«громче» / «тише»** — системный sink, `wpctl` (+15% / −20%)
-- **«громче музыку» / «тише музыку»** (или «плеер») — громкость Audacious, шаг 15%
-
-Пока сессия активна, плеер приглушается до 20% и поднимается при уходе в idle. Команда громкости музыки из сна громкость не «восстанавливает» поверх вашего шага.
-
-### Система
-
-- «терминал», «файлы» / «проводник», «настройки»
-- «htop», «неофетч», «системный монитор», «ютуб», «тик ток», «шахматы»
-- «википедия …» / «что такое …»
-- «выключи компьютер» — повтор в течение 20 секунд
-
-### Музыка и радио
-
-- «включи музыку» — папка `~/Музыка` или `~/Music`
-- «пауза», «плей», «играй», «возобнови»
-- «следующий» / «предыдущий» трек
-- «что играет?»
-- «включи радио» или станцию: Рекорд, Европа Плюс, Дорожное, Ретро, Наше, Панки Хой, Щас Спою, Вести, Маяк
-
-### Поиск, карты, браузер
-
-- «погугли …», «найди в яндексе …», «найди в интернете …»
-- «открой браузер», «открой яндекс», «открой гугл»
-- «открой алису» / «открой gemini» / «открой нейросеть»
-- «где находится …», «найди на карте …»
-- «как проехать до …», «как пройти до …» (авто / пешком / транспорт / велосипед)
-
-### Охрана и свет
-
-- «включи охрану» / «я ухожу» — минута на выход, затем камера и фото в Telegram
-- «я пришел» / «отключи охрану» / «я дома»
-- «включи свет», «выключи свет», «яркость на 50», «ярче», «тусклее»
-
-### Прочее
-
-- «который час», «какое сегодня число»
-- «открой телеграм» / «закрой телеграм»
-- «пентагон» / «матрица» — полноэкранный `cmatrix`
-- «привет», «подбрось монетку» — локальный NLU
-- «забудь все» / «очисти память» — сброс истории Groq
-- Остальное — Groq (нужен `GROQ_API_KEY`)
-
-Текст в разрешённый Telegram-чат обрабатывается теми же навыками.
-
----
-
-## Отладка
-
-| Симптом | Что проверить |
-|---|---|
-| Служба не стартует | `journalctl --user -u voice-assistant.service -f` |
-| «Папка с моделью Vosk не найдена» | Каталог `model/` с `am/`, `graph/` |
-| «Исполняемый файл Piper не найден» | `piper/piper` и `piper/models/ru_RU-dmitri-medium.onnx` |
-| Нет ответа ИИ | `GROQ_API_KEY`, модель `GROQ_MODEL` |
-| Нет команд из Telegram | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
-| «громче» не работает | `wpctl`, PipeWire в сессии пользователя |
-| Музыка не приглушается | Audacious запущен, есть `audtool` |
-| Сфера не видна | `DISPLAY`, user-session systemd, не root-ssh |
-| Сессия слишком короткая | В `.env` задайте `ATTENTION_TIMEOUT=12` и перезапустите службу |
-
-Перезапуск после правок `.env` или кода:
-
-```bash
-systemctl --user restart voice-assistant.service
-```
+Полный список фраз и логика их обработки приведены в файле `commands.txt`.
