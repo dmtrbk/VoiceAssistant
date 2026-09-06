@@ -9,8 +9,6 @@
 from difflib import SequenceMatcher
 import re
 
-SELF_ECHO_MIN_RATIO = 0.72
-
 QUICK_TRIGGERS = [
     "громче",
     "тише",
@@ -171,7 +169,7 @@ def _last_sentence_raw(text: str) -> str:
 
 
 def is_self_echo(heard: str, spoken: str) -> bool:
-    """Похоже, что микрофон поймал только что озвученную фразу ассистента."""
+    """Колонки → микрофон → Groq. Не сравнивать со всем абзацем: Vosk коверкает, ловим хвост/последнюю фразу."""
     heard_n = normalize_utterance(heard)
     spoken_n = normalize_utterance(spoken)
     if not heard_n or not spoken_n:
@@ -180,33 +178,9 @@ def is_self_echo(heard: str, spoken: str) -> bool:
         return True
     if len(heard_n) >= 6 and heard_n in spoken_n:
         return True
-    if len(spoken_n) >= 6 and spoken_n in heard_n:
-        return True
-
-    heard_words = heard_n.split()
-    spoken_words = spoken_n.split()
-
-    # Кусок из 2+ слов подряд встречается в своей озвучке (хвостовой вопрос).
-    if len(heard_words) >= 2:
-        window = min(4, len(heard_words))
-        for size in range(window, 1, -1):
-            for i in range(len(heard_words) - size + 1):
-                phrase = " ".join(heard_words[i:i + size])
-                if size >= 3 and phrase in spoken_n:
-                    return True
-                if size == 2 and len(phrase) >= 10 and phrase in spoken_n:
-                    return True
-
     last_n = normalize_utterance(_last_sentence_raw(spoken))
-    if last_n and SequenceMatcher(None, heard_n, last_n).ratio() >= 0.55:
+    if last_n and len(heard_n) >= 6 and (heard_n in last_n or last_n in heard_n):
         return True
-    if last_n and len(heard_n) >= 6 and heard_n in last_n:
+    if last_n and SequenceMatcher(None, heard_n, last_n).ratio() >= 0.6:
         return True
-
-    if len(heard_words) >= 2 and len(spoken_words) >= 2:
-        tail_len = max(len(heard_words), min(12, len(spoken_words)))
-        tail = " ".join(spoken_words[-tail_len:])
-        if SequenceMatcher(None, heard_n, tail).ratio() >= 0.55:
-            return True
-
-    return SequenceMatcher(None, heard_n, spoken_n).ratio() >= SELF_ECHO_MIN_RATIO
+    return False

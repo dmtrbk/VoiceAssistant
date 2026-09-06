@@ -1,9 +1,10 @@
+# skills/ai_chat.py
+
 import os
 import json
 import time
 import datetime
 import logging
-import asyncio
 import re
 import threading
 from typing import Callable, List, Dict, Any
@@ -13,17 +14,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from skills.base import BaseSkill, RequestContext
-from groq import AsyncGroq
-from triggers import is_garbled_utterance, is_self_echo
+from groq import Groq
+from triggers import is_self_echo
 
 SHARED_EVENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_events.json")
 _EVENTS_LOCK = threading.Lock()
 _HISTORY_LOCK = threading.Lock()
 
-# Окно живого диалога: 45 минут тишины или до явной очистки памяти.
-HISTORY_TTL_SEC = 2700
-# Сколько последних реплик (user+assistant) держать целиком, плюс system.
-MAX_LIVE_MESSAGES = 12
+HISTORY_TTL_SEC = 2700  # 45 мин тишины — потом история сбрасывается
+MAX_LIVE_MESSAGES = 8  # только хвост диалога; LLM-выжимку убрали — она давала второй запрос Groq и держала lock
 
 
 def log_system_action(action_text: str) -> None:
@@ -54,7 +53,9 @@ class AIChatSkill(BaseSkill):
 
     def __init__(self):
         self.groq_api_key = os.getenv("GROQ_API_KEY")
-        self.groq_model = os.getenv("GROQ_MODEL", "groq/compound-mini")
+        # Чат, не агент: groq/compound* делают лишний круг и в логе Retrying + второй HTTP.
+        # Qwen 27B на этом аккаунте лучше для короткого русского, чем gpt-oss-20b; 120b медленнее для голоса.
+        self.groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.history_cache_path = os.path.join(base_dir, "chat_history_cache.json")
@@ -63,7 +64,6 @@ class AIChatSkill(BaseSkill):
         self.history: List[Dict[str, str]] = []
         self.last_interaction_time = time.time()
         self.persona_prompt = ""
-        self.summary_text = ""
         self.client = None
 
         self._load_persona()
@@ -73,10 +73,15 @@ class AIChatSkill(BaseSkill):
             return
 
         try:
-            self.client = AsyncGroq(api_key=self.groq_api_key)
-            self._load_history_sync()
+            # Синхронный Groq: execute и так в фоне. max_retries=0 — иначе ~0.4с Retrying до каждой реплики.
+            self.client = Groq(
+                api_key=self.groq_api_key,
+                max_retries=0,
+                timeout=8.0,
+            )
+            self._load_history()
         except Exception as e:
-            logging.error(f"[Groq] Ошибка инициализации AsyncGroq: {e}")
+            logging.error(f"[Groq] Ошибка инициализации Groq: {e}")
             self.client = None
 
     def _load_persona(self) -> None:
@@ -115,7 +120,12 @@ class AIChatSkill(BaseSkill):
     def _init_history_with_persona(self) -> None:
         self.history = [{"role": "system", "content": self.persona_prompt}]
 
-    def _load_history_sync(self) -> None:
+    def _trim_history(self) -> None:
+        overflow = len(self.history) - 1 - MAX_LIVE_MESSAGES
+        if overflow > 0:
+            self.history = [self.history[0]] + self.history[1 + overflow:]
+
+    def _load_history(self) -> None:
         if not os.path.exists(self.history_cache_path):
             self.reset_chat()
             return
@@ -127,7 +137,6 @@ class AIChatSkill(BaseSkill):
             if time.time() - cache_time < HISTORY_TTL_SEC:
                 self.last_interaction_time = cache_time
                 loaded = data.get("history", [])
-                self.summary_text = data.get("summary_text", "")
                 if loaded and loaded[0].get("role") == "system":
                     loaded[0] = {"role": "system", "content": self.persona_prompt}
                     self.history = loaded
@@ -135,31 +144,22 @@ class AIChatSkill(BaseSkill):
                     self.history = [{"role": "system", "content": self.persona_prompt}] + [
                         m for m in loaded if m.get("role") != "system"
                     ]
+                self._trim_history()
             else:
                 self.reset_chat()
         except Exception:
             self.reset_chat()
 
-    def _write_history_file(self) -> None:
+    def _save_history(self) -> None:
         data = {
             "last_interaction_time": self.last_interaction_time,
-            "summary_text": self.summary_text,
-            "history": self.history
+            "history": self.history,
         }
-        temp_path = self.history_cache_path + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(temp_path, self.history_cache_path)
-
-    def _save_history_sync(self) -> None:
         try:
-            self._write_history_file()
-        except Exception as e:
-            logging.error(f"[Groq] Ошибка сохранения истории: {e}")
-
-    async def _save_history_async(self) -> None:
-        try:
-            await asyncio.to_thread(self._write_history_file)
+            temp_path = self.history_cache_path + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, self.history_cache_path)
         except Exception as e:
             logging.error(f"[Groq] Ошибка сохранения истории: {e}")
 
@@ -177,22 +177,11 @@ class AIChatSkill(BaseSkill):
             self.last_interaction_time = current_time
             self.history.append({"role": "user", "content": user_text})
             self.history.append({"role": "assistant", "content": assistant_text})
-            overflow = len(self.history) - 1 - MAX_LIVE_MESSAGES
-            if overflow > 0:
-                dropped = self.history[1:1 + overflow]
-                self.history = [self.history[0]] + self.history[1 + overflow:]
-                dropped_text = " ".join(m.get("content", "") for m in dropped if m.get("content"))
-                if dropped_text:
-                    snippet = dropped_text[:240]
-                    if self.summary_text:
-                        self.summary_text = f"{self.summary_text} {snippet}".strip()
-                    else:
-                        self.summary_text = snippet
-            self._save_history_sync()
+            self._trim_history()
+            self._save_history()
 
     def reset_chat(self) -> None:
         self._init_history_with_persona()
-        self.summary_text = ""
         if os.path.exists(self.history_cache_path):
             try:
                 os.remove(self.history_cache_path)
@@ -218,7 +207,7 @@ class AIChatSkill(BaseSkill):
                 valid_events.append(f"[{dt.strftime('%H:%M')}] {ev['action']}")
 
         if valid_events:
-            return "\n[ФАКТЫ О ДЕЙСТВИЯХ ПОЛЬЗОВАТЕЛЯ]: " + ", ".join(valid_events)
+            return "\n[Недавние действия]: " + ", ".join(valid_events)
         return ""
 
     def _clean_tts_text(self, text: str) -> str:
@@ -230,61 +219,19 @@ class AIChatSkill(BaseSkill):
         return text.strip()
 
     def _clip_spoken_reply(self, text: str) -> str:
-        """Короткая озвучка без хвостового вопроса — длинный монолог кормит эхо в микрофон."""
+        """Модель игнорирует «коротко» в промпте. Длинный TTS = эхо в микрофон и самодиалог."""
         text = (text or "").strip()
         if not text:
             return text
         parts = [p.strip() for p in re.split(r"(?<=[.!?…])\s+", text) if p.strip()]
         if not parts:
             return text
-        kept = list(parts)
-        while len(kept) > 1 and kept[-1].endswith("?"):
-            kept.pop()
-        kept = kept[:2]
-        clipped = " ".join(kept)
+        while len(parts) > 1 and parts[-1].endswith("?"):
+            parts.pop()
+        clipped = " ".join(parts[:2])
         if len(clipped) > 280:
-            acc = []
-            total = 0
-            for part in kept:
-                extra = len(part) + (1 if acc else 0)
-                if total + extra > 280 and acc:
-                    break
-                acc.append(part)
-                total += extra
-            clipped = " ".join(acc) if acc else clipped[:280].rsplit(" ", 1)[0]
+            clipped = clipped[:280].rsplit(" ", 1)[0]
         return clipped.strip()
-
-    async def _summarize_and_trim_history(self) -> None:
-        if len(self.history) <= 1 + MAX_LIVE_MESSAGES:
-            return
-
-        keep = 10
-        messages_to_summarize = self.history[1:-keep]
-        if not messages_to_summarize:
-            return
-        dialogue_text = "\n".join([f"{m['role']}: {m['content']}" for m in messages_to_summarize])
-
-        prompt = (
-            "Собери факты из диалога для памяти голосового ассистента. "
-            "Кратко, по делу, на русском: тема, имена и предпочтения пользователя, "
-            "о чём договорились, важные детали. Без стиля и эмоций, без markdown. "
-            "Два-четыре коротких предложения.\n"
-        )
-        if self.summary_text:
-            prompt += f"Уже известные факты: {self.summary_text}\n"
-        prompt += f"Новые реплики:\n{dialogue_text}"
-
-        try:
-            summary_completion = await self.client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model=self.groq_model,
-                temperature=0.0,
-                max_tokens=250,
-            )
-            self.summary_text = summary_completion.choices[0].message.content.strip()
-            self.history = [self.history[0]] + self.history[-keep:]
-        except Exception:
-            self.history = [self.history[0]] + self.history[-MAX_LIVE_MESSAGES:]
 
     def can_handle(self, context: RequestContext) -> bool:
         return True
@@ -294,9 +241,7 @@ class AIChatSkill(BaseSkill):
             context.speak("Извините, облачный модуль общения сейчас недоступен.")
             return
 
-        raw_text = context.raw_text
-        text = str(raw_text).strip()
-
+        text = str(context.raw_text or "").strip()
         if not text:
             return
 
@@ -306,10 +251,6 @@ class AIChatSkill(BaseSkill):
             context.speak("Память очищена.")
             return
 
-        if is_garbled_utterance(text):
-            context.speak("Не расслышал, повторите, пожалуйста.")
-            return
-
         last_assistant = ""
         with _HISTORY_LOCK:
             for message in reversed(self.history):
@@ -317,51 +258,37 @@ class AIChatSkill(BaseSkill):
                     last_assistant = message["content"]
                     break
         if last_assistant and is_self_echo(text, last_assistant):
+            # Второй рубеж: Telegram сюда не попадает, голос иногда проскакивает после TTS.
             logging.info(f"[Groq] Похоже на эхо своей речи, пропускаю: '{text}'")
             return
 
-        # Безопасный неблокирующий запуск асинхронной логики
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._async_execute(text, context.speak))
-        except RuntimeError:
-            asyncio.run(self._async_execute(text, context.speak))
+        self._reply(text, context.speak)
 
-    async def _async_execute(self, text: str, speak_func: Callable[[str], None]) -> None:
-        current_time = time.time()
+    def _reply(self, text: str, speak_func: Callable[[str], None]) -> None:
         with _HISTORY_LOCK:
+            current_time = time.time()
             if current_time - self.last_interaction_time > HISTORY_TTL_SEC:
                 self.reset_chat()
             self.last_interaction_time = current_time
             self.history.append({"role": "user", "content": text})
-            history_snapshot = list(self.history)
-            summary_snapshot = self.summary_text
+            self._trim_history()
+            messages_for_api = list(self.history)
 
         now = datetime.datetime.now()
         days_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-        day_of_week = days_ru[now.weekday()]
-
-        dynamic_system_message = (
-            f"[Сейчас {now.strftime('%H:%M')}, {day_of_week}, {now.strftime('%d.%m.%Y')}.]"
-        )
-        if summary_snapshot:
-            dynamic_system_message += f"\n[Факты из беседы: {summary_snapshot}]"
-
-        system_events = self._get_recent_system_events()
-        if system_events:
-            dynamic_system_message += system_events
-
-        messages_for_api = history_snapshot
-        messages_for_api.insert(-1, {"role": "system", "content": dynamic_system_message})
+        extra = f"[Сейчас {now.strftime('%H:%M')}, {days_ru[now.weekday()]}, {now.strftime('%d.%m.%Y')}.]"
+        events = self._get_recent_system_events()
+        if events:
+            extra += events
+        messages_for_api.insert(-1, {"role": "system", "content": extra})
 
         try:
-            response = await self.client.chat.completions.create(
+            response = self.client.chat.completions.create(
                 messages=messages_for_api,
                 model=self.groq_model,
                 temperature=0.7,
                 max_tokens=120,
             )
-
             raw_reply = response.choices[0].message.content or ""
             cleaned_reply = self._clip_spoken_reply(self._clean_tts_text(raw_reply))
 
@@ -373,8 +300,8 @@ class AIChatSkill(BaseSkill):
 
             with _HISTORY_LOCK:
                 self.history.append({"role": "assistant", "content": cleaned_reply})
-            await self._summarize_and_trim_history()
-            await self._save_history_async()
+                self._trim_history()
+                self._save_history()
 
         except Exception as e:
             logging.error(f"[Groq] Ошибка запроса к API: {e}")
