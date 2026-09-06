@@ -1,11 +1,12 @@
 # commands.py
+# Сравнивать skill is ai_chat_skill, не isinstance. Неизвестное → Groq, не «не понял».
+# Мелкий разговор не в NLU. Follow-up ~90 с, только не-чат навык.
 
 import logging
 import threading
 import time
 from skills import ALL_SKILLS, local_nlu_skill, ai_chat_skill
 from skills.base import RequestContext
-from skills.ai_chat import AIChatSkill
 from triggers import is_filler, is_garbled_utterance, split_quick_compound
 
 _EXECUTE_LOCK = threading.Lock()
@@ -18,9 +19,7 @@ _last_skill_time = 0.0
 
 def execute(text: str, speak_callback) -> bool:
     """
-    Основной маршрутизатор команд.
-    Принимает текст от ассистента, обогащает его данными NLU (если возможно)
-    и передает по цепочке приоритетов в зарегистрированные навыки.
+    Маршрутизатор: NLU → узкие навыки → follow-up → Groq.
     Возвращает True, если сессию нужно усыпить (прощание).
     """
     text = text.lower().strip()
@@ -28,27 +27,15 @@ def execute(text: str, speak_callback) -> bool:
         return False
 
     with _EXECUTE_LOCK:
-        parts = split_quick_compound(text)
-        if len(parts) > 1:
-            logging.info(f"[Маршрутизатор] Составная команда: {parts}")
-            should_sleep = False
-            any_handled = False
-            for part in parts:
-                handled, sleep = _execute_locked(part, speak_callback)
-                any_handled = any_handled or handled
-                should_sleep = should_sleep or sleep
-            if not any_handled:
-                speak_callback("Извините, я не понял эту команду.")
-            return should_sleep
-        handled, should_sleep = _execute_locked(text, speak_callback)
-        if not handled:
-            speak_callback("Извините, я не понял эту команду.")
+        should_sleep = False
+        for part in split_quick_compound(text):
+            should_sleep = _execute_locked(part, speak_callback) or should_sleep
         return should_sleep
 
 
 def _remember_skill(skill) -> None:
     global _last_skill, _last_skill_time
-    if skill is None or isinstance(skill, AIChatSkill):
+    if skill is None or skill is ai_chat_skill:
         return
     if _last_skill is not None and _last_skill is not skill:
         try:
@@ -60,7 +47,7 @@ def _remember_skill(skill) -> None:
 
 
 def _followup_skill(context: RequestContext):
-    if _last_skill is None or isinstance(_last_skill, AIChatSkill):
+    if _last_skill is None or _last_skill is ai_chat_skill:
         return None
     if time.time() - _last_skill_time > _FOLLOWUP_TTL_SEC:
         return None
@@ -81,7 +68,7 @@ def _run_skill(skill, context: RequestContext) -> None:
 
 
 def _record_skill_exchange(skill, user_text: str, spoken: list[str]) -> None:
-    if isinstance(skill, AIChatSkill) or not spoken:
+    if skill is ai_chat_skill or not spoken:
         return
     reply = " ".join(part.strip() for part in spoken if part and str(part).strip())
     if not reply:
@@ -92,19 +79,15 @@ def _record_skill_exchange(skill, user_text: str, spoken: list[str]) -> None:
         logging.error(f"[Маршрутизатор] Не удалось записать реплику в память диалога: {e}")
 
 
-def _execute_locked(text: str, speak_callback) -> tuple[bool, bool]:
+def _execute_locked(text: str, speak_callback) -> bool:
     intent = ""
     confidence = 0.0
-    slots = {}
 
     try:
-        res = local_nlu_skill.nlu_engine.predict(text)
-        if isinstance(res, tuple) and len(res) >= 2 and res[0]:
-            intent, confidence = res[0], res[1]
-        elif isinstance(res, dict):
-            intent = res.get("intent", "")
-            confidence = res.get("confidence", 0.0)
-            slots = res.get("slots", {})
+        # NLUClassifier.predict → tuple, не dict.
+        predicted, predicted_conf = local_nlu_skill.nlu_engine.predict(text)
+        if predicted:
+            intent, confidence = predicted, predicted_conf
     except Exception as e:
         logging.error(f"[NLU] Не удалось классифицировать текст: {e}")
 
@@ -119,13 +102,12 @@ def _execute_locked(text: str, speak_callback) -> tuple[bool, bool]:
         raw_text=text,
         intent=intent,
         confidence=confidence,
-        slots=slots,
         speak=capturing_speak,
     )
 
     chosen = None
     for skill in ALL_SKILLS:
-        if isinstance(skill, AIChatSkill):
+        if skill is ai_chat_skill:
             continue
         try:
             accepts = skill.can_handle(context)
@@ -146,7 +128,7 @@ def _execute_locked(text: str, speak_callback) -> tuple[bool, bool]:
     if chosen is None:
         if is_garbled_utterance(text):
             speak_callback("Не расслышал, повторите, пожалуйста.")
-            return True, False
+            return False
         chosen = ai_chat_skill
 
     _run_skill(chosen, context)
@@ -156,4 +138,4 @@ def _execute_locked(text: str, speak_callback) -> tuple[bool, bool]:
     if not spoken and chosen is not ai_chat_skill:
         logging.info(f"[Маршрутизатор] Навык {chosen.__class__.__name__} не ответил вслух.")
 
-    return True, bool(context.should_sleep)
+    return bool(context.should_sleep)

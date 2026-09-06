@@ -5,6 +5,7 @@
 #   hold       «замолчи» и др.     — стоп TTS, сессия жива, музыка приглушена
 #   sleep      «спать» / «отбой»   — сессия в idle, громкость плеера назад
 #   media stop «тишина» и др.      — навык Audacious, не путать с hold
+# is_stop_command убран: это был алиас emergency. Не возвращать.
 
 from difflib import SequenceMatcher
 import re
@@ -95,11 +96,6 @@ def is_hold_interrupt(text: str) -> bool:
 
 def is_sleep_command(text: str) -> bool:
     return _contains_any(text, SLEEP_TRIGGERS)
-
-
-def is_stop_command(text: str) -> bool:
-    """Совместимость: только аварийный «стоп», без «замолчи»."""
-    return is_emergency_stop(text)
 
 
 def is_music_volume_command(text: str) -> bool:

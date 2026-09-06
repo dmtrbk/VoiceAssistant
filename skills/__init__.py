@@ -34,8 +34,8 @@ timer_skill = TimerSkill()
 calculator_skill = CalculatorSkill()
 jokes_skill = JokesAndFactsSkill()
 
-# Приоритет навыков: специализированные узкие навыки обрабатываются первыми,
-# затем локальный NLU (приветствия, прощания), и в конце fallback — диалоговый ИИ Groq.
+# Приоритет: узкие навыки, затем NLU (прощание / монетка), затем Groq.
+# Мелкий разговор (привет, как дела) не в NLU — его забирает Groq.
 ALL_SKILLS = [
     restart_skill,
     pentagon_skill,

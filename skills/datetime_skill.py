@@ -1,4 +1,5 @@
 # skills/datetime_skill.py
+# Триггеры — нормальный русский. Не возвращать опечатку «тоstatное время».
 
 from datetime import datetime
 from skills.base import BaseSkill, RequestContext
@@ -47,7 +48,7 @@ class DateTimeSkill(BaseSkill):
         triggers = [
             "сколько время", "сколько времени", "который час", "какое сегодня число",
             "какой день", "какое число", "текущее время", "подскажи время",
-            "тоstatное время", "какой день недели", "день недели", "какой месяц",
+            "какой день недели", "день недели", "какой месяц",
             "какой год", "сегодняшняя дата", "какая дата"
         ]
         return any(w in text for w in triggers)

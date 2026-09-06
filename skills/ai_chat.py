@@ -23,6 +23,135 @@ _HISTORY_LOCK = threading.Lock()
 
 HISTORY_TTL_SEC = 2700  # 45 мин тишины — потом история сбрасывается
 MAX_LIVE_MESSAGES = 8  # только хвост диалога; LLM-выжимку убрали — она давала второй запрос Groq и держала lock
+DAYS_RU = (
+    "понедельник", "вторник", "среда", "четверг",
+    "пятница", "суббота", "воскресенье",
+)
+
+# Qwen иногда говорит о себе как Алиса. «была/готова» без «я» не трогаем («это была шутка»).
+_SELF_FEM_PHRASES = (
+    ("рада помочь", "рад помочь"),
+    ("готова помочь", "готов помочь"),
+    ("рада слышать", "рад слышать"),
+    ("рада знакомству", "рад знакомству"),
+    ("могу быть полезна", "могу быть полезен"),
+    ("буду полезна", "буду полезен"),
+    ("голосовая помощница", "голосовой помощник"),
+    ("ваша помощница", "ваш помощник"),
+    ("ваша ассистентка", "ваш ассистент"),
+)
+_SELF_FEM_VERBS = (
+    ("попробовала", "попробовал"),
+    ("прислушалась", "прислушался"),
+    ("разобралась", "разобрался"),
+    ("остановилась", "остановился"),
+    ("попыталась", "попытался"),
+    ("дождалась", "дождался"),
+    ("извинилась", "извинился"),
+    ("убедилась", "убедился"),
+    ("включила", "включил"),
+    ("выключила", "выключил"),
+    ("запустила", "запустил"),
+    ("остановила", "остановил"),
+    ("проверила", "проверил"),
+    ("посмотрела", "посмотрел"),
+    ("услышала", "услышал"),
+    ("вспомнила", "вспомнил"),
+    ("поставила", "поставил"),
+    ("отправила", "отправил"),
+    ("получила", "получил"),
+    ("открыла", "открыл"),
+    ("закрыла", "закрыл"),
+    ("напомнила", "напомнил"),
+    ("подумала", "подумал"),
+    ("ответила", "ответил"),
+    ("сказала", "сказал"),
+    ("закончила", "закончил"),
+    ("пыталась", "пытался"),
+    ("ошиблась", "ошибся"),
+    ("начала", "начал"),
+    ("помогла", "помог"),
+    ("смогла", "смог"),
+    ("нашла", "нашёл"),
+    ("забыла", "забыл"),
+    ("хотела", "хотел"),
+    ("видела", "видел"),
+    ("слышала", "слышал"),
+    ("думала", "думал"),
+    ("решила", "решил"),
+    ("сделала", "сделал"),
+    ("поняла", "понял"),
+    ("могла", "мог"),
+    ("ждала", "ждал"),
+)
+_SELF_FEM_AFTER_YA = (
+    ("счастлива", "счастлив"),
+    ("согласна", "согласен"),
+    ("уверена", "уверен"),
+    ("должна", "должен"),
+    ("виновата", "виноват"),
+    ("свободна", "свободен"),
+    ("готова", "готов"),
+    ("занята", "занят"),
+    ("права", "прав"),
+    ("рада", "рад"),
+    ("была", "был"),
+    ("стала", "стал"),
+)
+
+
+def _match_case(src: str, dst: str) -> str:
+    if not src:
+        return dst
+    if src.isupper():
+        return dst.upper()
+    if src[0].isupper():
+        return dst[0].upper() + dst[1:]
+    return dst
+
+
+def _replace_words(text: str, pairs: tuple[tuple[str, str], ...]) -> str:
+    mapping = {fem: masc for fem, masc in pairs}
+    alt = "|".join(re.escape(fem) for fem, _ in sorted(pairs, key=lambda p: len(p[0]), reverse=True))
+
+    def repl(match: re.Match) -> str:
+        word = match.group(0)
+        return _match_case(word, mapping[word.lower()])
+
+    return re.sub(rf"(?i)(?<![А-Яа-яЁё])(?:{alt})(?![А-Яа-яЁё])", repl, text)
+
+
+def _fix_self_gender(text: str) -> str:
+    """Мужской род для реплик Джарвиса, если модель всё же ответила «поняла/готова»."""
+    if not text:
+        return text
+    original = text
+    for fem, masc in _SELF_FEM_PHRASES:
+        text = re.sub(re.escape(fem), lambda m, dst=masc: _match_case(m.group(0), dst), text, flags=re.IGNORECASE)
+    text = _replace_words(text, _SELF_FEM_VERBS)
+    ya_map = {fem: masc for fem, masc in _SELF_FEM_AFTER_YA}
+    ya_alt = "|".join(re.escape(fem) for fem, _ in sorted(_SELF_FEM_AFTER_YA, key=lambda p: len(p[0]), reverse=True))
+
+    def repl_ya(match: re.Match) -> str:
+        word = match.group(1)
+        return match.group(0)[: -len(word)] + _match_case(word, ya_map[word.lower()])
+
+    text = re.sub(rf"(?i)\bя\b(?:\s+[А-Яа-яЁё]+){{0,3}}\s+({ya_alt})\b", repl_ya, text)
+    text = re.sub(
+        rf"(?i)^({ya_alt})([.!?…]*)$",
+        lambda m: _match_case(m.group(1), ya_map[m.group(1).lower()]) + m.group(2),
+        text.strip(),
+    )
+    if text != original:
+        logging.info(f"[Groq] Поправил род: '{original}' → '{text}'")
+    return text
+
+
+def _write_json_atomic(path: str, data: Any, indent: int = 2) -> None:
+    temp_path = path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=indent)
+    os.replace(temp_path, path)
 
 
 def log_system_action(action_text: str) -> None:
@@ -38,12 +167,8 @@ def log_system_action(action_text: str) -> None:
 
         events.append({"time": time.time(), "action": action_text})
         events = events[-5:]
-
-        temp_path = SHARED_EVENTS_PATH + ".tmp"
         try:
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(events, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, SHARED_EVENTS_PATH)
+            _write_json_atomic(SHARED_EVENTS_PATH, events)
         except Exception as e:
             logging.error(f"[Events] Ошибка атомарной записи события: {e}")
 
@@ -85,9 +210,11 @@ class AIChatSkill(BaseSkill):
             self.client = None
 
     def _load_persona(self) -> None:
+        # Живой промпт — skills/persona_config.json; default ниже только если файла нет.
         default_persona = (
-            "Ты — Джарвис, голосовой ассистент. Говори о себе только в мужском роде: "
-            "понял, рад, сделал, готов, согласен.\n\n"
+            "Ты — Джарвис, мужчина, голосовой помощник. О себе только мужской род: "
+            "понял, рад, сделал, готов, согласен, уверен, должен. "
+            "Никогда не говори о себе в женском роде: не поняла, не рада, не готова, не сделала.\n\n"
             "Отвечай как в живом разговоре: 1–3 коротких предложения, простой русский, без канцелярита. "
             "Не используй штампы вроде «чем могу помочь», «я языковая модель», «как искусственный интеллект». "
             "Не остроумничай в каждой реплике. Не заканчивай реплику вопросом к пользователю — дождись, пока он сам скажет.\n\n"
@@ -100,10 +227,11 @@ class AIChatSkill(BaseSkill):
 
         if not os.path.exists(self.persona_config_path):
             try:
-                temp_path = self.persona_config_path + ".tmp"
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    json.dump({"persona_prompt": default_persona}, f, ensure_ascii=False, indent=4)
-                os.replace(temp_path, self.persona_config_path)
+                _write_json_atomic(
+                    self.persona_config_path,
+                    {"persona_prompt": default_persona},
+                    indent=4,
+                )
                 self.persona_prompt = default_persona
             except Exception:
                 self.persona_prompt = default_persona
@@ -124,6 +252,12 @@ class AIChatSkill(BaseSkill):
         overflow = len(self.history) - 1 - MAX_LIVE_MESSAGES
         if overflow > 0:
             self.history = [self.history[0]] + self.history[1 + overflow:]
+
+    def _touch_session(self) -> None:
+        now = time.time()
+        if now - self.last_interaction_time > HISTORY_TTL_SEC:
+            self.reset_chat()
+        self.last_interaction_time = now
 
     def _load_history(self) -> None:
         if not os.path.exists(self.history_cache_path):
@@ -156,10 +290,7 @@ class AIChatSkill(BaseSkill):
             "history": self.history,
         }
         try:
-            temp_path = self.history_cache_path + ".tmp"
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, self.history_cache_path)
+            _write_json_atomic(self.history_cache_path, data)
         except Exception as e:
             logging.error(f"[Groq] Ошибка сохранения истории: {e}")
 
@@ -171,10 +302,7 @@ class AIChatSkill(BaseSkill):
             return
 
         with _HISTORY_LOCK:
-            current_time = time.time()
-            if current_time - self.last_interaction_time > HISTORY_TTL_SEC:
-                self.reset_chat()
-            self.last_interaction_time = current_time
+            self._touch_session()
             self.history.append({"role": "user", "content": user_text})
             self.history.append({"role": "assistant", "content": assistant_text})
             self._trim_history()
@@ -266,17 +394,16 @@ class AIChatSkill(BaseSkill):
 
     def _reply(self, text: str, speak_func: Callable[[str], None]) -> None:
         with _HISTORY_LOCK:
-            current_time = time.time()
-            if current_time - self.last_interaction_time > HISTORY_TTL_SEC:
-                self.reset_chat()
-            self.last_interaction_time = current_time
+            self._touch_session()
             self.history.append({"role": "user", "content": text})
             self._trim_history()
             messages_for_api = list(self.history)
 
         now = datetime.datetime.now()
-        days_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-        extra = f"[Сейчас {now.strftime('%H:%M')}, {days_ru[now.weekday()]}, {now.strftime('%d.%m.%Y')}.]"
+        extra = (
+            f"[Сейчас {now.strftime('%H:%M')}, {DAYS_RU[now.weekday()]}, {now.strftime('%d.%m.%Y')}.] "
+            "О себе только мужской род."  # Qwen игнорирует персону; плюс _fix_self_gender до TTS.
+        )
         events = self._get_recent_system_events()
         if events:
             extra += events
@@ -290,7 +417,7 @@ class AIChatSkill(BaseSkill):
                 max_tokens=120,
             )
             raw_reply = response.choices[0].message.content or ""
-            cleaned_reply = self._clip_spoken_reply(self._clean_tts_text(raw_reply))
+            cleaned_reply = _fix_self_gender(self._clip_spoken_reply(self._clean_tts_text(raw_reply)))
 
             if cleaned_reply:
                 speak_func(cleaned_reply)

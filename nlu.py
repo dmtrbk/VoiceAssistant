@@ -4,6 +4,9 @@ import os
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
+# Только farewell/coin в intents.json. Приветствия и «как дела» — Groq.
+# predict всегда (intent|None, confidence). Не возвращать train_nlu_model / INTENTS.
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -63,12 +66,3 @@ class NLUClassifier:
         predicted_intent = self.classifier.classes_[max_idx]
 
         return predicted_intent, confidence
-
-# Функция обратной совместимости
-def train_nlu_model():
-    nlu = NLUClassifier()
-    if nlu.train():
-        return nlu.vectorizer, nlu.classifier
-    return None, None
-
-INTENTS = NLUClassifier().intents
