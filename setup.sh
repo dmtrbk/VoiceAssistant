@@ -169,26 +169,27 @@ fi
 echo "[+] Пишу $SERVICE_FILE ..."
 cat << EOF > "$SERVICE_FILE"
 [Unit]
-Description=Voice Assistant Service
+Description=Voice Assistant Service (Jarvis)
 After=network.target sound.target pipewire.service graphical-session.target
-
 [Service]
 Type=simple
 WorkingDirectory=$PROJECT_DIR
 ExecStart=$VENV_DIR/bin/python assistant.py
 Restart=always
 RestartSec=3
+# === НАСТРОЙКИ ===
 Environment=PYTHONUNBUFFERED=1
 Environment=LANG=ru_RU.UTF-8
 Environment=LC_ALL=ru_RU.UTF-8
+# Графика и рабочий стол
 Environment=DISPLAY=:0
 Environment=WAYLAND_DISPLAY=wayland-0
 Environment=XDG_CURRENT_DESKTOP=GNOME
 Environment=DESKTOP_SESSION=gnome
 Environment=XDG_SESSION_TYPE=wayland
+# Звук и сервисы
 Environment=XDG_RUNTIME_DIR=/run/user/$UID_NUM
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_NUM/bus
-
 [Install]
 WantedBy=default.target
 EOF

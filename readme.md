@@ -200,6 +200,33 @@ wget -O piper/models/ru_RU-dmitri-medium.onnx.json \
 Служба: `voice-assistant.service`  
 Файл: `~/.config/systemd/user/voice-assistant.service`
 
+```ini
+[Unit]
+Description=Voice Assistant Service (Jarvis)
+After=network.target sound.target pipewire.service graphical-session.target
+[Service]
+Type=simple
+WorkingDirectory=/home/real/VoiceAssistant
+ExecStart=/home/real/VoiceAssistant/.venv/bin/python assistant.py
+Restart=always
+RestartSec=3
+# === НАСТРОЙКИ ===
+Environment=PYTHONUNBUFFERED=1
+Environment=LANG=ru_RU.UTF-8
+Environment=LC_ALL=ru_RU.UTF-8
+# Графика и рабочий стол
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_CURRENT_DESKTOP=GNOME
+Environment=DESKTOP_SESSION=gnome
+Environment=XDG_SESSION_TYPE=wayland
+# Звук и сервисы
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+[Install]
+WantedBy=default.target
+```
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable voice-assistant.service
