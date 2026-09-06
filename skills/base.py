@@ -23,3 +23,11 @@ class BaseSkill:
     def execute(self, context: RequestContext) -> None:
         """Выполняет логику навыка."""
         raise NotImplementedError("Каждый навык должен реализовывать метод execute.")
+
+    def accepts_followup(self, context: RequestContext) -> bool:
+        """Короткая реплика вроде «а завтра?» или «ещё» после этого навыка."""
+        return False
+
+    def on_context_lost(self) -> None:
+        """Вызывается, когда маршрутизатор переключился на другой навык."""
+        return

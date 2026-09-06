@@ -91,6 +91,19 @@ def parse_duration_seconds(text: str) -> tuple[int, str]:
     return total_seconds, display_name
 
 
+def _parse_bare_minutes(text: str) -> tuple[int, str]:
+    """«пять» / «10» после вопроса «на какое время?» считаем минутами."""
+    match = re.search(r"\d+", text)
+    if match:
+        minutes = int(match.group(0))
+        if minutes > 0:
+            return minutes * 60, f"{minutes} {_plural(minutes, 'минуту', 'минуты', 'минут')}"
+    words_val = _words_to_number(text)
+    if words_val > 0:
+        return words_val * 60, f"{words_val} {_plural(words_val, 'минуту', 'минуты', 'минут')}"
+    return 0, ""
+
+
 def _words_to_number(words_str: str) -> int:
     tokens = words_str.split()
     current = 0
@@ -166,6 +179,7 @@ class TimerSkill(BaseSkill):
     def __init__(self):
         self.active_timers: List[ActiveTimer] = []
         self._lock = threading.Lock()
+        self._awaiting_duration = False
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
@@ -175,11 +189,18 @@ class TimerSkill(BaseSkill):
         ]
         return any(trigger in text for trigger in triggers)
 
+    def accepts_followup(self, context: RequestContext) -> bool:
+        return self._awaiting_duration
+
+    def on_context_lost(self) -> None:
+        self._awaiting_duration = False
+
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
 
         # 1. Отмена / сброс таймера
         if any(w in text for w in ["отмени", "сбрось", "выключи", "удали", "стоп", "останови", "закрой"]):
+            self._awaiting_duration = False
             with self._lock:
                 if not self.active_timers:
                     context.speak("У вас нет активных таймеров.")
@@ -205,9 +226,14 @@ class TimerSkill(BaseSkill):
 
         # 3. Установка нового таймера
         duration_sec, label = parse_duration_seconds(text)
+        if duration_sec <= 0 and self._awaiting_duration:
+            duration_sec, label = _parse_bare_minutes(text)
         if duration_sec <= 0:
+            self._awaiting_duration = True
             context.speak("На какое время поставить таймер?")
             return
+
+        self._awaiting_duration = False
 
         with self._lock:
             # Очищаем устаревшие таймеры

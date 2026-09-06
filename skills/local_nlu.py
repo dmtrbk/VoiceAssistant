@@ -28,7 +28,9 @@ class LocalNLUSkill(BaseSkill):
         text = context.raw_text.lower().strip()
         if text in examples:
             return True
-        return context.confidence >= 0.65 and bool(get_close_matches(text, examples, n=1, cutoff=0.55))
+        # Узкий классификатор (прощание / монетка): высокий порог, иначе мелкий
+        # разговор («как дела», «спасибо») ошибочно уйдёт в заготовку.
+        return context.confidence >= 0.8 and bool(get_close_matches(text, examples, n=1, cutoff=0.7))
 
     def execute(self, context: RequestContext) -> None:
         intent = context.intent

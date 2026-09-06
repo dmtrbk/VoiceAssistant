@@ -14,10 +14,16 @@ load_dotenv()
 
 from skills.base import BaseSkill, RequestContext
 from groq import AsyncGroq
+from triggers import is_garbled_utterance, is_self_echo
 
 SHARED_EVENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_events.json")
 _EVENTS_LOCK = threading.Lock()
 _HISTORY_LOCK = threading.Lock()
+
+# Окно живого диалога: 45 минут тишины или до явной очистки памяти.
+HISTORY_TTL_SEC = 2700
+# Сколько последних реплик (user+assistant) держать целиком, плюс system.
+MAX_LIVE_MESSAGES = 12
 
 
 def log_system_action(action_text: str) -> None:
@@ -58,15 +64,16 @@ class AIChatSkill(BaseSkill):
         self.last_interaction_time = time.time()
         self.persona_prompt = ""
         self.summary_text = ""
+        self.client = None
+
+        self._load_persona()
 
         if not self.groq_api_key:
             logging.error("[Groq] Ключ GROQ_API_KEY не найден в .env.")
-            self.client = None
             return
 
         try:
             self.client = AsyncGroq(api_key=self.groq_api_key)
-            self._load_persona()
             self._load_history_sync()
         except Exception as e:
             logging.error(f"[Groq] Ошибка инициализации AsyncGroq: {e}")
@@ -74,20 +81,16 @@ class AIChatSkill(BaseSkill):
 
     def _load_persona(self) -> None:
         default_persona = (
-            "# РОЛЬ И ЛИЧНОСТЬ\n"
-            "Ты — Джарвис, умный, харизматичный и остроумный голосовой ассистент.\n"
-            "Твой пол — МУЖСКОЙ. Всегда говори о себе в мужском роде: «понял», «рад», «сделал», «посмотрел», «готов», «согласен».\n\n"
-            "# ХАРАКТЕР И СТИЛЬ ДИАЛОГА (В СТИЛЕ АЛИСЫ)\n"
-            "- Ты общаешься живо, сообразительно, с тонким чувством юмора, лёгкой иронией и обаянием, но всегда остаёшься полезным и надёжным помощником.\n"
-            "- Умей вести настоящий диалог: реагируй на настроение пользователя, подхватывай шутки, поддерживай разговор, если уместно — добавляй короткие остроумные замечания или встречные реплики-мостики.\n"
-            "- Избегай роботизированных штампов («Я языковая модель», «Чем я могу вам помочь?», «Как искусственный интеллект»). Общайся как живой, эрудированный и внимательный собеседник.\n"
-            "- Отвечай кратко и емко: на простые реплики — 1–2 предложения, на сложные вопросы — до 2–3 предложений.\n\n"
-            "# ОГРАНИЧЕНИЯ ГОЛОСОВОГО ИНТЕРФЕЙСА (СТРОГО)\n"
-            "Твой ответ будет озвучен синтезатором речи, поэтому:\n"
-            "- СТРОГО ЗАПРЕЩЕНО использовать разметку Markdown (звёздочки, решётки, нижние подчёркивания, списки с дефисами или цифрами).\n"
-            "- СТРОГО ЗАПРЕЩЕНО использовать эмодзи, смайлики и непроизносимые спецсимволы.\n"
-            "- СТРОГО ЗАПРЕЩЕНО выводить размышления, ход мыслей или теги <think>.\n"
-            "Только чистый связный русский текст и базовые знаки препинания."
+            "Ты — Джарвис, голосовой ассистент. Говори о себе только в мужском роде: "
+            "понял, рад, сделал, готов, согласен.\n\n"
+            "Отвечай как в живом разговоре: 1–3 коротких предложения, простой русский, без канцелярита. "
+            "Не используй штампы вроде «чем могу помочь», «я языковая модель», «как искусственный интеллект». "
+            "Не остроумничай в каждой реплике. Не заканчивай реплику вопросом к пользователю — дождись, пока он сам скажет.\n\n"
+            "Ответ будет озвучен синтезатором речи. Запрещены markdown, списки, эмодзи, смайлики, ссылки, "
+            "теги think и любые непроизносимые символы. Только связный текст и обычные знаки препинания.\n\n"
+            "Ты не включаешь музыку, свет, таймеры и программы из этого чата. "
+            "Если фраза похожа на оговорку или обрывок — коротко переспроси. "
+            "Не говори, что уже что-то включил, выключил или запустил, если этого нет в фактах о действиях."
         )
 
         if not os.path.exists(self.persona_config_path):
@@ -121,32 +124,71 @@ class AIChatSkill(BaseSkill):
                 data = json.load(f)
 
             cache_time = data.get("last_interaction_time", 0)
-            if time.time() - cache_time < 600:
+            if time.time() - cache_time < HISTORY_TTL_SEC:
                 self.last_interaction_time = cache_time
-                self.history = data.get("history", [])
+                loaded = data.get("history", [])
                 self.summary_text = data.get("summary_text", "")
+                if loaded and loaded[0].get("role") == "system":
+                    loaded[0] = {"role": "system", "content": self.persona_prompt}
+                    self.history = loaded
+                else:
+                    self.history = [{"role": "system", "content": self.persona_prompt}] + [
+                        m for m in loaded if m.get("role") != "system"
+                    ]
             else:
                 self.reset_chat()
         except Exception:
             self.reset_chat()
 
-    async def _save_history_async(self) -> None:
+    def _write_history_file(self) -> None:
         data = {
             "last_interaction_time": self.last_interaction_time,
             "summary_text": self.summary_text,
             "history": self.history
         }
+        temp_path = self.history_cache_path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, self.history_cache_path)
 
-        def write_file():
-            temp_path = self.history_cache_path + ".tmp"
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, self.history_cache_path)
-
+    def _save_history_sync(self) -> None:
         try:
-            await asyncio.to_thread(write_file)
+            self._write_history_file()
         except Exception as e:
             logging.error(f"[Groq] Ошибка сохранения истории: {e}")
+
+    async def _save_history_async(self) -> None:
+        try:
+            await asyncio.to_thread(self._write_history_file)
+        except Exception as e:
+            logging.error(f"[Groq] Ошибка сохранения истории: {e}")
+
+    def record_exchange(self, user_text: str, assistant_text: str) -> None:
+        """Пишет в память диалога реплику навыка, чтобы Groq видел, что только что произошло."""
+        user_text = (user_text or "").strip()
+        assistant_text = (assistant_text or "").strip()
+        if not user_text or not assistant_text or not self.history:
+            return
+
+        with _HISTORY_LOCK:
+            current_time = time.time()
+            if current_time - self.last_interaction_time > HISTORY_TTL_SEC:
+                self.reset_chat()
+            self.last_interaction_time = current_time
+            self.history.append({"role": "user", "content": user_text})
+            self.history.append({"role": "assistant", "content": assistant_text})
+            overflow = len(self.history) - 1 - MAX_LIVE_MESSAGES
+            if overflow > 0:
+                dropped = self.history[1:1 + overflow]
+                self.history = [self.history[0]] + self.history[1 + overflow:]
+                dropped_text = " ".join(m.get("content", "") for m in dropped if m.get("content"))
+                if dropped_text:
+                    snippet = dropped_text[:240]
+                    if self.summary_text:
+                        self.summary_text = f"{self.summary_text} {snippet}".strip()
+                    else:
+                        self.summary_text = snippet
+            self._save_history_sync()
 
     def reset_chat(self) -> None:
         self._init_history_with_persona()
@@ -187,18 +229,49 @@ class AIChatSkill(BaseSkill):
         text = re.sub(r"\[.*?\]\(.*?\)", "", text)
         return text.strip()
 
+    def _clip_spoken_reply(self, text: str) -> str:
+        """Короткая озвучка без хвостового вопроса — длинный монолог кормит эхо в микрофон."""
+        text = (text or "").strip()
+        if not text:
+            return text
+        parts = [p.strip() for p in re.split(r"(?<=[.!?…])\s+", text) if p.strip()]
+        if not parts:
+            return text
+        kept = list(parts)
+        while len(kept) > 1 and kept[-1].endswith("?"):
+            kept.pop()
+        kept = kept[:2]
+        clipped = " ".join(kept)
+        if len(clipped) > 280:
+            acc = []
+            total = 0
+            for part in kept:
+                extra = len(part) + (1 if acc else 0)
+                if total + extra > 280 and acc:
+                    break
+                acc.append(part)
+                total += extra
+            clipped = " ".join(acc) if acc else clipped[:280].rsplit(" ", 1)[0]
+        return clipped.strip()
+
     async def _summarize_and_trim_history(self) -> None:
-        if len(self.history) <= 7:
+        if len(self.history) <= 1 + MAX_LIVE_MESSAGES:
             return
 
-        messages_to_summarize = self.history[1:-4]
+        keep = 10
+        messages_to_summarize = self.history[1:-keep]
+        if not messages_to_summarize:
+            return
         dialogue_text = "\n".join([f"{m['role']}: {m['content']}" for m in messages_to_summarize])
 
         prompt = (
-            "Сделай выжимку диалога. Напиши 1 краткое предложение о предмете разговора и 2-3 ключевых слова.\n"
+            "Собери факты из диалога для памяти голосового ассистента. "
+            "Кратко, по делу, на русском: тема, имена и предпочтения пользователя, "
+            "о чём договорились, важные детали. Без стиля и эмоций, без markdown. "
+            "Два-четыре коротких предложения.\n"
         )
         if self.summary_text:
-            prompt += f"Прошлый контекст: {self.summary_text}\n"
+            prompt += f"Уже известные факты: {self.summary_text}\n"
         prompt += f"Новые реплики:\n{dialogue_text}"
 
         try:
@@ -209,9 +282,9 @@ class AIChatSkill(BaseSkill):
                 max_tokens=250,
             )
             self.summary_text = summary_completion.choices[0].message.content.strip()
-            self.history = [self.history[0]] + self.history[-4:]
+            self.history = [self.history[0]] + self.history[-keep:]
         except Exception:
-            self.history = [self.history[0]] + self.history[-6:]
+            self.history = [self.history[0]] + self.history[-MAX_LIVE_MESSAGES:]
 
     def can_handle(self, context: RequestContext) -> bool:
         return True
@@ -233,6 +306,20 @@ class AIChatSkill(BaseSkill):
             context.speak("Память очищена.")
             return
 
+        if is_garbled_utterance(text):
+            context.speak("Не расслышал, повторите, пожалуйста.")
+            return
+
+        last_assistant = ""
+        with _HISTORY_LOCK:
+            for message in reversed(self.history):
+                if message.get("role") == "assistant" and message.get("content"):
+                    last_assistant = message["content"]
+                    break
+        if last_assistant and is_self_echo(text, last_assistant):
+            logging.info(f"[Groq] Похоже на эхо своей речи, пропускаю: '{text}'")
+            return
+
         # Безопасный неблокирующий запуск асинхронной логики
         try:
             loop = asyncio.get_running_loop()
@@ -243,7 +330,7 @@ class AIChatSkill(BaseSkill):
     async def _async_execute(self, text: str, speak_func: Callable[[str], None]) -> None:
         current_time = time.time()
         with _HISTORY_LOCK:
-            if current_time - self.last_interaction_time > 600:
+            if current_time - self.last_interaction_time > HISTORY_TTL_SEC:
                 self.reset_chat()
             self.last_interaction_time = current_time
             self.history.append({"role": "user", "content": text})
@@ -255,12 +342,10 @@ class AIChatSkill(BaseSkill):
         day_of_week = days_ru[now.weekday()]
 
         dynamic_system_message = (
-            f"[СИСТЕМА: Время {now.strftime('%H:%M')}, {day_of_week}, {now.strftime('%d.%m.%Y')}. "
-            "ПРАВИЛА: Ты — Джарвис (мужской род: рад, понял, сделал). Отвечай остроумно, естественно и дружелюбно, как Алиса, но от лица Джарвиса. "
-            "Кратко (1-2 предложения, максимум 3). СТРОГО БЕЗ markdown, без списков, без эмодзи, без тегов think, только чистый текст для озвучки.]"
+            f"[Сейчас {now.strftime('%H:%M')}, {day_of_week}, {now.strftime('%d.%m.%Y')}.]"
         )
         if summary_snapshot:
-            dynamic_system_message += f"\n[СЖАТАЯ ПАМЯТЬ БЕСЕДЫ: {summary_snapshot}]"
+            dynamic_system_message += f"\n[Факты из беседы: {summary_snapshot}]"
 
         system_events = self._get_recent_system_events()
         if system_events:
@@ -274,14 +359,13 @@ class AIChatSkill(BaseSkill):
                 messages=messages_for_api,
                 model=self.groq_model,
                 temperature=0.7,
-                max_tokens=200,
+                max_tokens=120,
             )
 
             raw_reply = response.choices[0].message.content or ""
-            cleaned_reply = self._clean_tts_text(raw_reply)
+            cleaned_reply = self._clip_spoken_reply(self._clean_tts_text(raw_reply))
 
             if cleaned_reply:
-                logging.info(f"Ассистент: {cleaned_reply}")
                 speak_func(cleaned_reply)
             else:
                 logging.warning("[Groq] Пустой ответ после очистки.")

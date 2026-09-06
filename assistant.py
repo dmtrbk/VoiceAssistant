@@ -57,6 +57,8 @@ from triggers import (
     is_sleep_command,
     is_music_volume_command,
     is_filler,
+    is_garbled_utterance,
+    is_self_echo,
 )
 
 WAKE_WORDS = ["джарвис", "умник"]
@@ -65,25 +67,25 @@ SAMPLERATE = 16000
 
 
 def _read_attention_timeout() -> float:
-    raw = os.getenv("ATTENTION_TIMEOUT", "12")
+    raw = os.getenv("ATTENTION_TIMEOUT", "6")
     try:
         value = float(raw)
         if value <= 0:
-            return 12.0
+            return 6.0
         return value
     except (TypeError, ValueError):
-        return 12.0
+        return 6.0
 
 
 def _read_attention_timeout_music() -> float:
-    raw = os.getenv("ATTENTION_TIMEOUT_MUSIC", "4")
+    raw = os.getenv("ATTENTION_TIMEOUT_MUSIC", "3")
     try:
         value = float(raw)
         if value <= 0:
-            return 4.0
+            return 3.0
         return value
     except (TypeError, ValueError):
-        return 4.0
+        return 3.0
 
 
 def _read_min_speech_rms() -> float:
@@ -132,7 +134,12 @@ is_active = False
 asked_to_repeat = False  # Один мягкий переспрос на сессию при междометии
 last_active_time = 0.0
 last_speak_end_time = 0.0  # Время окончания речи (для защиты от эхо)
+last_spoken_text = ""  # Последняя озвучка — чтобы не принять её за реплику пользователя
 play_process = None  # Ссылка на текущий запущенный процесс воспроизведения paplay
+
+# Хвост колонок после paplay и окно, в котором сравниваем STT со своей фразой.
+ECHO_TAIL_SEC = 2.2
+SELF_ECHO_WINDOW_SEC = ATTENTION_TIMEOUT
 
 ACTIVATION_PHRASES = [
     "Да?",
@@ -220,12 +227,14 @@ def handle_hold_interrupt(recognizer):
 def speak(text, recognizer=None):
     """Синтезирует аудио в файл на ОЗУ-диске и проигрывает его в асинхронном режиме."""
     global is_speaking, playback_interrupted, play_process, last_active_time, last_speak_end_time
+    global last_spoken_text
     if not text:
         return
     
     status_queue.put("speaking")
     is_speaking = True  
-    playback_interrupted = False  
+    playback_interrupted = False
+    last_spoken_text = text
     
     logging.info(f"Ассистент: {text}")
     try:
@@ -271,8 +280,9 @@ def speak(text, recognizer=None):
                     play_process.wait()
                 play_process = None
                 is_speaking = False
-                last_speak_end_time = time.time()  # Фиксируем точное время окончания воспроизведения
-                last_active_time = time.time()  # Тайм-аут внимания отсчитывается после конца фразы
+                last_speak_end_time = time.time()
+                last_active_time = time.time()
+                clear_audio_queue()
 
                 if recognizer:
                     with recognizer_lock:
@@ -291,6 +301,17 @@ def speak(text, recognizer=None):
         logging.error(f"Ошибка озвучки Piper TTS: {e}")
         is_speaking = False
         status_queue.put("listening" if is_active else "idle")
+
+def is_recent_self_echo(text: str) -> bool:
+    """Своя озвучка или её хвост с колонок — не команда."""
+    if not last_spoken_text or not text:
+        return False
+    if is_speaking:
+        return is_self_echo(text, last_spoken_text)
+    if time.time() - last_speak_end_time > SELF_ECHO_WINDOW_SEC:
+        return False
+    return is_self_echo(text, last_spoken_text)
+
 
 def get_wake_word(text):
     # Шаг 1: Нормализация типичных фонетических ошибок модели в имена активации (Джарвис / Умник)
@@ -434,9 +455,8 @@ def main():
             chunk_samples = np.frombuffer(data, dtype=np.int16)
             chunk_rms = float(np.sqrt(np.mean(chunk_samples.astype(np.float32) ** 2))) if len(chunk_samples) > 0 else 0.0
 
-            # --- ЗАЩИТА ОТ ЭХО (ШЛЕЙФА) ---
-            # Игнорируем входящие звуки в течение 0.2 сек после фразы (устраняет задержку перед ответом)
-            if time.time() - last_speak_end_time < 0.2:
+            # Игнорируем хвост колонок после своей озвучки, пока он не затихнет.
+            if time.time() - last_speak_end_time < ECHO_TAIL_SEC:
                 with recognizer_lock:
                     recognizer.Reset()
                 current_phrase_max_rms = 0.0
@@ -457,6 +477,8 @@ def main():
                 text = res.get("text", "").lower().strip()
                 if not text:
                     continue
+
+                logging.info(f"[Распознано] {text}")
 
                 detected_wake_word = get_wake_word(text)
 
@@ -481,17 +503,25 @@ def main():
                     handle_hold_interrupt(recognizer)
                     continue
 
-                # Во время озвучки: wake всегда; без wake — только если сессия уже жива.
+                echo_text = text
+                if detected_wake_word:
+                    echo_text = text.split(detected_wake_word, 1)[-1].strip()
+                if echo_text and is_recent_self_echo(echo_text):
+                    logging.info(f"[Аудиофильтр] Отсечено эхо своей речи: '{text}'")
+                    with recognizer_lock:
+                        recognizer.Reset()
+                    continue
+
+                # Во время озвучки перебивает только имя. Иначе колонки снова уходят в Groq.
                 if is_speaking:
                     if detected_wake_word:
                         stop_speaking(to_idle=False)
                         is_active = True
                         asked_to_repeat = False
                         volume_ctrl.duck()
-                    elif is_active and not is_filler(text):
-                        stop_speaking(to_idle=False)
-                        keep_session_alive()
                     else:
+                        with recognizer_lock:
+                            recognizer.Reset()
                         continue
 
                 # Работа в активном режиме
@@ -499,7 +529,7 @@ def main():
                     if detected_wake_word:
                         phrase = text.split(detected_wake_word, 1)[-1].strip()
                         if phrase:
-                            if is_filler(phrase):
+                            if is_filler(phrase) or is_garbled_utterance(phrase):
                                 if not asked_to_repeat:
                                     asked_to_repeat = True
                                     safe_speak("Не расслышал, повторите, пожалуйста")
@@ -509,7 +539,7 @@ def main():
                         else:
                             safe_speak(random.choice(ACTIVATION_PHRASES))
                             last_active_time = time.time()
-                    elif is_filler(text):
+                    elif is_filler(text) or is_garbled_utterance(text):
                         if not asked_to_repeat:
                             asked_to_repeat = True
                             safe_speak("Не расслышал, повторите, пожалуйста")
@@ -535,7 +565,7 @@ def main():
                             volume_ctrl.duck()
 
                             if phrase:
-                                if is_filler(phrase):
+                                if is_filler(phrase) or is_garbled_utterance(phrase):
                                     if not asked_to_repeat:
                                         asked_to_repeat = True
                                         safe_speak("Не расслышал, повторите, пожалуйста")

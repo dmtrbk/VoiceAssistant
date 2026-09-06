@@ -96,6 +96,7 @@ class WeatherSkill(BaseSkill):
     def __init__(self):
         self.default_city = os.getenv("DEFAULT_CITY", "Москва").strip()
         self._cached_coords = {}
+        self._last_city = None
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
@@ -109,6 +110,22 @@ class WeatherSkill(BaseSkill):
             "брать зонт", "осадки", "давление", "ветер на улице"
         ]
         return any(trigger in text for trigger in weather_triggers)
+
+    def accepts_followup(self, context: RequestContext) -> bool:
+        text = context.raw_text.lower().strip()
+        if any(w in text for w in [
+            "завтра", "сегодня", "послезавтра", "дождь", "зонт",
+            "осадки", "ветер", "градус"
+        ]):
+            return True
+        if re.search(r"\bтам\b", text):
+            return True
+        if text.startswith("а ") or text.startswith("а,"):
+            return True
+        for alias in CITY_ALIASES:
+            if re.search(rf"\b{re.escape(alias)}\b", text):
+                return True
+        return False
 
     def _extract_target_city(self, text: str) -> tuple[str, bool]:
         """Извлекает название города и признак запроса на завтра."""
@@ -134,7 +151,7 @@ class WeatherSkill(BaseSkill):
             if re.search(rf"\b{k}\b", text):
                 return v, is_tomorrow
 
-        return self.default_city, is_tomorrow
+        return (self._last_city or self.default_city), is_tomorrow
 
     def _get_coordinates(self, city_name: str) -> tuple[float, float, str] | None:
         """Получает координаты города через Open-Meteo Geocoding API."""
@@ -172,6 +189,7 @@ class WeatherSkill(BaseSkill):
                 return
 
         lat, lon, city_display_name = geo
+        self._last_city = city_display_name
 
         try:
             weather_url = "https://api.open-meteo.com/v1/forecast"

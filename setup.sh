@@ -63,8 +63,8 @@ XIAOMI_BULB_IP=
 XIAOMI_BULB_TOKEN=
 
 # Сессия внимания (в секундах) в тишине и при играющей музыке
-ATTENTION_TIMEOUT=12
-ATTENTION_TIMEOUT_MUSIC=4
+ATTENTION_TIMEOUT=6
+ATTENTION_TIMEOUT_MUSIC=3
 
 # Настройки приглушения музыки (Ducking) и фильтрации эхо колонок
 DUCKING_VOLUME=8

@@ -122,6 +122,15 @@ class XiaomiBulbSkill(BaseSkill):
         
         return has_keyword and has_action
 
+    def accepts_followup(self, context: RequestContext) -> bool:
+        text = context.raw_text.lower().strip()
+        actions = [
+            "включи", "выключи", "ярче", "тусклее", "яркость",
+            "прибавь", "убавь", "потуши", "зажги", "выруби", "погаси",
+            "светлее", "темнее"
+        ]
+        return any(act in text for act in actions)
+
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
         

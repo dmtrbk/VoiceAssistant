@@ -57,6 +57,11 @@ COMPLIMENTS = [
 class JokesAndFactsSkill(BaseSkill):
     """Фирменный навык развлечений Алисы: анекдоты, факты, тосты, сказки, комплименты."""
 
+    FOLLOWUP_HINTS = ("ещё", "еще", "другой", "другую", "посмешнее", "повтори")
+
+    def __init__(self):
+        self._last_kind = "joke"
+
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
         triggers = [
@@ -68,37 +73,40 @@ class JokesAndFactsSkill(BaseSkill):
         ]
         return any(trig in text for trig in triggers)
 
+    def accepts_followup(self, context: RequestContext) -> bool:
+        text = context.raw_text.lower().strip()
+        return any(hint in text for hint in self.FOLLOWUP_HINTS)
+
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
 
-        # 1. Анекдоты и шутки
         if any(w in text for w in ["анекдот", "шутк", "пошути", "рассмеши", "юмор"]):
-            context.speak(random.choice(JOKES))
-            return
+            kind = "joke"
+        elif any(w in text for w in ["факт", "интересн", "удиви"]):
+            kind = "fact"
+        elif "тост" in text:
+            kind = "toast"
+        elif any(w in text for w in ["цитат", "мудрост", "мудрая"]):
+            kind = "quote"
+        elif any(w in text for w in ["сказк", "истори"]):
+            kind = "tale"
+        elif any(w in text for w in ["комплимент", "похвали", "приятное"]):
+            kind = "compliment"
+        elif any(hint in text for hint in self.FOLLOWUP_HINTS):
+            kind = self._last_kind
+        else:
+            kind = "joke"
 
-        # 2. Факты
-        if any(w in text for w in ["факт", "интересн", "удиви"]):
+        self._last_kind = kind
+        if kind == "fact":
             context.speak(random.choice(FACTS))
-            return
-
-        # 3. Тосты
-        if "тост" in text:
+        elif kind == "toast":
             context.speak(random.choice(TOASTS))
-            return
-
-        # 4. Цитаты
-        if any(w in text for w in ["цитат", "мудрост", "мудрая"]):
+        elif kind == "quote":
             context.speak(random.choice(QUOTES))
-            return
-
-        # 5. Сказки
-        if any(w in text for w in ["сказк", "истори"]):
+        elif kind == "tale":
             context.speak(random.choice(FAIRYTALES))
-            return
-
-        # 6. Комплименты
-        if any(w in text for w in ["комплимент", "похвали", "приятное"]):
+        elif kind == "compliment":
             context.speak(random.choice(COMPLIMENTS))
-            return
-
-        context.speak(random.choice(JOKES))
+        else:
+            context.speak(random.choice(JOKES))
