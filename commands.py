@@ -4,7 +4,7 @@ import logging
 import threading
 from skills import ALL_SKILLS, local_nlu_skill
 from skills.base import RequestContext
-from triggers import is_filler
+from triggers import is_filler, split_quick_compound
 
 _EXECUTE_LOCK = threading.Lock()
 
@@ -21,10 +21,25 @@ def execute(text: str, speak_callback) -> bool:
         return False
 
     with _EXECUTE_LOCK:
-        return _execute_locked(text, speak_callback)
+        parts = split_quick_compound(text)
+        if len(parts) > 1:
+            logging.info(f"[Маршрутизатор] Составная команда: {parts}")
+            should_sleep = False
+            any_handled = False
+            for part in parts:
+                handled, sleep = _execute_locked(part, speak_callback)
+                any_handled = any_handled or handled
+                should_sleep = should_sleep or sleep
+            if not any_handled:
+                speak_callback("Извините, я не понял эту команду.")
+            return should_sleep
+        handled, should_sleep = _execute_locked(text, speak_callback)
+        if not handled:
+            speak_callback("Извините, я не понял эту команду.")
+        return should_sleep
 
 
-def _execute_locked(text: str, speak_callback) -> bool:
+def _execute_locked(text: str, speak_callback) -> tuple[bool, bool]:
     intent = ""
     confidence = 0.0
     slots = {}
@@ -67,7 +82,6 @@ def _execute_locked(text: str, speak_callback) -> bool:
         break
 
     if not handled:
-        logging.info("[Маршрутизатор] Ни один навык не смог обработать команду.")
-        speak_callback("Извините, я не понял эту команду.")
+        logging.info(f"[Маршрутизатор] Ни один навык не взял фразу: '{text}'")
 
-    return bool(context.should_sleep)
+    return handled, bool(context.should_sleep)

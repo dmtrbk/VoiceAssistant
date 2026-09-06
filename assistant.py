@@ -366,6 +366,17 @@ def execute_command_async(cmd_text, safe_speak_func):
 
     threading.Thread(target=run, daemon=True).start()
 
+def is_music_leak(phrase_rms: float, detected_wake_word: str | None) -> bool:
+    """Тихая фраза без имени активации на фоне музыки — скорее всего текст песни из колонок."""
+    if MIN_SPEECH_RMS <= 0:
+        return False
+    if detected_wake_word:
+        return False
+    if not volume_ctrl.is_ducked_or_playing():
+        return False
+    return phrase_rms < MIN_SPEECH_RMS
+
+
 def timeout_monitor():
     """Фоновый мониторинг времени ожидания команды с учетом воспроизведения музыки."""
     global is_active, is_speaking, is_thinking, last_active_time
@@ -419,10 +430,9 @@ def main():
         while True:
             data = audio_queue.get()
 
-            # Вычисляем уровень энергии текущего аудио-фрейма
+            # Уровень энергии текущего аудио-фрейма
             chunk_samples = np.frombuffer(data, dtype=np.int16)
             chunk_rms = float(np.sqrt(np.mean(chunk_samples.astype(np.float32) ** 2))) if len(chunk_samples) > 0 else 0.0
-            current_phrase_max_rms = max(current_phrase_max_rms, chunk_rms)
 
             # --- ЗАЩИТА ОТ ЭХО (ШЛЕЙФА) ---
             # Игнорируем входящие звуки в течение 0.2 сек после фразы (устраняет задержку перед ответом)
@@ -438,13 +448,24 @@ def main():
                 is_accepted = recognizer.AcceptWaveform(data)
 
             if is_accepted:
-                phrase_rms = current_phrase_max_rms
+                # Последний чанк фразы тоже входит в оценку громкости
+                phrase_rms = max(current_phrase_max_rms, chunk_rms)
                 current_phrase_max_rms = 0.0
 
                 with recognizer_lock:
                     res = json.loads(recognizer.Result())
                 text = res.get("text", "").lower().strip()
                 if not text:
+                    continue
+
+                detected_wake_word = get_wake_word(text)
+
+                # Фильтр до сессионных команд: иначе «стоп» из текста песни гасит медиа.
+                if is_music_leak(phrase_rms, detected_wake_word):
+                    logging.info(
+                        f"[Аудиофильтр] Отсечена фоновая музыка из колонок "
+                        f"(RMS: {phrase_rms:.1f} < {MIN_SPEECH_RMS:g}). Текст: '{text}'"
+                    )
                     continue
 
                 # Сессионные команды: авария / сон / стоп TTS. «тишина» сюда не входит.
@@ -459,17 +480,6 @@ def main():
                 if is_hold_interrupt(text):
                     handle_hold_interrupt(recognizer)
                     continue
-
-                detected_wake_word = get_wake_word(text)
-
-                # --- ФИЛЬТРАЦИЯ УТЕЧКИ МУЗЫКИ ИЗ КОЛОНОК ---
-                # Если музыка играет/приглушена, а распознана фраза без wake-word с низкой амплитудой (фон колонок)
-                if is_active and not detected_wake_word and MIN_SPEECH_RMS > 0 and volume_ctrl.is_ducked_or_playing():
-                    if phrase_rms < MIN_SPEECH_RMS:
-                        logging.info(
-                            f"[Аудиофильтр] Отсечена тихая фоновая музыка из колонок (RMS: {phrase_rms:.1f} < {MIN_SPEECH_RMS:g}). Текст: '{text}'"
-                        )
-                        continue
 
                 # Во время озвучки: wake всегда; без wake — только если сессия уже жива.
                 if is_speaking:
@@ -543,8 +553,15 @@ def main():
                 partial_text = partial_res.get("partial", "").lower().strip()
                 
                 if partial_text:
+                    # Копим RMS только пока Vosk видит речь, а не паузы и музыку между фразами
+                    current_phrase_max_rms = max(current_phrase_max_rms, chunk_rms)
+
                     # Короткие обрывки — шум или эхо, не трогаем сессию
                     if len(partial_text) < 4:
+                        continue
+
+                    detected_wake_word = get_wake_word(partial_text)
+                    if is_music_leak(current_phrase_max_rms, detected_wake_word):
                         continue
 
                     if is_emergency_stop(partial_text):
@@ -560,7 +577,6 @@ def main():
                         continue
 
                     # Если ассистент говорит и услышал имя активации, мгновенно останавливаем речь
-                    detected_wake_word = get_wake_word(partial_text)
                     if is_speaking and detected_wake_word:
                         stop_speaking(to_idle=False)
                         is_active = True
@@ -568,6 +584,8 @@ def main():
                         status_queue.put("listening")
                         volume_ctrl.duck()
                         continue
+                else:
+                    current_phrase_max_rms = 0.0
 
 if __name__ == "__main__":
     import signal

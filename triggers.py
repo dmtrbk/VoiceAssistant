@@ -40,7 +40,17 @@ HOLD_TRIGGERS = ["замолчи", "подожди", "хватит говори�
 # Уснуть. Не использовать голое «выключись» — путается с «выключи» у Audacious/System.
 SLEEP_TRIGGERS = ["спать", "отбой", "все хватит"]
 
-MUSIC_VOLUME_HINTS = ["музыка", "музыку", "музыки", "плеер", "плеера", "плеере"]
+MUSIC_VOLUME_HINTS = [
+    "музыка", "музыку", "музыки", "плеер", "плеера", "плеере",
+    "трек", "трека", "песн", "радио",
+]
+
+_COMPOUND_SPLIT = re.compile(r"\s+(?:и|а также|потом|затем)\s+")
+
+MEDIA_CONTROL_HINTS = [
+    "следующий", "предыдущий", "вперед", "назад", "дальше",
+    "трек", "пауза", "плей", "играй", "возобнови", "тишина",
+]
 
 FILLER_PHRASES = {
     "а",
@@ -96,6 +106,34 @@ def is_music_volume_command(text: str) -> bool:
     has_volume = any(word in lowered for word in ["громче", "тише", "громкость"])
     has_music = any(word in lowered for word in MUSIC_VOLUME_HINTS)
     return has_volume and has_music
+
+
+def is_bare_volume_command(text: str) -> bool:
+    lowered = normalize_utterance(text)
+    has_volume = any(word in lowered for word in ["громче", "тише", "громкость"])
+    return has_volume and not is_music_volume_command(lowered)
+
+
+def is_media_control_command(text: str) -> bool:
+    return _contains_any(text, MEDIA_CONTROL_HINTS)
+
+
+def split_quick_compound(text: str) -> list[str]:
+    """
+    Делит «следующий трек и сделай громче» на отдельные быстрые команды.
+    Если в связке есть управление треком и голое «громче», громкость относится к плееру.
+    """
+    lowered = normalize_utterance(text)
+    parts = [part.strip() for part in _COMPOUND_SPLIT.split(lowered) if part.strip()]
+    if len(parts) < 2 or not all(is_quick_command(part) for part in parts):
+        return [lowered]
+
+    if any(is_media_control_command(part) for part in parts):
+        parts = [
+            f"{part} музыку" if is_bare_volume_command(part) else part
+            for part in parts
+        ]
+    return parts
 
 
 def is_filler(text: str) -> bool:

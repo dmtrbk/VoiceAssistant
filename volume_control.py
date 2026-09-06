@@ -5,6 +5,7 @@ import json
 import subprocess
 import logging
 import threading
+import time
 
 
 def _read_ducking_volume() -> int:
@@ -46,6 +47,8 @@ class VolumeController:
         # Режим приглушения: "duck" (убавить громкость) или "pause" (временно поставить на паузу)
         self.mode = os.getenv("DUCKING_MODE", "duck").lower().strip()
         self._paused_by_ducking = False
+        self._playback_cache = False
+        self._playback_cache_ts = 0.0
 
         with self.lock:
             self._original_volume = self._load_cache()
@@ -83,7 +86,12 @@ class VolumeController:
             logging.error(f"[Volume] Ошибка записи кэша громкости на диск: {e}")
 
     def is_playback_active(self) -> bool:
-        """Проверяет, играет ли сейчас трек в Audacious."""
+        """Проверяет, играет ли сейчас трек в Audacious. Результат кэшируется на 0.6 с."""
+        now = time.time()
+        if now - self._playback_cache_ts < 0.6:
+            return self._playback_cache
+
+        playing = False
         for cmd in [["audtool", "playback-status"], ["audtool", "--playback-status"]]:
             try:
                 res = subprocess.run(
@@ -93,14 +101,20 @@ class VolumeController:
                     timeout=1.0
                 )
                 if res.returncode == 0 and res.stdout.strip() == "playing":
-                    return True
+                    playing = True
+                    break
             except Exception:
                 pass
-        return False
+
+        self._playback_cache = playing
+        self._playback_cache_ts = now
+        return playing
 
     def is_ducked_or_playing(self) -> bool:
-        """Возвращает True, если звук приглушен или плеер активно воспроизводит медиа."""
-        return self._original_volume is not None or self._paused_by_ducking or self.is_playback_active()
+        """Возвращает True, если звук приглушен, плеер на паузе из-за диалога или играет."""
+        if self._original_volume is not None or self._paused_by_ducking:
+            return True
+        return self.is_playback_active()
 
     def get_current_volume(self) -> int | None:
         """Получает текущую громкость Audacious в процентах с автоподбором синтаксиса."""
@@ -125,6 +139,28 @@ class VolumeController:
             except Exception as e:
                 logging.debug(f"[Volume] Ошибка при выполнении '{' '.join(cmd)}': {e}")
         return None
+
+    def adjust_volume(self, delta: int) -> int | None:
+        """Сдвигает громкость плеера. Если сейчас дакинг, двигает и текущий, и сохранённый уровень."""
+        with self.lock:
+            current_vol = self.get_current_volume()
+            if current_vol is None:
+                return None
+
+            new_current = max(0, min(current_vol + delta, 100))
+            if not self._set_volume(new_current):
+                return None
+
+            if self._original_volume is not None:
+                self._original_volume = max(0, min(self._original_volume + delta, 100))
+                self._save_cache(self._original_volume)
+                logging.info(
+                    f"[Volume] Громкость плеера {current_vol}% -> {new_current}% "
+                    f"(сохранённый уровень {self._original_volume}%)"
+                )
+            else:
+                logging.info(f"[Volume] Громкость плеера {current_vol}% -> {new_current}%")
+            return new_current
 
     def _set_volume(self, percent: int) -> bool:
         """Вспомогательный метод установки громкости с автовыбором синтаксиса."""
@@ -197,6 +233,9 @@ class VolumeController:
                     logging.info("[Volume] Воспроизведение плеера возобновлено.")
                 except Exception as e:
                     logging.debug(f"[Volume] Ошибка возобновления плеера: {e}")
+                # В режиме pause громкость не трогали — не поднимаем её до 80%.
+                if self.mode == "pause":
+                    return
 
             # Восстановление громкости
             if self._original_volume is None:

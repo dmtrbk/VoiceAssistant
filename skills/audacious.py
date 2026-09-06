@@ -161,44 +161,45 @@ class AudaciousSkill(BaseSkill):
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         playlist_path = os.path.join(base_dir, "radio_playlist.m3u")
 
-        # 1. Управление громкостью плеера
-        if any(w in text for w in ["громче", "громкость плюс"]) and any(w in text for w in MUSIC_VOLUME_HINTS):
-            current_vol = self.vol_ctrl.get_current_volume()
-            if current_vol is not None:
-                new_vol = min(current_vol + 15, 100)
-                self.vol_ctrl._set_volume(new_vol)
+        handled = False
+        has_music_volume_hint = any(w in text for w in MUSIC_VOLUME_HINTS)
+
+        # 1. Переключение треков (можно в одной фразе с громкостью)
+        if any(w in text for w in ["следующий", "вперед", "дальше", "следующий трек"]):
+            subprocess.Popen(["audtool", "--playlist-advance"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log_system_action("Пользователь включил следующий трек")
+            handled = True
+        elif any(w in text for w in ["предыдущий", "назад", "прошлый трек"]):
+            subprocess.Popen(["audtool", "--playlist-reverse"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log_system_action("Пользователь включил предыдущий трек")
+            handled = True
+
+        # 2. Громкость плеера. «трек» тоже считается контекстом музыки.
+        if any(w in text for w in ["громче", "громкость плюс"]) and (has_music_volume_hint or handled):
+            new_vol = self.vol_ctrl.adjust_volume(15)
+            if new_vol is not None:
                 log_system_action(f"Пользователь увеличил громкость музыки до {new_vol}%")
             return
 
-        if any(w in text for w in ["тише", "громкость минус"]) and any(w in text for w in MUSIC_VOLUME_HINTS):
-            current_vol = self.vol_ctrl.get_current_volume()
-            if current_vol is not None:
-                new_vol = max(current_vol - 15, 0)
-                self.vol_ctrl._set_volume(new_vol)
+        if any(w in text for w in ["тише", "громкость минус"]) and (has_music_volume_hint or handled):
+            new_vol = self.vol_ctrl.adjust_volume(-15)
+            if new_vol is not None:
                 log_system_action(f"Пользователь уменьшил громкость музыки до {new_vol}%")
             return
 
-        # 2. Остановка музыки
+        if handled:
+            return
+
+        # 3. Остановка музыки
         if any(w in text for w in ["выключи", "останови", "выруби", "тишина"]):
             self._stop_playback()
             log_system_action("Пользователь остановил воспроизведение аудио")
             return
 
-        # 3. Пауза / возобновление
+        # 4. Пауза / возобновление
         if any(w in text for w in ["пауза", "стоп музыка", "играй", "возобнови", "плей"]):
             subprocess.Popen(["audtool", "--playback-playpause"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             log_system_action("Пользователь поставил музыку на паузу или возобновил воспроизведение")
-            return
-
-        # 4. Переключение треков
-        if any(w in text for w in ["следующий", "вперед", "дальше", "следующий трек"]):
-            subprocess.Popen(["audtool", "--playlist-advance"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            log_system_action("Пользователь включил следующий трек")
-            return
-
-        if any(w in text for w in ["предыдущий", "назад", "прошлый трек"]):
-            subprocess.Popen(["audtool", "--playlist-reverse"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            log_system_action("Пользователь включил предыдущий трек")
             return
 
         # 5. Определение текущего трека
