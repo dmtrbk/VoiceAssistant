@@ -10,8 +10,15 @@ class PentagonSkill(BaseSkill):
 
     def can_handle(self, context: RequestContext) -> bool:
         lowered = context.raw_text.lower().strip()
-        keywords = ["пентагон", "пентагона", "матриц", "матрицу"]
-        return any(word in lowered for word in keywords)
+        # Шутка про взлом Пентагона / запуск терминала с зелёным кодом матрицы
+        if any(w in lowered for w in ["пентагон", "пентагона"]):
+            return True
+        matrix_triggers = ["взлом матрицы", "взломай матрицу", "эффект матрицы", "режим матрицы", "запусти матрицу", "включи матрицу", "код матрицы"]
+        if any(w in lowered for w in matrix_triggers):
+            return True
+        if lowered in ["матрица", "матрицу"]:
+            return True
+        return False
 
     def execute(self, context: RequestContext) -> None:
         try:

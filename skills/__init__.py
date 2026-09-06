@@ -16,6 +16,7 @@ from .weather import WeatherSkill
 from .timer import TimerSkill
 from .calculator import CalculatorSkill
 from .jokes_facts import JokesAndFactsSkill
+from .movie_skill import MovieSkill
 
 system_skill = SystemSkill()
 security_skill = SecuritySkill()
@@ -23,6 +24,7 @@ ai_chat_skill = AIChatSkill()
 local_nlu_skill = LocalNLUSkill()
 datetime_skill = DateTimeSkill()
 xiaomi_bulb_skill = XiaomiBulbSkill()
+movie_skill = MovieSkill()
 audacious_skill = AudaciousSkill()
 web_search_skill = WebSearchSkill()
 maps_search_skill = MapsSearchSkill()
@@ -46,6 +48,7 @@ ALL_SKILLS = [
     datetime_skill,
     jokes_skill,
     xiaomi_bulb_skill,
+    movie_skill,
     audacious_skill,
     web_search_skill,
     maps_search_skill,
