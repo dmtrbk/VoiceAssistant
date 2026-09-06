@@ -62,8 +62,14 @@ DEFAULT_CITY=Москва
 XIAOMI_BULB_IP=
 XIAOMI_BULB_TOKEN=
 
-# Сессия внимания, секунды. По умолчанию 12.
+# Сессия внимания (в секундах) в тишине и при играющей музыке
 ATTENTION_TIMEOUT=12
+ATTENTION_TIMEOUT_MUSIC=4
+
+# Настройки приглушения музыки (Ducking) и фильтрации эхо колонок
+DUCKING_VOLUME=8
+DUCKING_MODE=duck
+MIN_SPEECH_RMS=200
 
 # Поиск и карты: yandex или google
 SEARCH_PROVIDER=yandex
@@ -198,4 +204,8 @@ echo "  systemctl --user start voice-assistant.service"
 echo "  systemctl --user restart voice-assistant.service"
 echo "  systemctl --user status voice-assistant.service"
 echo "  journalctl --user -u voice-assistant.service -f"
+echo ""
+echo "Эхоподавление колонок (один раз):"
+echo "  $PROJECT_DIR/setup_echo_cancel.sh"
+echo "Затем в настройках звука GNOME выберите микрофон «с эхоподавлением»."
 echo "=================================================="
