@@ -179,8 +179,8 @@ class AIChatSkill(BaseSkill):
     def __init__(self):
         self.groq_api_key = os.getenv("GROQ_API_KEY")
         # Чат, не агент: groq/compound* делают лишний круг и в логе Retrying + второй HTTP.
-        # Qwen 27B на этом аккаунте лучше для короткого русского, чем gpt-oss-20b; 120b медленнее для голоса.
-        self.groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+        # gpt-oss-20b: reasoning_effort=low. 120b медленнее. Qwen 3.6 сыпет <think> на английском.
+        self.groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.history_cache_path = os.path.join(base_dir, "chat_history_cache.json")
@@ -204,6 +204,7 @@ class AIChatSkill(BaseSkill):
                 max_retries=0,
                 timeout=8.0,
             )
+            logging.info(f"[Groq] Модель: {self.groq_model}")
             self._load_history()
         except Exception as e:
             logging.error(f"[Groq] Ошибка инициализации Groq: {e}")
@@ -402,7 +403,7 @@ class AIChatSkill(BaseSkill):
         now = datetime.datetime.now()
         extra = (
             f"[Сейчас {now.strftime('%H:%M')}, {DAYS_RU[now.weekday()]}, {now.strftime('%d.%m.%Y')}.] "
-            "О себе только мужской род."  # Qwen игнорирует персону; плюс _fix_self_gender до TTS.
+            "О себе только мужской род."  # плюс _fix_self_gender до TTS.
         )
         events = self._get_recent_system_events()
         if events:
@@ -410,12 +411,16 @@ class AIChatSkill(BaseSkill):
         messages_for_api.insert(-1, {"role": "system", "content": extra})
 
         try:
-            response = self.client.chat.completions.create(
-                messages=messages_for_api,
-                model=self.groq_model,
-                temperature=0.7,
-                max_tokens=120,
-            )
+            create_kwargs = {
+                "messages": messages_for_api,
+                "model": self.groq_model,
+                "temperature": 0.7,
+                "max_tokens": 300,
+            }
+            # gpt-oss тратит max_tokens на reasoning; low + запас, иначе content пустой.
+            if "gpt-oss" in (self.groq_model or ""):
+                create_kwargs["reasoning_effort"] = "low"
+            response = self.client.chat.completions.create(**create_kwargs)
             raw_reply = response.choices[0].message.content or ""
             cleaned_reply = _fix_self_gender(self._clip_spoken_reply(self._clean_tts_text(raw_reply)))
 

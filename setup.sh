@@ -45,8 +45,8 @@ if [ ! -f "$ENV_EXAMPLE" ]; then
     cat << 'EOF' > "$ENV_EXAMPLE"
 # Groq — облачный диалог (обязательно для навыка ИИ, диалог в стиле Алисы)
 GROQ_API_KEY=
-# Чат Qwen, не groq/compound*: compound — агент (Retrying + второй HTTP), для голоса медленный.
-GROQ_MODEL=qwen/qwen3.8-27b
+# Чат gpt-oss-20b, не groq/compound*: compound — агент (Retrying + второй HTTP), для голоса медленный.
+GROQ_MODEL=openai/gpt-oss-20b
 
 # Telegram-бот: входящие команды и уведомления охраны
 TELEGRAM_BOT_TOKEN=

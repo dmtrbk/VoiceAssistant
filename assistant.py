@@ -1,7 +1,8 @@
 # assistant.py
 # Vosk-цикл не переписывать с нуля. Эхо: mute ECHO_TAIL_SEC + is_self_echo по хвосту фразы
-# (Vosk коверкает полный TTS). Во время TTS barge-in только по имени.
-# OMP_* до numpy. logging до потока Telegram. Не возвращать «Чем помочь?» в ACTIVATION_PHRASES.
+# (Vosk коверкает полный TTS). Во время длинного TTS barge-in только по имени.
+# После «Да?» awaiting_followup: короткий хвост и команда без имени, иначе «включи музыку» пропадает.
+# OMP_* до numpy. logging до import commands. Не возвращать «Чем помочь?» в ACTIVATION_PHRASES.
 
 import json
 import logging
@@ -30,6 +31,12 @@ import numpy as np
 import sounddevice as sd
 from vosk import KaldiRecognizer, Model
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    force=True,
+)
+
 import commands
 from indicator import run_gui, status_queue
 from player_control import emergency_silence
@@ -44,12 +51,6 @@ from triggers import (
     is_filler,
     is_garbled_utterance,
     is_self_echo,
-)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    force=True,
 )
 
 threading.Thread(target=run_telegram_listener, daemon=True).start()
@@ -103,12 +104,14 @@ is_thinking = False  # пока Groq/навык думает — не гасит
 playback_interrupted = False
 is_active = False
 asked_to_repeat = False  # один «не расслышал» на сессию
+awaiting_followup = False  # после «Да?» ждём команду; не глушить её хвостом эха
 last_active_time = 0.0
 last_speak_end_time = 0.0
 last_spoken_text = ""
 play_process = None
 
-ECHO_TAIL_SEC = 2.2  # после paplay колонки ещё звучат; меньше — снова самодиалог
+ECHO_TAIL_SEC = 2.2  # после длинного TTS колонки ещё звучат; меньше — снова самодиалог
+ECHO_TAIL_AFTER_WAKE_SEC = 0.35  # после «Да?» пользователь сразу говорит команду
 SELF_ECHO_WINDOW_SEC = ATTENTION_TIMEOUT
 
 ACTIVATION_PHRASES = [
@@ -164,9 +167,10 @@ def stop_speaking(to_idle=True):
 
 def go_idle():
     """Полный сон сессии: idle, сброс переспроса, музыка обратно."""
-    global is_active, asked_to_repeat
+    global is_active, asked_to_repeat, awaiting_followup
     is_active = False
     asked_to_repeat = False
+    awaiting_followup = False
     status_queue.put("idle")
     volume_ctrl.restore()
 
@@ -396,7 +400,7 @@ def timeout_monitor():
 
 def main():
     """Основной рабочий цикл ассистента"""
-    global is_active, last_active_time, asked_to_repeat
+    global is_active, last_active_time, asked_to_repeat, awaiting_followup
 
     if not os.path.exists(MODEL_PATH):
         logging.critical(f"Папка с моделью Vosk не найдена по пути: {MODEL_PATH}")
@@ -432,10 +436,20 @@ def main():
         last_active_time = time.time()
 
     def dispatch_phrase(phrase: str) -> None:
+        global awaiting_followup
         if is_filler(phrase) or is_garbled_utterance(phrase):
             prompt_repeat()
         else:
+            awaiting_followup = False
             execute_command_async(phrase, safe_speak)
+
+    def speak_activation() -> None:
+        global awaiting_followup, last_active_time
+        awaiting_followup = True
+        last_active_time = time.time()
+        phrase = random.choice(ACTIVATION_PHRASES)
+        # Не блокировать цикл Vosk синтезом «Да?» — иначе следующая команда сидит в очереди и глохнет.
+        threading.Thread(target=safe_speak, args=(phrase,), daemon=True).start()
 
     def wake_session() -> None:
         global is_active, asked_to_repeat
@@ -460,8 +474,9 @@ def main():
             chunk_samples = np.frombuffer(data, dtype=np.int16)
             chunk_rms = float(np.sqrt(np.mean(chunk_samples.astype(np.float32) ** 2))) if len(chunk_samples) > 0 else 0.0
 
-            # Игнорируем хвост колонок после своей озвучки, пока он не затихнет.
-            if time.time() - last_speak_end_time < ECHO_TAIL_SEC:
+            # После «Да?» короткий хвост: иначе «включи музыку» съедается Reset-ом Vosk.
+            echo_tail = ECHO_TAIL_AFTER_WAKE_SEC if awaiting_followup else ECHO_TAIL_SEC
+            if time.time() - last_speak_end_time < echo_tail:
                 _reset_recognizer(recognizer)
                 current_phrase_max_rms = 0.0
                 continue
@@ -513,11 +528,13 @@ def main():
                     _reset_recognizer(recognizer)
                     continue
 
-                # Во время озвучки перебивает только имя. Иначе колонки снова уходят в Groq.
+                # Во время озвучки: имя всегда; после «Да?» — ещё и команда без имени.
                 if is_speaking:
                     if detected_wake_word:
                         stop_speaking(to_idle=False)
                         wake_session()
+                    elif awaiting_followup:
+                        stop_speaking(to_idle=False)
                     else:
                         _reset_recognizer(recognizer)
                         continue
@@ -526,8 +543,7 @@ def main():
 
                 if is_active:
                     if detected_wake_word and not phrase:
-                        safe_speak(random.choice(ACTIVATION_PHRASES))
-                        last_active_time = time.time()
+                        speak_activation()
                     else:
                         dispatch_phrase(phrase)
                 elif detected_wake_word:
@@ -538,8 +554,7 @@ def main():
                         if phrase:
                             dispatch_phrase(phrase)
                         else:
-                            safe_speak(random.choice(ACTIVATION_PHRASES))
-                            last_active_time = time.time()
+                            speak_activation()
             
             # 2. Обработка промежуточных результатов для мгновенного прерывания с блокировкой
             else:

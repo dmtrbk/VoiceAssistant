@@ -164,7 +164,7 @@ wget -O piper/models/ru_RU-dmitri-medium.onnx.json \
 | Переменная | Назначение | Значение по умолчанию |
 |---|---|---|
 | `GROQ_API_KEY` | API-ключ Groq для диалогового ИИ | `—` (модуль ИИ отключен) |
-| `GROQ_MODEL` | Модель Groq | `qwen/qwen3.8-27b` |
+| `GROQ_MODEL` | Модель Groq | `openai/gpt-oss-20b` |
 | `TELEGRAM_BOT_TOKEN` | Токен Telegram-бота для команд и охраны | `—` (слушатель не стартует) |
 | `TELEGRAM_CHAT_ID` | Авторизованный Chat ID пользователя | `—` (слушатель не стартует) |
 | `XIAOMI_BULB_IP` | IP-адрес умной лампы | `—` |
