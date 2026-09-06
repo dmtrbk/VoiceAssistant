@@ -25,6 +25,7 @@ CORE_PKGS=(
     gnome-terminal nautilus gnome-system-monitor
     htop neofetch
     libxcb tk xorg-xhost
+    xdotool wmctrl
 )
 sudo pacman -Syu --needed --noconfirm "${CORE_PKGS[@]}"
 
@@ -194,6 +195,16 @@ Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_NUM/bus
 [Install]
 WantedBy=default.target
 EOF
+
+EXT_UUID="jarvis-windows@voiceassistant"
+EXT_SRC="$PROJECT_DIR/gnome/$EXT_UUID"
+EXT_DST="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
+if [ -d "$EXT_SRC" ]; then
+    echo "[+] Расширение GNOME $EXT_UUID ..."
+    mkdir -p "$HOME/.local/share/gnome-shell/extensions"
+    ln -sfn "$EXT_SRC" "$EXT_DST"
+    gnome-extensions enable "$EXT_UUID" 2>/dev/null || true
+fi
 
 systemctl --user daemon-reload
 systemctl --user enable voice-assistant.service

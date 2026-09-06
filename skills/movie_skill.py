@@ -1,6 +1,6 @@
 # skills/movie_skill.py
-# Плеер — MPV (Clapper не тянет потоки ВК). Пока MPV жив, «пауза»/«вперед»
-# забираем сами: иначе Audacious перехватит до follow-up.
+# Плеер — MPV вне cgroup службы (systemd-run --scope): рестарт Джарвиса фильм не гасит.
+# Пока MPV жив, «пауза»/«вперед» забираем сами: иначе Audacious перехватит до follow-up.
 
 import json
 import logging
@@ -17,11 +17,13 @@ from browser import open_url
 from player_control import stop_player_session
 from skills.ai_chat import log_system_action
 from skills.base import BaseSkill, RequestContext
+from window_control import is_window_command_text
 
 logger = logging.getLogger(__name__)
 
 _DEVNULL = subprocess.DEVNULL
 MPV_SOCKET = "/tmp/mpv_jarvis.sock"
+MPV_SCOPE = "jarvis-mpv.scope"
 
 _WORD = r"[а-яёa-z0-9]"
 _MOVIE_NOUNS = (
@@ -68,10 +70,23 @@ def _send_mpv_ipc(command: List[object]) -> bool:
         return False
 
 
+def is_movie_playing() -> bool:
+    """True, если наш MPV ещё жив (в том числе после рестарта ассистента)."""
+    return _player_alive()
+
+
+def is_movie_control_phrase(text: str) -> bool:
+    """Пауза / перемотка / закрытие — не считать текстом фильма из колонок."""
+    lowered = (text or "").lower().strip()
+    if not lowered:
+        return False
+    return _is_player_control(lowered) or _is_close_command(lowered)
+
+
 def _player_alive() -> bool:
     """Наш MPV ещё играет. Мёртвый сокет в /tmp не считаем сессией."""
-    if _mpv_proc is not None:
-        return _mpv_proc.poll() is None
+    if _mpv_proc is not None and _mpv_proc.poll() is None:
+        return True
     if not os.path.exists(MPV_SOCKET):
         return False
     try:
@@ -88,8 +103,20 @@ def _player_alive() -> bool:
         return False
 
 
+def _stop_mpv_scope() -> None:
+    try:
+        subprocess.run(
+            ["systemctl", "--user", "stop", MPV_SCOPE],
+            stdout=_DEVNULL,
+            stderr=_DEVNULL,
+            timeout=2,
+        )
+    except Exception as exc:
+        logger.debug("[MovieSkill] Не удалось остановить %s: %s", MPV_SCOPE, exc)
+
+
 def _stop_our_player() -> None:
-    """Закрывает только MPV, который запустил навык, без pkill по всем окнам."""
+    """Закрывает только MPV навыка. Чужие окна и рестарт службы фильм не гасят."""
     global _mpv_proc
     _send_mpv_ipc(["quit"])
     proc = _mpv_proc
@@ -103,6 +130,7 @@ def _stop_our_player() -> None:
                 proc.kill()
             except Exception as exc:
                 logger.debug("[MovieSkill] Не удалось завершить MPV: %s", exc)
+    _stop_mpv_scope()
     if os.path.exists(MPV_SOCKET):
         try:
             os.remove(MPV_SOCKET)
@@ -255,13 +283,13 @@ def search_vk_video(query: str, kind: str = "film") -> Optional[tuple[str, str]]
 
 
 def play_video(target: Optional[str] = None) -> bool:
-    """Запускает видео в полноэкранном MPV, предварительно закрывая предыдущий наш экземпляр."""
+    """Запускает MPV вне cgroup службы, чтобы «перезапустись» не гасил фильм."""
     global _mpv_proc
     if shutil.which("mpv") is None:
         return False
 
     _stop_our_player()
-    cmd = [
+    mpv_cmd = [
         "mpv",
         f"--input-ipc-server={MPV_SOCKET}",
         "--fs",
@@ -270,8 +298,34 @@ def play_video(target: Optional[str] = None) -> bool:
         "--keep-open=yes",
     ]
     if target:
-        cmd.append(target)
-    _mpv_proc = subprocess.Popen(cmd, stdout=_DEVNULL, stderr=_DEVNULL)
+        mpv_cmd.append(target)
+
+    if shutil.which("systemd-run"):
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "reset-failed", MPV_SCOPE],
+                stdout=_DEVNULL,
+                stderr=_DEVNULL,
+                timeout=2,
+            )
+        except Exception:
+            pass
+        cmd = [
+            "systemd-run",
+            "--user",
+            "--scope",
+            f"--unit={MPV_SCOPE}",
+            "--collect",
+            *mpv_cmd,
+        ]
+        try:
+            subprocess.Popen(cmd, stdout=_DEVNULL, stderr=_DEVNULL)
+            _mpv_proc = None
+            return True
+        except Exception as exc:
+            logger.debug("[MovieSkill] systemd-run не запустил MPV: %s", exc)
+
+    _mpv_proc = subprocess.Popen(mpv_cmd, stdout=_DEVNULL, stderr=_DEVNULL)
     return True
 
 
@@ -319,12 +373,14 @@ def _is_player_control(text: str) -> bool:
 
 
 def _is_close_command(text: str) -> bool:
+    if is_window_command_text(text):
+        return False
     if _has_any_word(text, _CLOSE_WORDS) and _has_any_word(
         text, _MOVIE_NOUNS + ("плеер", "mpv", "видеоплеер")
     ):
         return True
     if _player_alive() and _has_any_word(text, _CLOSE_WORDS) and not _has_any_word(
-        text, ("свет", "музыку", "охрану", "компьютер")
+        text, ("свет", "музыку", "охрану", "компьютер", "терминал")
     ):
         return True
     return False

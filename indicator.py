@@ -9,6 +9,9 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QColor, QPainter, QRadialGradient, QGuiApplication
 from PySide6.QtWidgets import QApplication, QWidget
 
+from settings_ui import SettingsWindow
+from skill_settings import settings_events
+
 # Очередь для передачи статусов из основного скрипта ассистента
 status_queue = queue.Queue()
 
@@ -30,6 +33,21 @@ class StatusWorker(QThread):
                 status = status_queue.get()
                 self.status_changed.emit(status)
                 status_queue.task_done()
+            except Exception:
+                break
+
+
+class SettingsOpenWorker(QThread):
+    """Голос кладёт «open» в очередь, окно открывает GUI-поток."""
+    open_requested = Signal()
+
+    def run(self):
+        while True:
+            try:
+                event = settings_events.get()
+                if event == "open":
+                    self.open_requested.emit()
+                settings_events.task_done()
             except Exception:
                 break
 
@@ -65,6 +83,7 @@ class OrbWidget(QWidget):
         self.pulse_direction = 1
         self.state = "idle"
         self.drag_position = None
+        self.settings_window = None
         
         # Таймер для анимации пульсации (~25 кадров в секунду)
         self.timer = QTimer(self)
@@ -127,8 +146,19 @@ class OrbWidget(QWidget):
         
         painter.end()
 
-    # --- Перетаскивание виджета при зажатой левой кнопке мыши ---
+    def open_settings(self):
+        if self.settings_window is None:
+            self.settings_window = SettingsWindow()
+        self.settings_window.show()
+        self.settings_window.raise_()
+        self.settings_window.activateWindow()
+
+    # --- Перетаскивание левой кнопкой; правая открывает настройки ---
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            self.open_settings()
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
@@ -136,6 +166,11 @@ class OrbWidget(QWidget):
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.MouseButton.LeftButton and self.drag_position is not None:
             self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = None
             event.accept()
 
 def run_gui():
@@ -148,5 +183,9 @@ def run_gui():
     worker = StatusWorker()
     worker.status_changed.connect(widget.set_status)
     worker.start()
+
+    settings_worker = SettingsOpenWorker()
+    settings_worker.open_requested.connect(widget.open_settings)
+    settings_worker.start()
     
     sys.exit(app.exec())

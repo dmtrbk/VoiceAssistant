@@ -7,6 +7,7 @@ import threading
 import time
 from skills import ALL_SKILLS, local_nlu_skill, ai_chat_skill
 from skills.base import RequestContext
+from skill_settings import is_skill_enabled
 from triggers import is_filler, is_garbled_utterance, split_quick_compound
 
 _EXECUTE_LOCK = threading.Lock()
@@ -33,6 +34,19 @@ def execute(text: str, speak_callback) -> bool:
         return should_sleep
 
 
+def forget_skill(skill) -> None:
+    """Сбрасывает follow-up, если выключили навык, который только что отвечал."""
+    global _last_skill, _last_skill_time
+    with _EXECUTE_LOCK:
+        if _last_skill is skill:
+            try:
+                _last_skill.on_context_lost()
+            except Exception as exc:
+                logging.error("[Маршрутизатор] on_context_lost при выключении: %s", exc)
+            _last_skill = None
+            _last_skill_time = 0.0
+
+
 def _remember_skill(skill) -> None:
     global _last_skill, _last_skill_time
     if skill is None or skill is ai_chat_skill:
@@ -48,6 +62,8 @@ def _remember_skill(skill) -> None:
 
 def _followup_skill(context: RequestContext):
     if _last_skill is None or _last_skill is ai_chat_skill:
+        return None
+    if not is_skill_enabled(_last_skill):
         return None
     if time.time() - _last_skill_time > _FOLLOWUP_TTL_SEC:
         return None
@@ -106,6 +122,7 @@ def _execute_locked(text: str, speak_callback) -> bool:
     )
 
     chosen = None
+    blocked = None
     for skill in ALL_SKILLS:
         if skill is ai_chat_skill:
             continue
@@ -116,6 +133,9 @@ def _execute_locked(text: str, speak_callback) -> bool:
             continue
         if not accepts:
             continue
+        if not is_skill_enabled(skill):
+            blocked = skill
+            continue
         chosen = skill
         break
 
@@ -124,6 +144,10 @@ def _execute_locked(text: str, speak_callback) -> bool:
         if follow is not None:
             logging.info(f"[Маршрутизатор] Follow-up: {follow.__class__.__name__}")
             chosen = follow
+
+    if chosen is None and blocked is not None:
+        speak_callback("Этот навык сейчас выключен.")
+        return False
 
     if chosen is None:
         if is_garbled_utterance(text):

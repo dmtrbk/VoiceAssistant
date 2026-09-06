@@ -9,6 +9,12 @@ import shutil
 import time
 import wikipediaapi
 from skills.base import BaseSkill, RequestContext
+from window_control import (
+    close_all_windows,
+    close_focused_window,
+    detect_window_action,
+    show_desktop,
+)
 
 SUCCESS_RESPONSES = [
     "Сделано!", "Готово!", "Выполнил.", "Есть!", 
@@ -20,6 +26,7 @@ class SystemSkill(BaseSkill):
 
     def __init__(self):
         self._shutdown_pending_until = 0.0
+        self._close_windows_pending_until = 0.0
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
@@ -38,10 +45,39 @@ class SystemSkill(BaseSkill):
             "тик ток", "тиктоку", "tiktok", "шахматы", "chess"
         ]
         is_shutdown = any(w in text for w in ["выключ", "отключ"]) and any(w in text for w in ["компьютер", "пк"])
-        return has_wiki or any(w in text for w in triggers) or is_shutdown
+        return has_wiki or any(w in text for w in triggers) or is_shutdown or detect_window_action(text) is not None
 
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
+
+        window_action = detect_window_action(text)
+        if window_action == "show_desktop":
+            if show_desktop():
+                context.speak("Сворачиваю окна.")
+            else:
+                context.speak("Не удалось свернуть окна.")
+            return
+
+        if window_action == "close_focused":
+            if close_focused_window():
+                context.speak("Закрываю окно.")
+            else:
+                context.speak("Не удалось закрыть окно.")
+            return
+
+        if window_action == "close_all":
+            now = time.time()
+            if now < self._close_windows_pending_until:
+                self._close_windows_pending_until = 0.0
+                closed = close_all_windows()
+                if closed:
+                    context.speak("Закрываю окна.")
+                else:
+                    context.speak("Окон не нашёл.")
+            else:
+                self._close_windows_pending_until = now + 20
+                context.speak("Чтобы закрыть все окна, повторите команду.")
+            return
 
         # 1. Поиск по Википедии
         if any(w in text for w in ["википедия", "что такое", "кто такой", "кто такая"]):

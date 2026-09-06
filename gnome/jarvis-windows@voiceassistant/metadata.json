@@ -1,0 +1,8 @@
+{
+  "uuid": "jarvis-windows@voiceassistant",
+  "name": "Jarvis Windows",
+  "description": "D-Bus: свернуть и закрыть окна для голосового ассистента Джарвис",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
+  "session-modes": ["user"],
+  "version": 1
+}

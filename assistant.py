@@ -40,6 +40,7 @@ logging.basicConfig(
 import commands
 from indicator import run_gui, status_queue
 from player_control import emergency_silence
+from skills.movie_skill import is_movie_control_phrase, is_movie_playing
 from telegram_listener import run_telegram_listener
 from volume_control import VolumeController
 from triggers import (
@@ -374,11 +375,21 @@ def execute_command_async(cmd_text, safe_speak_func):
     threading.Thread(target=run, daemon=True).start()
 
 
-def is_music_leak(phrase_rms: float, detected_wake_word: str | None) -> bool:
-    """Тихая фраза без имени активации на фоне музыки — скорее всего текст песни из колонок."""
-    if MIN_SPEECH_RMS <= 0:
-        return False
+def is_music_leak(
+    phrase_rms: float,
+    detected_wake_word: str | None,
+    text: str = "",
+) -> bool:
+    """Речь с колонок: тихая песня или громкий диалог фильма без имени активации."""
     if detected_wake_word:
+        return False
+    if is_movie_playing():
+        # Фильм говорит громко — порог RMS его не отсекает. Без «Джарвис» не слушаем,
+        # кроме короткого пульта в уже открытой сессии («пауза», «закрой»).
+        if is_active and is_movie_control_phrase(text):
+            return False
+        return True
+    if MIN_SPEECH_RMS <= 0:
         return False
     if not volume_ctrl.is_ducked_or_playing():
         return False
@@ -392,7 +403,8 @@ def timeout_monitor():
         time.sleep(0.5)
         # Проверяем тайм-аут, только если активны, НЕ говорим и НЕ ожидаем ответ от ИИ (заморозка таймера)
         if is_active and not is_speaking and not is_thinking:
-            current_timeout = ATTENTION_TIMEOUT_MUSIC if volume_ctrl.is_ducked_or_playing() else ATTENTION_TIMEOUT
+            media_on = volume_ctrl.is_ducked_or_playing() or is_movie_playing()
+            current_timeout = ATTENTION_TIMEOUT_MUSIC if media_on else ATTENTION_TIMEOUT
             if time.time() - last_active_time > current_timeout:
                 go_idle()
                 logging.info(f"[Система] Время ожидания истекло ({current_timeout:g} с). Возврат в спящий режим.")
@@ -497,17 +509,17 @@ def main():
                 if not text:
                     continue
 
-                logging.info(f"[Распознано] {text}")
-
                 detected_wake_word = get_wake_word(text)
 
                 # Фильтр до сессионных команд: иначе «стоп» из текста песни гасит медиа.
-                if is_music_leak(phrase_rms, detected_wake_word):
+                if is_music_leak(phrase_rms, detected_wake_word, text):
                     logging.info(
-                        f"[Аудиофильтр] Отсечена фоновая музыка из колонок "
-                        f"(RMS: {phrase_rms:.1f} < {MIN_SPEECH_RMS:g}). Текст: '{text}'"
+                        f"[Аудиофильтр] Отсечена речь колонок "
+                        f"(RMS: {phrase_rms:.1f}). Текст: '{text}'"
                     )
                     continue
+
+                logging.info(f"[Распознано] {text}")
 
                 # Сессионные команды: авария / сон / стоп TTS. «тишина» сюда не входит.
                 if is_emergency_stop(text):
@@ -571,7 +583,7 @@ def main():
                         continue
 
                     detected_wake_word = get_wake_word(partial_text)
-                    if is_music_leak(current_phrase_max_rms, detected_wake_word):
+                    if is_music_leak(current_phrase_max_rms, detected_wake_word, partial_text):
                         continue
 
                     if is_emergency_stop(partial_text):

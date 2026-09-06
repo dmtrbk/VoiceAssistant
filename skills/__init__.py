@@ -17,6 +17,7 @@ from .timer import TimerSkill
 from .calculator import CalculatorSkill
 from .jokes_facts import JokesAndFactsSkill
 from .movie_skill import MovieSkill
+from .assistant_settings import AssistantSettingsSkill
 
 system_skill = SystemSkill()
 security_skill = SecuritySkill()
@@ -35,11 +36,13 @@ weather_skill = WeatherSkill()
 timer_skill = TimerSkill()
 calculator_skill = CalculatorSkill()
 jokes_skill = JokesAndFactsSkill()
+assistant_settings_skill = AssistantSettingsSkill()
 
 # Приоритет: узкие навыки, затем NLU (прощание / монетка), затем Groq.
 # Мелкий разговор (привет, как дела) не в NLU — его забирает Groq.
 ALL_SKILLS = [
     restart_skill,
+    assistant_settings_skill,
     pentagon_skill,
     security_skill,
     timer_skill,

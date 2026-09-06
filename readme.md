@@ -24,8 +24,9 @@
 - **Поиск и карты:** Яндекс / Google Поиск, Яндекс / Google Карты и автоматическое построение маршрутов.
 - **Охрана:** Веб-камера, детекция движения через OpenCV, снимки тревоги в Telegram.
 - **Умный дом:** Лампы Xiaomi / Yeelight (включение, выключение, яркость прописью и цифрами).
-- **Системное управление:** Регулировка громкости PipeWire (`wpctl`), запуск/закрытие утилит (`htop`, `neofetch`, `gnome-system-monitor`), статьи Википедии.
+- **Системное управление:** Регулировка громкости PipeWire (`wpctl`), запуск/закрытие утилит (`htop`, `neofetch`, `gnome-system-monitor`), окна GNOME (свернуть все, закрыть окно / все окна), статьи Википедии.
 - **Диалог с памятью (Groq):** Свободное общение на любые темы с удержанием контекста и историей беседы.
+- **Настройки навыков:** правый клик по сфере или «открой настройки ассистента» — тумблеры света, кино, охраны и т.д. Каркас (диалог, прощание, громкость, время) скрыт и всегда включён. Перезапуск службы не нужен.
 
 ---
 
@@ -38,9 +39,13 @@ VoiceAssistant/
 ├── commands.py               # Маршрутизатор по цепочке навыков
 ├── triggers.py               # Общие триггеры: стоп / замолчи / спать / тишина
 ├── player_control.py         # Старт/стоп Audacious и Glava, авария «стоп»
+├── window_control.py         # Окна GNOME: свернуть все, закрыть окно / все
+├── gnome/                    # Расширение Shell для сворачивания/закрытия окон
 ├── browser.py                # Открытие URL (Chrome, иначе xdg-open)
 ├── volume_control.py         # Ducking громкости Audacious (кэш на диске)
 ├── indicator.py              # Интерактивная сфера статусов на PySide6
+├── settings_ui.py            # Окно тумблеров необязательных навыков
+├── skill_settings.py         # Вкл/выкл навыков без перезапуска службы
 ├── nlu.py                    # TF-IDF + LogisticRegression на n-граммах
 ├── intents.json              # Базовые интенты (приветствия, прощания, монетка, личность)
 ├── setup.sh                  # Скрипт автоустановки окружения и systemd
@@ -66,6 +71,7 @@ VoiceAssistant/
     ├── security.py           # Видеонаблюдение и тревожные снимки
     ├── system.py             # Системные команды и утилиты
     ├── restart.py            # Перезапуск службы
+    ├── assistant_settings.py # «Открой настройки ассистента»
     ├── pentagon.py           # Анимация cmatrix («пентагон» / «матрица»)
     ├── telegram.py           # Запуск Telegram Desktop
     ├── local_nlu.py          # Локальные быстрые ответы
@@ -86,6 +92,7 @@ VoiceAssistant/
 - `gnome-terminal`, `nautilus`, `gnome-system-monitor`, `htop`, `neofetch`
 - `cmatrix` (навык «пентагон»)
 - `tk` (заставка режима охраны)
+- `xdotool`, `wmctrl` (окна: свернуть все, закрыть активное / все)
 - `git`, `wget`, `unzip`, `tar`, `libxcb`, `xorg-xhost`
 
 **Модели (скачиваются автоматически в `setup.sh`):**
@@ -121,7 +128,8 @@ sudo pacman -Syu --needed \
   pipewire pipewire-pulse wireplumber libpulse webrtc-audio-processing \
   audacious audacious-plugins mpv yt-dlp \
   cmatrix gnome-terminal nautilus gnome-system-monitor \
-  htop neofetch libxcb tk xorg-xhost
+  htop neofetch libxcb tk xorg-xhost \
+  xdotool wmctrl
 
 cd ~/VoiceAssistant
 python -m venv .venv
@@ -254,6 +262,7 @@ journalctl --user -u voice-assistant.service -f
 - **Музыка и звуки:** «включи музыку», «включи радио Рекорд», «включи шум дождя», «пауза», «следующий трек и сделай громче».
 - **Поиск и карты:** «найди в интернете [запрос]», «где находится [адрес]», «как проехать до [место]».
 - **Охрана и умный дом:** «включи охрану», «джарвис я тут», «включи свет», «яркость 50».
+- **Настройки:** правый клик по сфере или «открой настройки ассистента» (не путать с «открой настройки» системы).
 - **Свободный диалог:** любые вопросы, поддержание беседы, рассуждения через Groq LLM.
 
 Полный список фраз и логика их обработки приведены в файле `commands.txt`.

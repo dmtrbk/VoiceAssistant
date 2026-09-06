@@ -31,3 +31,7 @@ class BaseSkill:
     def on_context_lost(self) -> None:
         """Вызывается, когда маршрутизатор переключился на другой навык."""
         return
+
+    def on_disabled(self) -> None:
+        """Навык выключили в настройках. Остановить фон (камера и т.п.), без озвучки."""
+        return

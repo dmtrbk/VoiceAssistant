@@ -117,6 +117,19 @@ class SecuritySkill(BaseSkill):
         self.surveillance_thread = None
         self.black_screen_process = None
 
+    def on_disabled(self) -> None:
+        """Тихо гасит камеру и заставку, если охрану выключили тумблером."""
+        try:
+            self.control_screens(True)
+        except Exception as exc:
+            logging.debug("[Охрана] Не удалось убрать заставку: %s", exc)
+        if self.surveillance_thread is not None and self.surveillance_thread.is_alive():
+            self.surveillance_thread.stop()
+            self.surveillance_thread.join(timeout=5.0)
+            if not self.surveillance_thread.is_alive():
+                self.surveillance_thread = None
+            logging.info("[Охрана] Наблюдение остановлено: навык выключен в настройках.")
+
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text
         triggers = [
