@@ -38,6 +38,7 @@ import subprocess
 import time
 import threading
 from difflib import get_close_matches
+import numpy as np
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения
@@ -64,7 +65,18 @@ SAMPLERATE = 16000
 
 
 def _read_attention_timeout() -> float:
-    raw = os.getenv("ATTENTION_TIMEOUT", "4")
+    raw = os.getenv("ATTENTION_TIMEOUT", "12")
+    try:
+        value = float(raw)
+        if value <= 0:
+            return 12.0
+        return value
+    except (TypeError, ValueError):
+        return 12.0
+
+
+def _read_attention_timeout_music() -> float:
+    raw = os.getenv("ATTENTION_TIMEOUT_MUSIC", "4")
     try:
         value = float(raw)
         if value <= 0:
@@ -74,7 +86,18 @@ def _read_attention_timeout() -> float:
         return 4.0
 
 
+def _read_min_speech_rms() -> float:
+    raw = os.getenv("MIN_SPEECH_RMS", "200")
+    try:
+        val = float(raw)
+        return max(0.0, val)
+    except (TypeError, ValueError):
+        return 200.0
+
+
 ATTENTION_TIMEOUT = _read_attention_timeout()
+ATTENTION_TIMEOUT_MUSIC = _read_attention_timeout_music()
+MIN_SPEECH_RMS = _read_min_speech_rms()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "model")
 
@@ -344,15 +367,16 @@ def execute_command_async(cmd_text, safe_speak_func):
     threading.Thread(target=run, daemon=True).start()
 
 def timeout_monitor():
-    """Фоновый мониторинг времени ожидания команды."""
+    """Фоновый мониторинг времени ожидания команды с учетом воспроизведения музыки."""
     global is_active, is_speaking, is_thinking, last_active_time
     while True:
         time.sleep(0.5)
         # Проверяем тайм-аут, только если активны, НЕ говорим и НЕ ожидаем ответ от ИИ (заморозка таймера)
         if is_active and not is_speaking and not is_thinking:
-            if time.time() - last_active_time > ATTENTION_TIMEOUT:
+            current_timeout = ATTENTION_TIMEOUT_MUSIC if volume_ctrl.is_ducked_or_playing() else ATTENTION_TIMEOUT
+            if time.time() - last_active_time > current_timeout:
                 go_idle()
-                logging.info("[Система] Время ожидания истекло. Возврат в спящий режим.")
+                logging.info(f"[Система] Время ожидания истекло ({current_timeout:g} с). Возврат в спящий режим.")
 
 def main():
     """Основной рабочий цикл ассистента"""
@@ -374,7 +398,7 @@ def main():
     
     logging.info(
         f"[Система] Ассистент готов. Позовите: {', '.join(WAKE_WORDS)}. "
-        f"Тайм-аут внимания: {ATTENTION_TIMEOUT:g} с."
+        f"Тайм-аут внимания: {ATTENTION_TIMEOUT:g} с (при музыке: {ATTENTION_TIMEOUT_MUSIC:g} с)."
     )
     is_active = False
     asked_to_repeat = False
@@ -389,15 +413,23 @@ def main():
     # Запускаем фоновый монитор тайм-аута внимания
     threading.Thread(target=timeout_monitor, daemon=True).start()
 
+    current_phrase_max_rms = 0.0
+
     with sd.RawInputStream(samplerate=SAMPLERATE, blocksize=2000, dtype="int16", channels=1, callback=audio_callback):
         while True:
             data = audio_queue.get()
+
+            # Вычисляем уровень энергии текущего аудио-фрейма
+            chunk_samples = np.frombuffer(data, dtype=np.int16)
+            chunk_rms = float(np.sqrt(np.mean(chunk_samples.astype(np.float32) ** 2))) if len(chunk_samples) > 0 else 0.0
+            current_phrase_max_rms = max(current_phrase_max_rms, chunk_rms)
 
             # --- ЗАЩИТА ОТ ЭХО (ШЛЕЙФА) ---
             # Игнорируем входящие звуки в течение 0.2 сек после фразы (устраняет задержку перед ответом)
             if time.time() - last_speak_end_time < 0.2:
                 with recognizer_lock:
                     recognizer.Reset()
+                current_phrase_max_rms = 0.0
                 continue
 
             # 1. Обработка завершенных реплик с блокировкой
@@ -406,6 +438,9 @@ def main():
                 is_accepted = recognizer.AcceptWaveform(data)
 
             if is_accepted:
+                phrase_rms = current_phrase_max_rms
+                current_phrase_max_rms = 0.0
+
                 with recognizer_lock:
                     res = json.loads(recognizer.Result())
                 text = res.get("text", "").lower().strip()
@@ -426,6 +461,15 @@ def main():
                     continue
 
                 detected_wake_word = get_wake_word(text)
+
+                # --- ФИЛЬТРАЦИЯ УТЕЧКИ МУЗЫКИ ИЗ КОЛОНОК ---
+                # Если музыка играет/приглушена, а распознана фраза без wake-word с низкой амплитудой (фон колонок)
+                if is_active and not detected_wake_word and MIN_SPEECH_RMS > 0 and volume_ctrl.is_ducked_or_playing():
+                    if phrase_rms < MIN_SPEECH_RMS:
+                        logging.info(
+                            f"[Аудиофильтр] Отсечена тихая фоновая музыка из колонок (RMS: {phrase_rms:.1f} < {MIN_SPEECH_RMS:g}). Текст: '{text}'"
+                        )
+                        continue
 
                 # Во время озвучки: wake всегда; без wake — только если сессия уже жива.
                 if is_speaking:

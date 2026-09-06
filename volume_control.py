@@ -6,8 +6,18 @@ import subprocess
 import logging
 import threading
 
+
+def _read_ducking_volume() -> int:
+    raw = os.getenv("DUCKING_VOLUME", "8")
+    try:
+        val = int(raw)
+        return max(0, min(val, 50))
+    except (TypeError, ValueError):
+        return 8
+
+
 class VolumeController:
-    """Модуль управления автоматическим приглушением громкости (ducking) в плеере Audacious с защитой от сбоев."""
+    """Модуль управления автоматическим приглушением громкости (ducking) или паузой в плеере Audacious с защитой от сбоев."""
 
     _instance = None
     _instance_lock = threading.Lock()
@@ -27,22 +37,23 @@ class VolumeController:
         self.lock = threading.Lock()
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.cache_path = os.path.join(base_dir, "volume_cache.json")
-        
-        # Целевой уровень приглушения музыки изменен на 20%
-        self.target_percent = 20
-        # Порог защиты: если звук в плеере ниже этого уровня, мы считаем его УЖЕ приглушенным
-        self.safe_limit = 25
-        
+
+        # Целевой уровень приглушения музыки (по умолчанию 8% для надежного отсечения микрофоном)
+        self.target_percent = _read_ducking_volume()
+        # Порог защиты: если звук в плеере ниже этого уровня, считаем его уже приглушенным
+        self.safe_limit = max(self.target_percent + 4, 12)
+
+        # Режим приглушения: "duck" (убавить громкость) или "pause" (временно поставить на паузу)
+        self.mode = os.getenv("DUCKING_MODE", "duck").lower().strip()
+        self._paused_by_ducking = False
+
         with self.lock:
             self._original_volume = self._load_cache()
-            
-        # Самовосстановление при холодном старте: если обнаружен сохраненный объем громкости,
-        # мы автоматически восстанавливаем его
+
+        # Самовосстановление при холодном старте
         if self._original_volume is not None:
             logging.info(f"[Volume] Обнаружен сохраненный уровень громкости {self._original_volume}% после прошлого сеанса. Восстановление...")
             self.restore()
-
-        # Если кэша не было, проверяем, не застряла ли громкость на тихом уровне (ниже safe_limit)
         else:
             current_vol = self.get_current_volume()
             if current_vol is not None and current_vol <= self.safe_limit:
@@ -63,13 +74,33 @@ class VolumeController:
         return None
 
     def _save_cache(self, value: int | None):
-        """Записывает сохраненную громкость в JSON-файла."""
+        """Записывает сохраненную громкость в JSON-файл."""
         try:
             with open(self.cache_path, "w", encoding="utf-8") as f:
                 json.dump({"original_volume": value}, f, ensure_ascii=False)
             logging.debug(f"[Volume] Кэш громкости обновлен на диске: {value}")
         except Exception as e:
             logging.error(f"[Volume] Ошибка записи кэша громкости на диск: {e}")
+
+    def is_playback_active(self) -> bool:
+        """Проверяет, играет ли сейчас трек в Audacious."""
+        for cmd in [["audtool", "playback-status"], ["audtool", "--playback-status"]]:
+            try:
+                res = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=1.0
+                )
+                if res.returncode == 0 and res.stdout.strip() == "playing":
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def is_ducked_or_playing(self) -> bool:
+        """Возвращает True, если звук приглушен или плеер активно воспроизводит медиа."""
+        return self._original_volume is not None or self._paused_by_ducking or self.is_playback_active()
 
     def get_current_volume(self) -> int | None:
         """Получает текущую громкость Audacious в процентах с автоподбором синтаксиса."""
@@ -88,9 +119,8 @@ class VolumeController:
                     else:
                         logging.warning(f"[Volume] Вывод команды '{' '.join(cmd)}' не является числом: '{val_str}'")
                 else:
-                    logging.warning(
-                        f"[Volume] Команда '{' '.join(cmd)}' вернула код {res.returncode}. "
-                        f"Ошибка: {res.stderr.strip()}"
+                    logging.debug(
+                        f"[Volume] Команда '{' '.join(cmd)}' вернула код {res.returncode}."
                     )
             except Exception as e:
                 logging.debug(f"[Volume] Ошибка при выполнении '{' '.join(cmd)}': {e}")
@@ -108,38 +138,46 @@ class VolumeController:
                 )
                 if res.returncode == 0:
                     return True
-                else:
-                    logging.warning(f"[Volume] Команда '{' '.join(cmd)}' вернула код {res.returncode}: {res.stderr.strip()}")
             except Exception as e:
                 logging.debug(f"[Volume] Исключение при выполнении '{' '.join(cmd)}': {e}")
         return False
 
     def duck(self):
         """
-        Временно приглушает громкость Audacious до заданного уровня target_percent.
+        Временно приглушает громкость Audacious или ставит на паузу.
         Сохраняет исходный уровень для последующего восстановления. Метод потокобезопасен.
         """
         with self.lock:
+            # Если режим "pause", ставим играющий плеер на паузу
+            if self.mode == "pause":
+                if self.is_playback_active() and not self._paused_by_ducking:
+                    try:
+                        subprocess.run(["audtool", "--playback-pause"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.0)
+                        self._paused_by_ducking = True
+                        logging.info("[Volume] Плеер временно приостановлен на время диалога.")
+                    except Exception as e:
+                        logging.debug(f"[Volume] Ошибка паузы плеера: {e}")
+                return
+
+            # Стандартный режим "duck" (убавление громкости)
             if self._original_volume is not None:
                 logging.debug("[Volume] Громкость уже приглушена, пропускаем.")
                 return
 
             current_vol = self.get_current_volume()
             if current_vol is None:
-                logging.warning("[Volume] Не удалось получить текущую громкость Audacious. Приглушение отменено.")
+                logging.debug("[Volume] Плеер не активен, приглушение пропущено.")
                 return
 
-            # Защитный барьер: если текущая громкость плеера уже тихая (ниже или равна safe_limit),
-            # мы считаем его уже приглушенным и игнорируем вызов, чтобы не перезаписать оригинальный звук!
             if current_vol <= self.safe_limit:
-                logging.info(
-                    f"[Volume] Текущая громкость ({current_vol}%) является тихой (<= {self.safe_limit}%). "
+                logging.debug(
+                    f"[Volume] Текущая громкость ({current_vol}%) <= {self.safe_limit}%. "
                     f"Приглушение пропущено во избежание утери оригинального звука."
                 )
                 return
 
             self._original_volume = current_vol
-            self._save_cache(current_vol)  # Кэшируем исходную громкость на диск перед убавлением
+            self._save_cache(current_vol)
             
             if self._set_volume(self.target_percent):
                 logging.info(f"[Volume] Музыка приглушена: {self._original_volume}% -> {self.target_percent}%")
@@ -149,31 +187,36 @@ class VolumeController:
                 self._save_cache(None)
 
     def restore(self):
-        """Восстанавливает громкость до исходного уровня. Метод потокобезопасен и самовосстанавливается."""
+        """Восстанавливает громкость или возобновляет воспроизведение после паузы."""
         with self.lock:
-            # 1. Если ОЗУ-переменная оригинального звука пуста, пробуем поднять резервную копию с диска
+            # Восстановление паузы
+            if self._paused_by_ducking:
+                self._paused_by_ducking = False
+                try:
+                    subprocess.run(["audtool", "--playback-play"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.0)
+                    logging.info("[Volume] Воспроизведение плеера возобновлено.")
+                except Exception as e:
+                    logging.debug(f"[Volume] Ошибка возобновления плеера: {e}")
+
+            # Восстановление громкости
             if self._original_volume is None:
                 self._original_volume = self._load_cache()
 
-            # 2. Если и на диске пусто, проверяем физическое состояние плеера прямо сейчас
             if self._original_volume is None:
                 current_vol = self.get_current_volume()
                 if current_vol is not None and current_vol <= self.safe_limit:
                     logging.warning(
-                        f"[Volume] Память громкости пуста, но обнаружен застрявший тихий уровень {current_vol}%. "
-                        f"Экстренный сброс на безопасные 80%..."
+                        f"[Volume] Память громкости пуста, но обнаружен тихий уровень {current_vol}%. "
+                        f"Сброс на безопасные 80%..."
                     )
                     self._original_volume = 80
                 else:
-                    # Плеер не приглушен и кэша нет - восстанавливать нечего
                     return
 
-            # 3. Выполняем восстановление громкости
             if self._set_volume(self._original_volume):
                 logging.info(f"[Volume] Громкость музыки восстановлена до {self._original_volume}%")
             else:
                 logging.error(f"[Volume] Не удалось восстановить громкость музыки до {self._original_volume}%")
             
-            # 4. Полностью сбрасываем состояние
             self._original_volume = None
-            self._save_cache(None)  # Очищаем кэш громкости на диске
+            self._save_cache(None)

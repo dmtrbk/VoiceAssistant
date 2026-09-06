@@ -18,7 +18,7 @@ CORE_PKGS=(
     python python-pip
     portaudio alsa-utils
     git wget unzip tar
-    pipewire pipewire-pulse wireplumber libpulse
+    pipewire pipewire-pulse wireplumber libpulse webrtc-audio-processing
     audacious audacious-plugins
     cmatrix
     gnome-terminal nautilus gnome-system-monitor
