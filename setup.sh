@@ -20,7 +20,7 @@ CORE_PKGS=(
     git wget unzip tar
     pipewire pipewire-pulse wireplumber libpulse webrtc-audio-processing
     audacious audacious-plugins
-    mpv yt-dlp
+    mpv yt-dlp ffmpeg
     cmatrix
     gnome-terminal nautilus gnome-system-monitor
     htop neofetch

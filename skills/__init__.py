@@ -17,6 +17,7 @@ from .timer import TimerSkill
 from .calculator import CalculatorSkill
 from .jokes_facts import JokesAndFactsSkill
 from .movie_skill import MovieSkill
+from .music_search import MusicSearchSkill
 from .assistant_settings import AssistantSettingsSkill
 
 system_skill = SystemSkill()
@@ -26,6 +27,7 @@ local_nlu_skill = LocalNLUSkill()
 datetime_skill = DateTimeSkill()
 xiaomi_bulb_skill = XiaomiBulbSkill()
 movie_skill = MovieSkill()
+music_search_skill = MusicSearchSkill()
 audacious_skill = AudaciousSkill()
 web_search_skill = WebSearchSkill()
 maps_search_skill = MapsSearchSkill()
@@ -52,6 +54,7 @@ ALL_SKILLS = [
     jokes_skill,
     xiaomi_bulb_skill,
     movie_skill,
+    music_search_skill,
     audacious_skill,
     web_search_skill,
     maps_search_skill,

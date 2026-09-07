@@ -18,7 +18,7 @@ CONFIG_PATH = os.path.join(PROJECT_DIR, "skills_enabled.json")
 OPTIONAL_SKILLS = (
     ("xiaomi_bulb", "Свет", "Лампа Xiaomi / Yeelight"),
     ("movie", "Фильмы и видео", "ВК Видео и плеер MPV"),
-    ("audacious", "Музыка и радио", "Audacious, станции и звуки природы"),
+    ("audacious", "Музыка и радио", "Audacious, папки, плейлисты и поиск песен"),
     ("weather", "Погода", "Прогноз Open-Meteo"),
     ("timer", "Таймеры", "Отсчёт и оповещение"),
     ("calculator", "Калькулятор", "Счёт без облака"),
@@ -117,6 +117,9 @@ def skill_id_of(skill: Any) -> str | None:
     for sid, inst in _skill_map().items():
         if inst is skill:
             return sid
+    from skills import music_search_skill
+    if skill is music_search_skill:
+        return "audacious"
     return None
 
 
@@ -159,6 +162,9 @@ def _disable_runtime(skill_id: str) -> None:
     try:
         from commands import forget_skill
         forget_skill(inst)
+        if skill_id == "audacious":
+            from skills import music_search_skill
+            forget_skill(music_search_skill)
     except Exception as exc:
         logging.debug("[Настройки] forget_skill: %s", exc)
     try:

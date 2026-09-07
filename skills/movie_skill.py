@@ -115,6 +115,11 @@ def _stop_mpv_scope() -> None:
         logger.debug("[MovieSkill] Не удалось остановить %s: %s", MPV_SCOPE, exc)
 
 
+def stop_movie_player() -> None:
+    """Гасит наш MPV. Нужно, когда включается музыка."""
+    _stop_our_player()
+
+
 def _stop_our_player() -> None:
     """Закрывает только MPV навыка. Чужие окна и рестарт службы фильм не гасят."""
     global _mpv_proc

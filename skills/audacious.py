@@ -1,9 +1,7 @@
 # skills/audacious.py
 
 import os
-import re
 import logging
-import random
 import time
 import subprocess
 from skills.base import BaseSkill, RequestContext
@@ -11,6 +9,8 @@ from volume_control import VolumeController
 from skills.ai_chat import log_system_action
 from player_control import start_player_session, stop_player_session
 from triggers import MUSIC_VOLUME_HINTS
+from music_library import is_local_music_command, is_music_search, resolve_play_source
+from skills.movie_skill import stop_movie_player
 
 RADIO_STATIONS = {
     "рекорд": {
@@ -105,6 +105,7 @@ class AudaciousSkill(BaseSkill):
         self.vol_ctrl = VolumeController()
 
     def _start_playback(self, target_path: str):
+        stop_movie_player()
         started = start_player_session()
         if started:
             time.sleep(0.8)
@@ -117,8 +118,13 @@ class AudaciousSkill(BaseSkill):
     def _stop_playback(self):
         stop_player_session()
 
+    def on_disabled(self) -> None:
+        self._stop_playback()
+
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
+        if is_music_search(text):
+            return False
 
         volume_keywords = ["громче", "тише", "громкость плюс", "громкость минус", "громкость"]
         has_volume_cmd = any(w in text for w in volume_keywords)
@@ -127,12 +133,15 @@ class AudaciousSkill(BaseSkill):
         if has_volume_cmd and has_music_mention:
             return True
 
+        if is_local_music_command(text):
+            return True
+
         media_controls = [
             "пауза", "стоп музыка", "играй", "возобнови", "плей",
             "следующий", "вперед", "дальше", "следующий трек",
             "предыдущий", "назад", "прошлый трек",
             "что играет", "какой трек",
-            "включи музыку", "запусти музыку", "вруби музыку",
+            "включи музыку", "запусти музыку", "вруби музыку", "поставь музыку",
             "выключи музыку", "выруби музыку", "останови музыку", "тишина",
             "звуки природы", "шум дождя", "звуки леса", "шум моря", "звуки костра", "белый шум"
         ]
@@ -153,10 +162,6 @@ class AudaciousSkill(BaseSkill):
 
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
-
-        music_dir = os.path.expanduser("~/Музыка")
-        if not os.path.exists(music_dir):
-            music_dir = os.path.expanduser("~/Music")
 
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         playlist_path = os.path.join(base_dir, "radio_playlist.m3u")
@@ -214,7 +219,33 @@ class AudaciousSkill(BaseSkill):
                 context.speak("Плеер Audacious не запущен.")
             return
 
-        # 6. Включение фоновых звуков и радиостанций
+        # 6. Папка, плейлист или библиотека Jarvis — до радио, чтобы «папка дождь» не стала шумом дождя.
+        source = resolve_play_source(text)
+        if source is not None:
+            kind, path = source
+            if path is None or not path.exists():
+                if kind == "playlist":
+                    context.speak("Такой плейлист не нашёл.")
+                elif kind == "folder":
+                    context.speak("Такую папку не нашёл.")
+                elif kind == "all":
+                    context.speak("Я не нашёл папку Музыка в вашей домашней директории.")
+                else:
+                    context.speak("Библиотека пустая. Скажите: найди песню, и я скачаю трек.")
+                return
+            if kind == "playlist":
+                context.speak(f"Включаю плейлист {path.stem}.")
+            elif kind == "folder":
+                context.speak(f"Включаю папку {path.name}.")
+            elif kind == "all":
+                context.speak("Включаю всю музыку.")
+            else:
+                context.speak("Включаю вашу музыку.")
+            self._start_playback(str(path))
+            log_system_action(f"Пользователь включил музыку ({kind}): {path}")
+            return
+
+        # 7. Включение фоновых звуков и радиостанций
         selected_station = None
         for key, station in RADIO_STATIONS.items():
             if any(kw in text for kw in station["keywords"]):
@@ -228,21 +259,10 @@ class AudaciousSkill(BaseSkill):
             log_system_action(f"Пользователь включил {selected_station['name']}")
             return
 
-        # 7. Общее включение радио
+        # 8. Общее включение радио
         if any(w in text for w in ["радио", "радиостанци", "эфир"]):
             generate_m3u_playlist(playlist_path)
             context.speak("Включаю радио.")
             self._start_playback(playlist_path)
             log_system_action("Пользователь включил радио")
-            return
-
-        # 8. Локальная музыка
-        if any(w in text for w in ["включи музыку", "запусти музыку", "вруби музыку", "поставь музыку"]):
-            if not os.path.exists(music_dir):
-                context.speak("Я не нашёл папку Музыка в вашей домашней директории.")
-                return
-
-            context.speak("Включаю вашу музыку.")
-            self._start_playback(music_dir)
-            log_system_action("Пользователь включил локальную музыку")
             return
