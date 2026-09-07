@@ -33,20 +33,26 @@ RADIO_STATIONS = {
         "url": "http://retroserver.streamr.ru:8043/retro128",
         "keywords": ["ретро", "retro", "ретро фм"]
     },
-    "наше": {
-        "name": "Наше Радио",
-        "url": "http://nashe1.hostingradio.ru/nashe-128.mp3",
-        "keywords": ["наше", "нашего", "рок", "наше радио"]
-    },
     "панки_хой": {
         "name": "Наше Радио - Панки Хой!",
         "url": "http://nashe1.hostingradio.ru/nashepunks.mp3",
-        "keywords": ["панки хой", "панк хой", "панки", "хой"]
+        "keywords": [
+            "наше радио панки", "панки хой", "панк хой", "панкихой",
+            "панкхой", "радио панки", "панки",
+        ]
     },
     "щас_спою": {
         "name": "Наше Радио - Щас Спою!",
         "url": "http://nashe1.hostingradio.ru/nashesongs.mp3",
-        "keywords": ["щас спою", "сейчас спою", "спою"]
+        "keywords": [
+            "наше радио щас", "щас спою", "сейчас спою",
+            "щасспою", "час спою", "ща спою", "радио спою",
+        ]
+    },
+    "наше": {
+        "name": "Наше Радио",
+        "url": "http://nashe1.hostingradio.ru/nashe-128.mp3",
+        "keywords": ["наше радио", "нашего", "наше", "рок"]
     },
     "вести": {
         "name": "Вести ФМ",
@@ -58,30 +64,32 @@ RADIO_STATIONS = {
         "url": "http://icecast.vgtrk.cdnvideo.ru/mayakfm_mp3_128kbps",
         "keywords": ["маяк", "радио маяк"]
     },
-    # Фирменные звуки природы и релаксации (в стиле Алисы)
+    # Звуки природы: старые zeno.fm отдают 401, поэтому живые Icecast/Shoutcast.
     "дождь": {
         "name": "Шум дождя",
-        "url": "http://stream.zeno.fm/f3wvbbqmdg8uv",
+        "url": "https://maggie.torontocast.com:2020/stream/natureradiorain",
         "keywords": ["дождь", "дождя", "шум дождя", "звуки дождя", "ливень"]
     },
     "лес": {
         "name": "Звуки леса",
-        "url": "http://stream.zeno.fm/0r0xa792kwzuv",
+        "url": "https://a1.radio.co/s5c5da6a36/listen",
         "keywords": ["лес", "леса", "звуки леса", "звуки природы", "пение птиц", "природа", "природы"]
     },
     "море": {
         "name": "Шум моря",
-        "url": "http://stream.zeno.fm/yn9yr6shvg8uv",
+        "url": "https://az1.mediacp.eu/listen/natureradioocean/radio.mp3",
         "keywords": ["море", "моря", "шум моря", "океан", "прибой", "волны"]
     },
     "костер": {
         "name": "Звуки костра",
-        "url": "http://stream.zeno.fm/6wz2bkvhdg8uv",
-        "keywords": ["костер", "костра", "огонь", "камин", "звуки костра"]
+        # Публичного 24/7 потока камина нет; Wikimedia CC, ~1 мин, поэтому loop.
+        "url": "https://upload.wikimedia.org/wikipedia/commons/b/b1/Campfire_sound_ambience.ogg",
+        "keywords": ["костер", "костра", "огонь", "камин", "звуки костра"],
+        "loop": True,
     },
     "белый_шум": {
         "name": "Белый шум",
-        "url": "http://stream.zeno.fm/c3g4m3vhdg8uv",
+        "url": "http://uk1.internet-radio.com:8280/stream",
         "keywords": ["белый шум", "шум для сна", "звуки для сна"]
     }
 }
@@ -104,7 +112,7 @@ class AudaciousSkill(BaseSkill):
         super().__init__()
         self.vol_ctrl = VolumeController()
 
-    def _start_playback(self, target_path: str):
+    def _start_playback(self, target_path: str, *, loop: bool = False):
         stop_movie_player()
         started = start_player_session()
         if started:
@@ -114,6 +122,32 @@ class AudaciousSkill(BaseSkill):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if loop:
+            self._ensure_playlist_repeat(True)
+
+    def _ensure_playlist_repeat(self, enabled: bool) -> None:
+        """Включает повтор плейлиста — у костра запись конечная, поток иначе молчит через минуту."""
+        for delay in (0.4, 0.8, 1.2):
+            time.sleep(delay)
+            try:
+                status = subprocess.check_output(
+                    ["audtool", "playlist-repeat-status"],
+                    text=True,
+                    timeout=2,
+                    stderr=subprocess.DEVNULL,
+                ).strip().lower()
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                continue
+            is_on = status in ("on", "1", "true", "yes")
+            if is_on == enabled:
+                return
+            subprocess.run(
+                ["audtool", "playlist-repeat-toggle"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            return
 
     def _stop_playback(self):
         stop_player_session()
@@ -246,16 +280,22 @@ class AudaciousSkill(BaseSkill):
             return
 
         # 7. Включение фоновых звуков и радиостанций
+        # Самый длинный ключ: «наше радио панки хой» не должно стать обычным Нашим.
         selected_station = None
-        for key, station in RADIO_STATIONS.items():
-            if any(kw in text for kw in station["keywords"]):
-                selected_station = station
-                break
+        best_kw_len = -1
+        for station in RADIO_STATIONS.values():
+            for kw in station["keywords"]:
+                if kw and kw in text and len(kw) > best_kw_len:
+                    selected_station = station
+                    best_kw_len = len(kw)
 
         if selected_station:
             generate_m3u_playlist(playlist_path)
             context.speak(f"Включаю {selected_station['name']}.")
-            self._start_playback(selected_station["url"])
+            self._start_playback(
+                selected_station["url"],
+                loop=bool(selected_station.get("loop")),
+            )
             log_system_action(f"Пользователь включил {selected_station['name']}")
             return
 

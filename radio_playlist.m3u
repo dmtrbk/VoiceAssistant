@@ -7,23 +7,23 @@ http://ep128.hostingradio.ru:8030/ep128
 http://dorognoe.hostingradio.ru:8000/dorognoe
 #EXTINF:-1,Ретро ФМ
 http://retroserver.streamr.ru:8043/retro128
-#EXTINF:-1,Наше Радио
-http://nashe1.hostingradio.ru/nashe-128.mp3
 #EXTINF:-1,Наше Радио - Панки Хой!
 http://nashe1.hostingradio.ru/nashepunks.mp3
 #EXTINF:-1,Наше Радио - Щас Спою!
 http://nashe1.hostingradio.ru/nashesongs.mp3
+#EXTINF:-1,Наше Радио
+http://nashe1.hostingradio.ru/nashe-128.mp3
 #EXTINF:-1,Вести ФМ
 http://icecast.vgtrk.cdnvideo.ru/vestifm_mp3_128kbps
 #EXTINF:-1,Радио Маяк
 http://icecast.vgtrk.cdnvideo.ru/mayakfm_mp3_128kbps
 #EXTINF:-1,Шум дождя
-http://stream.zeno.fm/f3wvbbqmdg8uv
+https://maggie.torontocast.com:2020/stream/natureradiorain
 #EXTINF:-1,Звуки леса
-http://stream.zeno.fm/0r0xa792kwzuv
+https://a1.radio.co/s5c5da6a36/listen
 #EXTINF:-1,Шум моря
-http://stream.zeno.fm/yn9yr6shvg8uv
+https://az1.mediacp.eu/listen/natureradioocean/radio.mp3
 #EXTINF:-1,Звуки костра
-http://stream.zeno.fm/6wz2bkvhdg8uv
+https://upload.wikimedia.org/wikipedia/commons/b/b1/Campfire_sound_ambience.ogg
 #EXTINF:-1,Белый шум
-http://stream.zeno.fm/c3g4m3vhdg8uv
+http://uk1.internet-radio.com:8280/stream
