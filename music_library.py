@@ -16,10 +16,16 @@ _WORD = r"[а-яёa-z0-9]"
 AUDIO_EXTS = {".mp3", ".opus", ".m4a", ".ogg", ".flac", ".wav", ".aac", ".wma"}
 PLAYLIST_EXTS = {".m3u", ".m3u8"}
 _PLAY_VERBS = ("включи", "запусти", "вруби", "поставь")
-_SEARCH_VERBS = ("найди", "поищи", "скачай", "загрузи")
-_TRACK_NOUNS = ("песню", "песня", "трек", "альбом")
-_MUSIC_NOUNS = _TRACK_NOUNS + ("песен", "трека", "музыку", "музыка")
+_SEARCH_VERBS = ("найди", "найти", "поищи", "ищи", "скачай", "загрузи")
+# «песней» — Vosk вместо «песню»; плюс живые падежи.
+_SONG_NOUNS = (
+    "песню", "песня", "песни", "песней", "песне", "песен",
+    "песенку", "песенка", "песену",
+)
+_TRACK_NOUNS = _SONG_NOUNS + ("трек", "трека", "альбом")
+_MUSIC_NOUNS = _TRACK_NOUNS + ("музыку", "музыка", "музыки")
 _ROOT_NAMES = ("музыка", "музыки", "music")
+_SONG_ALT = "|".join(_SONG_NOUNS + ("трек", "трека", "музыку", "альбом"))
 
 
 def _norm(text: str) -> str:
@@ -86,7 +92,7 @@ def is_local_music_command(text: str) -> bool:
     if "всю музыку" in lowered:
         return True
     if _has_any_word(lowered, ("музыку", "музыка")) and not _has_any_word(
-        lowered, ("песню", "песня", "трек", "альбом")
+        lowered, _TRACK_NOUNS
     ):
         return True
     return False
@@ -111,8 +117,8 @@ def extract_folder_name(text: str) -> str:
 def extract_music_query(text: str) -> str:
     cleaned = _norm(text)
     cleaned = re.sub(
-        r"^.*?(?:найди|поищи|скачай|загрузи|поставь|включи|запусти|вруби)\s+"
-        r"(?:мне\s+)?(?:песню|песня|трек|музыку|альбом)\s*",
+        rf"^.*?(?:найди|найти|поищи|ищи|скачай|загрузи|поставь|включи|запусти|вруби)\s+"
+        rf"(?:мне\s+)?(?:{_SONG_ALT})\s*",
         "",
         cleaned,
     )
