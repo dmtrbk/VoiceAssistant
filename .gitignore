@@ -16,3 +16,4 @@ skills/shared_events.json
 volume_cache.json
 skills_enabled.json
 .vscode/
+.tts_cache/

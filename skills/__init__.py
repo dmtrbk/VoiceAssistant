@@ -16,6 +16,7 @@ from .weather import WeatherSkill
 from .timer import TimerSkill
 from .calculator import CalculatorSkill
 from .jokes_facts import JokesAndFactsSkill
+from .games import GamesAndRandomSkill
 from .movie_skill import MovieSkill
 from .music_search import MusicSearchSkill
 from .assistant_settings import AssistantSettingsSkill
@@ -38,6 +39,7 @@ weather_skill = WeatherSkill()
 timer_skill = TimerSkill()
 calculator_skill = CalculatorSkill()
 jokes_skill = JokesAndFactsSkill()
+games_skill = GamesAndRandomSkill()
 assistant_settings_skill = AssistantSettingsSkill()
 
 # Приоритет: узкие навыки, затем NLU (прощание / монетка), затем Groq.
@@ -51,6 +53,7 @@ ALL_SKILLS = [
     calculator_skill,
     weather_skill,
     datetime_skill,
+    games_skill,
     jokes_skill,
     xiaomi_bulb_skill,
     movie_skill,

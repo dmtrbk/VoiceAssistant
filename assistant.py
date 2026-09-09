@@ -43,6 +43,7 @@ from player_control import emergency_silence
 from skills.movie_skill import is_movie_control_phrase, is_movie_playing
 from telegram_listener import run_telegram_listener
 from volume_control import VolumeController
+from tts_cache import get_or_synthesize_wav, precache_common_phrases
 from triggers import (
     is_quick_command,
     is_emergency_stop,
@@ -210,7 +211,7 @@ def handle_hold_interrupt(recognizer):
 
 
 def speak(text, recognizer=None):
-    """Синтезирует аудио в файл на ОЗУ-диске и проигрывает его в асинхронном режиме."""
+    """Синтезирует аудио (с мгновенной отдачей из TTS-кэша) и проигрывает его в асинхронном режиме."""
     global is_speaking, playback_interrupted, play_process, last_active_time, last_speak_end_time
     global last_spoken_text
     if not text:
@@ -223,28 +224,9 @@ def speak(text, recognizer=None):
     
     logging.info(f"Ассистент: {text}")
     try:
-        cmd = [
-            PIPER_EXE, 
-            "--model", PIPER_MODEL, 
-            "--output_file", TEMP_AUDIO_PATH,
-            "--length_scale", VOICE_SPEED  
-        ]
-        
-        if VOICE_SPEAKER is not None:
-            cmd.extend(["--speaker", VOICE_SPEAKER])
-
-        piper_process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding='utf-8'
-        )
-        _, stderr = piper_process.communicate(input=text)
-
-        if piper_process.returncode != 0:
-            logging.error(f"Ошибка синтеза Piper: {stderr.strip()}")
+        audio_file, was_cached = get_or_synthesize_wav(text, TEMP_AUDIO_PATH)
+        if not audio_file or not os.path.exists(audio_file):
+            logging.error("[TTS] Аудиофайл не был создан.")
             is_speaking = False
             status_queue.put("listening" if is_active else "idle")
             return
@@ -254,7 +236,7 @@ def speak(text, recognizer=None):
 
         try:
             play_process = subprocess.Popen(
-                ["paplay", TEMP_AUDIO_PATH],
+                ["paplay", audio_file],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
@@ -608,6 +590,23 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+    from cli import run_interactive_loop
+
+    parser = argparse.ArgumentParser(description="Голосовой ассистент Джарвис (Manjaro GNOME)")
+    parser.add_argument("-c", "--cli", action="store_true", help="Запустить в текстовом консольном режиме (CLI)")
+    parser.add_argument("--no-gui", "--headless", action="store_true", help="Запустить голосовой ассистент без графического виджета-сферы")
+    parser.add_argument("-m", "--mute", action="store_true", help="Отключить динамики (только для CLI)")
+
+    args, unknown = parser.parse_known_args()
+
+    # Проверка переменных окружения
+    env_cli = os.getenv("CONSOLE_MODE", "false").lower() in ["1", "true", "yes"]
+    env_no_gui = os.getenv("GUI_ENABLED", "true").lower() in ["0", "false", "no"]
+
+    if args.cli or env_cli:
+        run_interactive_loop(mute=args.mute)
+        sys.exit(0)
 
     # Создаем обработчик, который перехватит Ctrl+C и закроет программу чисто
     def sigint_handler(sig, frame):
@@ -618,11 +617,21 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, sigint_handler)
 
     try:
-        # 1. Запускаем основной поток распознавания Vosk в фоне
-        assistant_thread = threading.Thread(target=main, daemon=True)
-        assistant_thread.start()
-        
-        # 2. На основном потоке запускаем Qt6 GUI
-        run_gui()
+        # Фоновый прогрев кэша частых фраз
+        threading.Thread(
+            target=lambda: precache_common_phrases(ACTIVATION_PHRASES + ["Слушаю вас", "Да?", "Я здесь", "Тут я", "На связи!"]),
+            daemon=True
+        ).start()
+
+        if args.no_gui or env_no_gui:
+            logging.info("[Система] Запуск в headless-режиме (без GUI)...")
+            main()
+        else:
+            # 1. Запускаем основной поток распознавания Vosk в фоне
+            assistant_thread = threading.Thread(target=main, daemon=True)
+            assistant_thread.start()
+            
+            # 2. На основном потоке запускаем Qt6 GUI
+            run_gui()
     except KeyboardInterrupt:
         logging.info("Ассистент выключен.")

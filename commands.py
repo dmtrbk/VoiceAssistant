@@ -9,6 +9,7 @@ from skills import ALL_SKILLS, local_nlu_skill, ai_chat_skill
 from skills.base import RequestContext
 from skill_settings import is_skill_enabled
 from triggers import is_filler, is_garbled_utterance, split_quick_compound
+from context_manager import is_in_context, handle_context_input
 
 _EXECUTE_LOCK = threading.Lock()
 
@@ -20,7 +21,7 @@ _last_skill_time = 0.0
 
 def execute(text: str, speak_callback) -> bool:
     """
-    Маршрутизатор: NLU → узкие навыки → follow-up → Groq.
+    Маршрутизатор: Контекст → NLU → узкие навыки → follow-up → Groq.
     Возвращает True, если сессию нужно усыпить (прощание).
     """
     text = text.lower().strip()
@@ -28,6 +29,12 @@ def execute(text: str, speak_callback) -> bool:
         return False
 
     with _EXECUTE_LOCK:
+        # 1. Если активен интерактивный контекст (игра, опрос, подтверждение)
+        if is_in_context():
+            handled, should_sleep = handle_context_input(text, speak_callback)
+            if handled:
+                return should_sleep
+
         should_sleep = False
         for part in split_quick_compound(text):
             should_sleep = _execute_locked(part, speak_callback) or should_sleep

@@ -35,6 +35,9 @@
 ```
 VoiceAssistant/
 ├── assistant.py              # Оркестратор: Vosk, Piper (Dmitri), сессия, GUI
+├── cli.py                    # Консольный текстовый интерфейс (CLI)
+├── tts_cache.py              # Кэширование аудио для мгновенного отклика TTS
+├── context_manager.py        # Диалоговые контексты (игры, подтверждения)
 ├── telegram_listener.py      # Входящие команды Telegram Bot API
 ├── commands.py               # Маршрутизатор по цепочке навыков
 ├── triggers.py               # Общие триггеры: стоп / замолчи / спать / тишина
@@ -63,6 +66,7 @@ VoiceAssistant/
     ├── timer.py              # Таймеры и будильники
     ├── calculator.py         # Быстрый калькулятор и математика
     ├── jokes_facts.py        # Анекдоты, факты, тосты, сказки, комплименты
+    ├── games.py              # Игра «Больше-Меньше», кубики (d6/d20), рандомайзер
     ├── datetime_skill.py     # Дата, время, день недели
     ├── movie_skill.py        # Фильмы, сериалы, ВК Видео и плеер MPV
     ├── music_search.py       # Поиск и скачивание песни в ~/Музыка/Jarvis
@@ -167,6 +171,31 @@ wget -O piper/models/ru_RU-dmitri-medium.onnx \
   https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx
 wget -O piper/models/ru_RU-dmitri-medium.onnx.json \
   https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx.json
+```
+
+---
+
+## Консольный режим (CLI) и быстрый тест
+
+Для проверки команд без микрофона, отладки навыков или работы по SSH используйте утилиту `cli.py`:
+
+```bash
+# 1. Интерактивный диалог в терминале (с озвучкой через динамики)
+python cli.py
+
+# 2. Интерактивный режим БЕЗ звука (только текст)
+python cli.py --mute
+
+# 3. Разовая команда напрямую из командной строки
+python cli.py "сколько будет 25 умножить на 4"
+python cli.py "какая погода в москве"
+python cli.py "брось два кубика"
+
+# 4. Запуск ассистента в CLI-режиме через assistant.py
+python assistant.py --cli
+
+# 5. Запуск ассистента без графического окна (headless)
+python assistant.py --no-gui
 ```
 
 ---
