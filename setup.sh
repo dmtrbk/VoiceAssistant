@@ -65,8 +65,12 @@ TELEGRAM_CHAT_ID=
 PIPER_MODEL=ru_RU-dmitri-medium.onnx
 VOICE_SPEED=1.0
 
-# Город по умолчанию для прогноза погоды
+# Погода по умолчанию: город (геокодинг) и/или точные координаты.
+# Если заданы DEFAULT_LAT и DEFAULT_LON, «какая погода» без города идёт в эту точку.
+# DEFAULT_CITY тогда только имя вслух; пустое имя озвучивается как «здесь».
 DEFAULT_CITY=Москва
+# DEFAULT_LAT=
+# DEFAULT_LON=
 
 # Лампа Xiaomi / Yeelight (опционально)
 XIAOMI_BULB_IP=
@@ -228,8 +232,8 @@ echo "   systemctl --user status voice-assistant.service   # Статус"
 echo "   journalctl --user -u voice-assistant.service -f   # Логи"
 echo ""
 echo "3. Консольный текстовый режим:"
-echo "   python cli.py          # Интерактивный диалог в терминале"
-echo "   python cli.py --mute   # Режим без звука"
+echo "   $VENV_DIR/bin/python cli.py          # Интерактивный диалог в терминале"
+echo "   $VENV_DIR/bin/python cli.py --mute   # Режим без звука"
 echo ""
 echo "4. Настройка аппаратного эхоподавления (AEC):"
 echo "   ./setup_echo_cancel.sh"

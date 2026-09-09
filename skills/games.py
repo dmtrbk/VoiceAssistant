@@ -88,61 +88,60 @@ class GuessNumberGame:
             return True
 
 
+GAME_TRIGGERS = [
+    "больше меньше",
+    "сыграем в больше",
+    "игра больше меньше",
+    "угадай число",
+    "загадай число",
+    "поиграем в число",
+    "сыграем в угадайку",
+]
+DICE_TRIGGERS = [
+    "брось кубик", "кинь кубик", "бросить кубик", "кинуть кубик",
+    "брось кости", "кинь кости", "брось два кубика", "кинь два кубика",
+    "брось кость", "кинь кость", "d20", "двадцатигранник", "d6",
+    "брось кубики", "кинь кубики",
+]
+RANDOM_TRIGGERS = [
+    "случайное число", "рандомное число", "назови число от",
+    "сгенерируй число",
+]
+
+
 class GamesAndRandomSkill(BaseSkill):
-    """Навык интерактивных игр (Больше-Меньше) и генераторов случайных событий (кубики, рандом, выбор)."""
+    """Игры и генераторы: больше-меньше, кубики, случайное число, выбор из вариантов."""
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
-
-        # 1. Игра Больше-Меньше
-        game_triggers = [
-            "больше меньше", "игра больше", "сыграем в больше", "сыграем в игру",
-            "угадай число", "загадай число", "поиграем в число", "давай сыграем"
-        ]
-        if any(t in text for t in game_triggers):
+        if any(t in text for t in GAME_TRIGGERS):
             return True
-
-        # 2. Игральные кости и кубики
-        dice_triggers = [
-            "брось кубик", "кинь кубик", "бросить кубик", "кинуть кубик",
-            "брось кости", "кинь кости", "брось два кубика", "кинь два кубика",
-            "брось кость", "кинь кость", "d20", "двадцатигранник", "d6",
-            "брось кубики", "кинь кубики"
-        ]
-        if any(t in text for t in dice_triggers):
+        if any(t in text for t in DICE_TRIGGERS):
             return True
-
-        # 3. Случайное число
-        random_triggers = [
-            "случайное число", "рандомное число", "назови число от",
-            "число от", "сгенерируй число"
-        ]
-        if any(t in text for t in random_triggers):
+        if any(t in text for t in RANDOM_TRIGGERS):
             return True
-
-        # 4. Случайный выбор (выбери X или Y)
-        if ("выбери" in text or "что выбрать" in text or "что лучше" in text) and "или" in text:
+        if ("выбери" in text or "что выбрать" in text) and "или" in text:
             return True
-
         return False
+
+    def on_disabled(self) -> None:
+        clear_active_context()
 
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
 
-        # 1. Запуск игры «Больше — Меньше»
-        if any(w in text for w in ["больше меньше", "угадай число", "загадай число", "сыграем", "поиграем"]):
+        if any(t in text for t in GAME_TRIGGERS):
             game = GuessNumberGame()
             set_active_context(
                 name="game_more_less",
                 handler=game.handle_turn,
                 timeout_sec=60.0,
-                on_exit=lambda speak: speak(f"Игра окончена. Было загадано число {game.secret}.")
+                on_exit=lambda speak: speak(f"Игра окончена. Было загадано число {game.secret}."),
             )
             context.speak("Я загадал число от 1 до 100. Попробуйте угадать! Называйте число.")
             return
 
-        # 2. Бросок игральных кубиков
-        if any(w in text for w in ["кубик", "кости", "d20", "двадцатигранник"]):
+        if any(t in text for t in DICE_TRIGGERS):
             if "d20" in text or "двадцатигранник" in text:
                 val = random.randint(1, 20)
                 context.speak(f"Бросил двадцатигранник. Выпало {val}.")
@@ -151,15 +150,16 @@ class GamesAndRandomSkill(BaseSkill):
             if "два" in text or "2" in text or "пару" in text:
                 d1 = random.randint(1, 6)
                 d2 = random.randint(1, 6)
-                context.speak(f"Бросил два кубика. На первом {d1}, на втором {d2}. В сумме {d1 + d2}.")
+                context.speak(
+                    f"Бросил два кубика. На первом {d1}, на втором {d2}. В сумме {d1 + d2}."
+                )
                 return
 
             val = random.randint(1, 6)
             context.speak(f"Бросил кубик. Выпало {val}.")
             return
 
-        # 3. Генератор случайных чисел
-        if any(w in text for w in ["случайное число", "рандомное число", "число от"]):
+        if any(t in text for t in RANDOM_TRIGGERS):
             match = re.search(r"от\s+(\d+)\s+до\s+(\d+)", text)
             if match:
                 min_v = int(match.group(1))
@@ -181,13 +181,11 @@ class GamesAndRandomSkill(BaseSkill):
             context.speak(f"Случайное число: {val}.")
             return
 
-        # 4. Случайный выбор (выбери X или Y)
         if "или" in text:
-            # Выделяем варианты
             parts = text
-            for remove_prefix in ["выбери", "что выбрать", "что лучше", "посоветуй"]:
+            for remove_prefix in ["выбери", "что выбрать", "посоветуй"]:
                 parts = re.sub(rf"^{remove_prefix}\s+", "", parts).strip()
-            
+
             options = [p.strip() for p in parts.split("или") if p.strip()]
             if len(options) >= 2:
                 chosen = random.choice(options).rstrip(".,!?")
@@ -195,9 +193,11 @@ class GamesAndRandomSkill(BaseSkill):
                     f"Я выбираю {chosen}.",
                     f"Определённо {chosen}.",
                     f"Мой выбор — {chosen}.",
-                    f"Думаю, лучше {chosen}."
+                    f"Думаю, лучше {chosen}.",
                 ]
                 context.speak(random.choice(templates))
                 return
 
-        context.speak("Не удалось определить параметры игры. Скажите, например: 'брось кубик' или 'сыграем в больше меньше'.")
+        context.speak(
+            "Не удалось определить параметры игры. Скажите, например: брось кубик или сыграем в больше меньше."
+        )

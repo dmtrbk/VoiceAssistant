@@ -4,8 +4,6 @@ import os
 import hashlib
 import logging
 import subprocess
-import time
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +17,18 @@ PIPER_MODEL = os.path.join(PIPER_DIR, "models", PIPER_MODEL_NAME)
 VOICE_SPEED = os.getenv("VOICE_SPEED", "1.0")
 VOICE_SPEAKER = os.getenv("VOICE_SPEAKER", None)
 
-# Максимальная длина фразы для постоянного кэширования (длинные уникальные ответы Groq не засоряют диск)
-MAX_CACHE_TEXT_LEN = 250
+SYSTEM_CACHE_PHRASES = [
+    "Да?",
+    "Слушаю вас",
+    "Я здесь",
+    "Тут я",
+    "На связи!",
+    "Да-да, слушаю",
+    "Готов к работе",
+    "Этот навык сейчас выключен.",
+    "Не расслышал, повторите, пожалуйста.",
+    "До связи!",
+]
 
 
 def init_cache_dir() -> str:
@@ -43,13 +51,10 @@ def get_cache_key(text: str, model_path: str = PIPER_MODEL, speed: str = VOICE_S
 
 def get_cached_audio_path(text: str) -> str | None:
     """Возвращает путь к сохраненному wav-файлу, если он уже есть в кэше."""
-    if len(text.strip()) > MAX_CACHE_TEXT_LEN:
-        return None
-    
     init_cache_dir()
     key = get_cache_key(text)
     file_path = os.path.join(CACHE_DIR, f"{key}.wav")
-    if os.path.exists(file_path) and os.path.getsize(file_path) > 44:  # 44 байта — мин. заголовок WAV
+    if os.path.exists(file_path) and os.path.getsize(file_path) > 44:
         return file_path
     return None
 
@@ -87,30 +92,34 @@ def synthesize_to_file(text: str, output_path: str) -> bool:
         return False
 
 
-def get_or_synthesize_wav(text: str, temp_fallback_path: str = "/dev/shm/tts_output.wav") -> tuple[str, bool]:
+def get_or_synthesize_wav(
+    text: str,
+    temp_fallback_path: str = "/dev/shm/tts_output.wav",
+    persist: bool = False,
+) -> tuple[str, bool]:
     """
-    Получает путь к WAV-файлу.
-    Возвращает (path, was_cached: bool).
+    Синтезирует WAV. На диск в .tts_cache пишет только persist=True
+    (прогрев системных фраз). Остальное — во временный файл.
     """
     clean_text = text.strip()
     if not clean_text:
         return "", False
 
-    # 1. Проверяем кэш
     cached_path = get_cached_audio_path(clean_text)
     if cached_path:
         return cached_path, True
 
-    # 2. Если фраза короткая / постоянная — сохраняем прямо в кэш
-    if len(clean_text) <= MAX_CACHE_TEXT_LEN:
+    if persist:
         init_cache_dir()
         key = get_cache_key(clean_text)
         target_path = os.path.join(CACHE_DIR, f"{key}.wav")
         if synthesize_to_file(clean_text, target_path):
             return target_path, False
 
-    # 3. Для длинных уникальных реплик используем fallback (RAM-диск)
-    target_path = temp_fallback_path if os.path.exists("/dev/shm") else os.path.join(BASE_DIR, "tts_output.wav")
+    target_path = (
+        temp_fallback_path if os.path.exists("/dev/shm")
+        else os.path.join(BASE_DIR, "tts_output.wav")
+    )
     success = synthesize_to_file(clean_text, target_path)
     return (target_path if success else ""), False
 

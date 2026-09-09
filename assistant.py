@@ -43,7 +43,8 @@ from player_control import emergency_silence
 from skills.movie_skill import is_movie_control_phrase, is_movie_playing
 from telegram_listener import run_telegram_listener
 from volume_control import VolumeController
-from tts_cache import get_or_synthesize_wav, precache_common_phrases
+from tts_cache import get_or_synthesize_wav, precache_common_phrases, SYSTEM_CACHE_PHRASES
+from context_manager import clear_active_context, is_in_context
 from triggers import (
     is_quick_command,
     is_emergency_stop,
@@ -173,6 +174,7 @@ def go_idle():
     is_active = False
     asked_to_repeat = False
     awaiting_followup = False
+    clear_active_context()
     status_queue.put("idle")
     volume_ctrl.restore()
 
@@ -505,7 +507,13 @@ def main():
 
                 # Сессионные команды: авария / сон / стоп TTS. «тишина» сюда не входит.
                 if is_emergency_stop(text):
-                    handle_emergency_stop(recognizer)
+                    if is_in_context():
+                        phrase = _strip_wake(text, detected_wake_word) or text
+                        stop_speaking(to_idle=False)
+                        keep_session_alive()
+                        execute_command_async(phrase, safe_speak)
+                    else:
+                        handle_emergency_stop(recognizer)
                     continue
 
                 if is_sleep_command(text):
@@ -569,7 +577,8 @@ def main():
                         continue
 
                     if is_emergency_stop(partial_text):
-                        handle_emergency_stop(recognizer)
+                        if not is_in_context():
+                            handle_emergency_stop(recognizer)
                         continue
 
                     if is_sleep_command(partial_text):
@@ -619,7 +628,9 @@ if __name__ == "__main__":
     try:
         # Фоновый прогрев кэша частых фраз
         threading.Thread(
-            target=lambda: precache_common_phrases(ACTIVATION_PHRASES + ["Слушаю вас", "Да?", "Я здесь", "Тут я", "На связи!"]),
+            target=lambda: precache_common_phrases(
+                list(dict.fromkeys(ACTIVATION_PHRASES + SYSTEM_CACHE_PHRASES))
+            ),
             daemon=True
         ).start()
 

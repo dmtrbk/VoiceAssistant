@@ -52,10 +52,24 @@ CITY_ALIASES = {
     "казани": "Казань",
     "казань": "Казань",
     "краснодаре": "Краснодар",
+    "краснодар": "Краснодар",
     "новосибирске": "Новосибирск",
+    "новосибирск": "Новосибирск",
     "самаре": "Самара",
+    "самара": "Самара",
     "уфе": "Уфа",
+    "уфа": "Уфа",
 }
+
+_CITY_FILLERS = (
+    "городе", "город", "сегодня", "завтра", "сейчас",
+    "утром", "вечером", "днем", "днём", "ночью", "пожалуйста",
+)
+
+_FOLLOWUP_MARKERS = (
+    "завтра", "сегодня", "послезавтра", "дождь", "зонт",
+    "осадки", "там",
+)
 
 
 def format_temperature(temp_val: float) -> str:
@@ -91,12 +105,39 @@ def format_wind(speed_kmh: float) -> str:
 
 
 class WeatherSkill(BaseSkill):
-    """Фирменный навык прогноза погоды в стиле Алисы."""
+    """Прогноз погоды: город из фразы или точка DEFAULT_LAT/DEFAULT_LON."""
 
     def __init__(self):
-        self.default_city = os.getenv("DEFAULT_CITY", "Москва").strip()
-        self._cached_coords = {}
-        self._last_city = None
+        named_city = (os.getenv("DEFAULT_CITY") or "").strip()
+        self._cached_coords: dict[str, tuple[float, float, str]] = {}
+        self._last_city: str | None = None
+        self._last_was_default = False
+        self._default_coords: tuple[float, float] | None = None
+        self._default_label = named_city
+
+        default_lat = os.getenv("DEFAULT_LAT") or os.getenv("DEFAULT_LATITUDE")
+        default_lon = os.getenv("DEFAULT_LON") or os.getenv("DEFAULT_LONGITUDE")
+        if default_lat and default_lon:
+            try:
+                lat = float(default_lat)
+                lon = float(default_lon)
+                if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                    raise ValueError("вне диапазона")
+                self._default_coords = (lat, lon)
+                if not self._default_label:
+                    self._default_label = "здесь"
+                logger.info(
+                    "[Погода] Точка по умолчанию: %s, %s (%s)",
+                    lat, lon, self._default_label,
+                )
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "[Погода] Некорректные координаты в .env: %s, %s (%s)",
+                    default_lat, default_lon, exc,
+                )
+
+        if not self._default_coords and not self._default_label:
+            self._default_label = "Москва"
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
@@ -113,45 +154,54 @@ class WeatherSkill(BaseSkill):
 
     def accepts_followup(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
-        if any(w in text for w in [
-            "завтра", "сегодня", "послезавтра", "дождь", "зонт",
-            "осадки", "ветер", "градус"
-        ]):
-            return True
-        if re.search(r"\bтам\b", text):
-            return True
-        if text.startswith("а ") or text.startswith("а,"):
+        if any(marker in text for marker in _FOLLOWUP_MARKERS):
             return True
         for alias in CITY_ALIASES:
             if re.search(rf"\b{re.escape(alias)}\b", text):
                 return True
         return False
 
-    def _extract_target_city(self, text: str) -> tuple[str, bool]:
-        """Извлекает название города и признак запроса на завтра."""
+    def _extract_target_city(self, text: str) -> tuple[str | None, bool]:
+        """Город из фразы. None — точка по умолчанию (координаты или DEFAULT_CITY)."""
         is_tomorrow = any(w in text for w in ["завтра", "на завтра", "завтрашний", "завтрашняя"])
 
-        # Проверяем поиск по предлогам "в", "во", "по"
-        match = re.search(r"\b(?:в|во|по|городе|город)\s+([а-яёА-ЯЁ\-]+(?:\s+[а-яёА-ЯЁ\-]+)?)", text)
+        match = re.search(
+            r"\b(?:в|во|по|городе|город)\s+([а-яёА-ЯЁ\-]+(?:\s+[а-яёА-ЯЁ\-]+)?)",
+            text,
+        )
         if match:
             raw_city = match.group(1).strip()
-            # Отсекаем временные маркеры, если они попали
-            raw_city = re.sub(r"\b(городе|город|сегодня|завтра|сейчас|утром|вечером|днем|ночью|пожалуйста)\b", "", raw_city).strip()
+            raw_city = re.sub(
+                r"\b(" + "|".join(_CITY_FILLERS) + r")\b",
+                "",
+                raw_city,
+            ).strip()
             if raw_city:
                 alias = CITY_ALIASES.get(raw_city.lower())
                 if alias:
                     return alias, is_tomorrow
-                # Снимаем падеж, если заканчивается на 'е' или 'и'
-                if raw_city.endswith("е") or raw_city.endswith("и") or raw_city.endswith("у"):
-                    return raw_city[:-1], is_tomorrow
                 return raw_city, is_tomorrow
 
-        # Проверяем алиасы в тексте
-        for k, v in CITY_ALIASES.items():
-            if re.search(rf"\b{k}\b", text):
-                return v, is_tomorrow
+        for key, official in CITY_ALIASES.items():
+            if re.search(rf"\b{re.escape(key)}\b", text):
+                return official, is_tomorrow
 
-        return (self._last_city or self.default_city), is_tomorrow
+        if self._last_city and not self._last_was_default:
+            return self._last_city, is_tomorrow
+        return None, is_tomorrow
+
+    def _default_geo(self) -> tuple[float, float, str] | None:
+        if self._default_coords is not None:
+            lat, lon = self._default_coords
+            return lat, lon, self._default_label
+        if self._default_label:
+            return self._get_coordinates(self._default_label)
+        return None
+
+    def _place_clause(self, name: str, is_default: bool) -> str:
+        if is_default and name.lower() in {"здесь", "дома", "у нас"}:
+            return "Здесь"
+        return f"В городе {name}"
 
     def _get_coordinates(self, city_name: str) -> tuple[float, float, str] | None:
         """Получает координаты города через Open-Meteo Geocoding API."""
@@ -179,17 +229,24 @@ class WeatherSkill(BaseSkill):
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
         city_query, is_tomorrow = self._extract_target_city(text)
+        used_default = city_query is None
 
-        geo = self._get_coordinates(city_query)
+        if used_default:
+            geo = self._default_geo()
+        else:
+            geo = self._get_coordinates(city_query)
+
         if not geo:
-            # Попробуем fallback на дефолтный город
-            geo = self._get_coordinates(self.default_city)
-            if not geo:
+            if used_default:
+                context.speak("Не удалось получить погоду для вашей точки. Проверьте координаты в настройках.")
+            else:
                 context.speak(f"Не удалось найти информацию о погоде для города {city_query}.")
-                return
+            return
 
         lat, lon, city_display_name = geo
-        self._last_city = city_display_name
+        self._last_city = None if used_default else city_display_name
+        self._last_was_default = used_default
+        place = self._place_clause(city_display_name, used_default)
 
         try:
             weather_url = "https://api.open-meteo.com/v1/forecast"
@@ -228,12 +285,14 @@ class WeatherSkill(BaseSkill):
 
                     if is_rain_query:
                         if tom_precip > 0.5 or tom_code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95]:
-                            context.speak(f"Завтра в городе {city_display_name} ожидается дождь. Зонт пригодится! Днем {temp_desc}.")
+                            context.speak(f"Завтра {place.lower()} ожидается дождь. Зонт пригодится! Днем {temp_desc}.")
                         else:
-                            context.speak(f"Завтра в городе {city_display_name} без осадков, {desc}. Днем около {temp_desc}.")
+                            context.speak(f"Завтра {place.lower()} без осадков, {desc}. Днем около {temp_desc}.")
                         return
 
-                    context.speak(f"Завтра в городе {city_display_name} {desc}, днем до {temp_desc}, ночью около {format_temperature(tom_min)}.")
+                    context.speak(
+                        f"Завтра {place.lower()} {desc}, днем до {temp_desc}, ночью около {format_temperature(tom_min)}."
+                    )
                     return
 
             # Текущая погода
@@ -251,13 +310,15 @@ class WeatherSkill(BaseSkill):
 
             if is_rain_query:
                 if precipitation > 0.1 or w_code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95]:
-                    context.speak(f"Сейчас в городе {city_display_name} идет дождь. Температура {temp_str}.")
+                    context.speak(f"Сейчас {place.lower()} идет дождь. Температура {temp_str}.")
                 else:
-                    context.speak(f"Сейчас в городе {city_display_name} дождя нет, {desc}. Температура {temp_str}.")
+                    context.speak(f"Сейчас {place.lower()} дождя нет, {desc}. Температура {temp_str}.")
                 return
 
-            # Полная реплика в стиле Алисы
-            speech = f"В городе {city_display_name} сейчас {temp_str}, {desc}. Ощущается как {app_str}. Ветер {wind_str}."
+            speech = (
+                f"{place} сейчас {temp_str}, {desc}. "
+                f"Ощущается как {app_str}. Ветер {wind_str}."
+            )
             context.speak(speech)
 
         except Exception as e:

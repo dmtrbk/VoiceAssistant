@@ -6,10 +6,11 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-EXIT_COMMANDS = {
-    "хватит", "стоп", "выход", "отмена", "отбой", "закрой",
-    "прекрати", "закончить", "выйти", "выйди", "хватит играть", "сдаюсь"
+EXIT_EXACT = {
+    "хватит", "стоп", "выход", "отмена", "прекрати",
+    "закончить", "выйти", "выйди", "сдаюсь",
 }
+EXIT_PHRASES = ("хватит играть", "я сдаюсь", "закончить игру")
 
 
 class DialogContext:
@@ -83,6 +84,12 @@ def is_in_context() -> bool:
     return get_active_context() is not None
 
 
+def _is_context_exit(text: str) -> bool:
+    if text in EXIT_EXACT:
+        return True
+    return any(phrase in text for phrase in EXIT_PHRASES)
+
+
 def handle_context_input(text: str, speak_callback: Callable[[str], None]) -> tuple[bool, bool]:
     """
     Пытается обработать входящий текст в рамках активного контекста.
@@ -94,8 +101,7 @@ def handle_context_input(text: str, speak_callback: Callable[[str], None]) -> tu
 
     clean_text = text.lower().strip()
 
-    # Проверка выхода из контекста
-    if any(cmd in clean_text.split() or clean_text == cmd for cmd in EXIT_COMMANDS):
+    if _is_context_exit(clean_text):
         clear_active_context(call_on_exit=True, speak_callback=speak_callback)
         return True, False
 
