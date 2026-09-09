@@ -22,6 +22,7 @@ OPTIONAL_SKILLS = (
     ("weather", "Погода", "Прогноз Open-Meteo"),
     ("timer", "Таймеры", "Отсчёт и оповещение"),
     ("calculator", "Калькулятор", "Счёт без облака"),
+    ("games", "Игры и рандомайзер", "Больше-Меньше, кубики d6/d20, случайные числа"),
     ("jokes", "Анекдоты и факты", "Шутки, тосты, сказки"),
     ("web_search", "Поиск в интернете", "Яндекс / Google в браузере"),
     ("maps", "Карты", "Поиск мест и маршруты"),
@@ -52,6 +53,7 @@ def _skill_map() -> dict[str, Any]:
     from skills import (
         audacious_skill,
         calculator_skill,
+        games_skill,
         jokes_skill,
         maps_search_skill,
         movie_skill,
@@ -71,6 +73,7 @@ def _skill_map() -> dict[str, Any]:
         "weather": weather_skill,
         "timer": timer_skill,
         "calculator": calculator_skill,
+        "games": games_skill,
         "jokes": jokes_skill,
         "web_search": web_search_skill,
         "maps": maps_search_skill,
