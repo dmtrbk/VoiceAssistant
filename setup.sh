@@ -1,6 +1,8 @@
 #!/bin/bash
-# Установка окружения голосового ассистента (Manjaro GNOME).
-# Не перезаписывает существующий .env и не трогает requirements.txt.
+# ==============================================================================
+# setup.sh — Скрипт автоматической установки и настройки ассистента Джарвис
+# Платформа: Manjaro Linux (GNOME / PipeWire / Wayland / XWayland)
+# ==============================================================================
 
 set -euo pipefail
 
@@ -10,10 +12,13 @@ SERVICE_DIR="$HOME/.config/systemd/user"
 SERVICE_FILE="$SERVICE_DIR/voice-assistant.service"
 UID_NUM="$(id -u)"
 
-echo "=== Настройка голосового ассистента (Manjaro GNOME) ==="
+echo "=================================================================="
+echo "    🚀 Установка и настройка голосового ассистента «Джарвис»     "
+echo "=================================================================="
 echo "[+] Каталог проекта: $PROJECT_DIR"
 
-echo "[+] Системные пакеты (pacman)..."
+# 1. Установка системных пакетов
+echo "[+] Шаг 1/7: Установка системных зависимостей через pacman..."
 CORE_PKGS=(
     python python-pip
     portaudio alsa-utils
@@ -35,26 +40,28 @@ for opt in telegram-desktop; do
     fi
 done
 
-echo "[+] Каталоги..."
+# 2. Создание каталогов
+echo "[+] Шаг 2/7: Подготовка каталогов..."
 mkdir -p "$PROJECT_DIR/model"
 mkdir -p "$PROJECT_DIR/piper/models"
+mkdir -p "$PROJECT_DIR/.tts_cache"
 mkdir -p "$HOME/.scripts"
 mkdir -p "$SERVICE_DIR"
 
+# 3. Настройка файла конфигурации (.env)
+echo "[+] Шаг 3/7: Проверка конфигурации .env..."
 ENV_EXAMPLE="$PROJECT_DIR/.env.example"
 if [ ! -f "$ENV_EXAMPLE" ]; then
-    echo "[+] Создаю .env.example..."
     cat << 'EOF' > "$ENV_EXAMPLE"
-# Groq — облачный диалог (обязательно для навыка ИИ, диалог в стиле Алисы)
+# Groq — облачный диалог (рекомендуется openai/gpt-oss-20b)
 GROQ_API_KEY=
-# Чат gpt-oss-20b, не groq/compound*: compound — агент (Retrying + второй HTTP), для голоса медленный.
 GROQ_MODEL=openai/gpt-oss-20b
 
-# Telegram-бот: входящие команды и уведомления охраны
+# Telegram-бот: управление и снимки охраны
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
-# Голос синтеза Piper TTS: ru_RU-dmitri-medium.onnx (мужской голос Дмитрия), ru_RU-ruslan-medium.onnx, ru_RU-irina-medium.onnx
+# Голос синтеза Piper TTS: ru_RU-dmitri-medium.onnx
 PIPER_MODEL=ru_RU-dmitri-medium.onnx
 VOICE_SPEED=1.0
 
@@ -65,11 +72,11 @@ DEFAULT_CITY=Москва
 XIAOMI_BULB_IP=
 XIAOMI_BULB_TOKEN=
 
-# Сессия внимания (в секундах) в тишине и при играющей музыке
+# Сессия внимания (в секундах)
 ATTENTION_TIMEOUT=6
 ATTENTION_TIMEOUT_MUSIC=3
 
-# Настройки приглушения музыки (Ducking) и фильтрации эхо колонок
+# Настройки приглушения звука (Ducking)
 DUCKING_VOLUME=8
 DUCKING_MODE=duck
 MIN_SPEECH_RMS=200
@@ -77,77 +84,77 @@ MIN_SPEECH_RMS=200
 # Поиск и карты: yandex или google
 SEARCH_PROVIDER=yandex
 MAPS_PROVIDER=yandex
-
-# Браузерный ИИ по команде «открой нейросеть»: yandex (Алиса) или gemini
 AI_PROVIDER=yandex
+
+# Консольный режим и GUI
+CONSOLE_MODE=false
+GUI_ENABLED=true
 EOF
 fi
 
 if [ ! -f "$PROJECT_DIR/.env" ]; then
-    echo "[+] Копирую .env из .env.example (заполните ключи вручную)."
+    echo "[+] Копирую .env.example -> .env"
     cp "$ENV_EXAMPLE" "$PROJECT_DIR/.env"
 else
-    echo "[+] .env уже есть — не трогаю."
+    echo "[+] Файл .env уже существует — пропускаю перезапись."
 fi
 
+# 4. Создание виртуального окружения Python
+echo "[+] Шаг 4/7: Настройка виртуального окружения Python..."
 if [ ! -d "$VENV_DIR" ]; then
-    echo "[+] Создаю виртуальное окружение .venv..."
     python -m venv "$VENV_DIR"
 fi
 
-echo "[+] Python-пакеты в .venv..."
 "$VENV_DIR/bin/pip" install --upgrade pip
 "$VENV_DIR/bin/pip" install -r "$PROJECT_DIR/requirements.txt"
 
-# --- Vosk ---
+# 5. Загрузка модели распознавания речи Vosk
+echo "[+] Шаг 5/7: Проверка оффлайн-модели Vosk..."
 if [ ! -d "$PROJECT_DIR/model/am" ]; then
-    echo "[+] Скачиваю модель Vosk (small-ru-0.22)..."
+    echo "[+] Скачиваю русскую модель Vosk (small-ru-0.22)..."
     tmpdir="$(mktemp -d)"
     (
         cd "$tmpdir"
-        wget -q --show-progress \
-            "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
+        wget -q --show-progress "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
         unzip -q vosk-model-small-ru-0.22.zip
         cp -a vosk-model-small-ru-0.22/. "$PROJECT_DIR/model/"
     )
     rm -rf "$tmpdir"
 else
-    echo "[+] Модель Vosk уже на месте — пропускаю загрузку."
+    echo "[+] Модель Vosk уже установлена."
 fi
 
-# --- Piper ---
+# 6. Загрузка движка и модели голоса Piper TTS
+echo "[+] Шаг 6/7: Проверка движка и моделей Piper TTS..."
 if [ ! -x "$PROJECT_DIR/piper/piper" ]; then
-    echo "[+] Скачиваю Piper TTS..."
+    echo "[+] Скачиваю бинарник Piper TTS..."
     tmpdir="$(mktemp -d)"
     (
         cd "$tmpdir"
-        wget -q --show-progress \
-            "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_amd64.tar.gz"
+        wget -q --show-progress "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_amd64.tar.gz"
         tar -xf piper_amd64.tar.gz
-        # Архив даёт каталог piper/ с бинарником и .so
         cp -a piper/. "$PROJECT_DIR/piper/"
     )
     rm -rf "$tmpdir"
     chmod +x "$PROJECT_DIR/piper/piper"
 else
-    echo "[+] Бинарник Piper уже есть — пропускаю загрузку."
+    echo "[+] Бинарник Piper уже установлен."
 fi
 
 PIPER_ONNX="$PROJECT_DIR/piper/models/ru_RU-dmitri-medium.onnx"
 PIPER_JSON="$PIPER_ONNX.json"
 if [ ! -s "$PIPER_ONNX" ]; then
-    echo "[+] Скачиваю голос ru_RU-dmitri-medium..."
+    echo "[+] Скачиваю русскую голосовую модель Dmitri (Piper ONNX)..."
     wget -q --show-progress -O "$PIPER_ONNX" \
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx"
     wget -q --show-progress -O "$PIPER_JSON" \
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium.onnx.json"
 else
-    echo "[+] Голосовая модель Piper уже есть — пропускаю загрузку."
+    echo "[+] Голосовая модель Dmitri уже установлена."
 fi
 
-# Скрипты плеера — только если пользователь ещё не завёл свои
+# Вспомогательные скрипты плеера
 if [ ! -f "$HOME/.scripts/player_on.sh" ]; then
-    echo "[+] Создаю ~/.scripts/player_on.sh..."
     cat << 'EOF' > "$HOME/.scripts/player_on.sh"
 #!/bin/bash
 xhost +local: >/dev/null 2>&1 || true
@@ -158,7 +165,6 @@ EOF
 fi
 
 if [ ! -f "$HOME/.scripts/player_off.sh" ]; then
-    echo "[+] Создаю ~/.scripts/player_off.sh..."
     cat << 'EOF' > "$HOME/.scripts/player_off.sh"
 #!/bin/bash
 audtool --playback-stop >/dev/null 2>&1 || true
@@ -168,7 +174,8 @@ EOF
     chmod +x "$HOME/.scripts/player_off.sh"
 fi
 
-echo "[+] Пишу $SERVICE_FILE ..."
+# 7. Настройка службы systemd и расширения GNOME
+echo "[+] Шаг 7/7: Настройка службы systemd..."
 cat << EOF > "$SERVICE_FILE"
 [Unit]
 Description=Voice Assistant Service (Jarvis)
@@ -179,17 +186,17 @@ WorkingDirectory=$PROJECT_DIR
 ExecStart=$VENV_DIR/bin/python assistant.py
 Restart=always
 RestartSec=3
-# === НАСТРОЙКИ ===
+# === НАСТРОЙКИ ОКРУЖЕНИЯ ===
 Environment=PYTHONUNBUFFERED=1
 Environment=LANG=ru_RU.UTF-8
 Environment=LC_ALL=ru_RU.UTF-8
-# Графика и рабочий стол
+# Графика GNOME
 Environment=DISPLAY=:0
 Environment=WAYLAND_DISPLAY=wayland-0
 Environment=XDG_CURRENT_DESKTOP=GNOME
 Environment=DESKTOP_SESSION=gnome
 Environment=XDG_SESSION_TYPE=wayland
-# Звук и сервисы
+# Звук и DBus
 Environment=XDG_RUNTIME_DIR=/run/user/$UID_NUM
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_NUM/bus
 [Install]
@@ -200,7 +207,6 @@ EXT_UUID="jarvis-windows@voiceassistant"
 EXT_SRC="$PROJECT_DIR/gnome/$EXT_UUID"
 EXT_DST="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
 if [ -d "$EXT_SRC" ]; then
-    echo "[+] Расширение GNOME $EXT_UUID ..."
     mkdir -p "$HOME/.local/share/gnome-shell/extensions"
     ln -sfn "$EXT_SRC" "$EXT_DST"
     gnome-extensions enable "$EXT_UUID" 2>/dev/null || true
@@ -210,16 +216,21 @@ systemctl --user daemon-reload
 systemctl --user enable voice-assistant.service
 
 echo ""
-echo "=================================================="
-echo "Готово (Manjaro GNOME)."
-echo "Заполните ключи в $PROJECT_DIR/.env (если ещё не заполнены)."
+echo "=================================================================="
+echo "    ✅ Установка завершена успешно!                              "
+echo "=================================================================="
+echo "1. Не забудьте вписать GROQ_API_KEY в файл $PROJECT_DIR/.env"
 echo ""
-echo "  systemctl --user start voice-assistant.service"
-echo "  systemctl --user restart voice-assistant.service"
-echo "  systemctl --user status voice-assistant.service"
-echo "  journalctl --user -u voice-assistant.service -f"
+echo "2. Управление службой ассистента:"
+echo "   systemctl --user start voice-assistant.service    # Запуск"
+echo "   systemctl --user restart voice-assistant.service  # Перезапуск"
+echo "   systemctl --user status voice-assistant.service   # Статус"
+echo "   journalctl --user -u voice-assistant.service -f   # Логи"
 echo ""
-echo "Эхоподавление колонок (один раз):"
-echo "  $PROJECT_DIR/setup_echo_cancel.sh"
-echo "Затем в настройках звука GNOME выберите микрофон «с эхоподавлением»."
-echo "=================================================="
+echo "3. Консольный текстовый режим:"
+echo "   python cli.py          # Интерактивный диалог в терминале"
+echo "   python cli.py --mute   # Режим без звука"
+echo ""
+echo "4. Настройка аппаратного эхоподавления (AEC):"
+echo "   ./setup_echo_cancel.sh"
+echo "=================================================================="
