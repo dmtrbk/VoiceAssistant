@@ -13,6 +13,7 @@ class RequestContext:
     slots: Dict[str, Any] = field(default_factory=dict)
     speak: Optional[Callable[[str], None]] = None
     should_sleep: bool = False
+    channel: str = "voice"  # "voice" | "telegram" | "cli"
 
 
 class BaseSkill:

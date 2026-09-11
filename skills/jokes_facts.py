@@ -57,7 +57,13 @@ COMPLIMENTS = [
 class JokesAndFactsSkill(BaseSkill):
     """Фирменный навык развлечений Алисы: анекдоты, факты, тосты, сказки, комплименты."""
 
-    FOLLOWUP_HINTS = ("ещё", "еще", "другой", "другую", "посмешнее", "повтори")
+    FOLLOWUP_EXACT = {
+        "еще", "ещё", "давай еще", "давай ещё", "еще один", "ещё один",
+        "еще одну", "ещё одну", "другой", "другую", "следующий", "следующую",
+        "посмешнее", "повтори", "еще факт", "ещё факт", "еще шутку", "ещё шутку",
+        "еще анекдот", "ещё анекдот", "расскажи еще", "расскажи ещё",
+        "давай другой", "давай другую", "дальше", "другую шутку", "другой факт"
+    }
 
     def __init__(self):
         self._last_kind = "joke"
@@ -75,7 +81,21 @@ class JokesAndFactsSkill(BaseSkill):
 
     def accepts_followup(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
-        return any(hint in text for hint in self.FOLLOWUP_HINTS)
+        words = text.split()
+        if not words or len(words) > 4:
+            return False
+        # Если фраза содержит предметный вопрос или обсуждение — отдаём в LLM (Groq)
+        if any(w in text for w in ["про ", "почему", "зачем", "как ", "подробн", "думаешь", "знаешь", "скажешь"]):
+            return False
+        if text in self.FOLLOWUP_EXACT:
+            return True
+        return any(
+            phrase in text
+            for phrase in [
+                "давай еще", "еще один", "еще факт", "еще шутк",
+                "следующ", "расскажи еще", "посмешнее"
+            ]
+        )
 
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
@@ -92,7 +112,7 @@ class JokesAndFactsSkill(BaseSkill):
             kind = "tale"
         elif any(w in text for w in ["комплимент", "похвали", "приятное"]):
             kind = "compliment"
-        elif any(hint in text for hint in self.FOLLOWUP_HINTS):
+        elif text in self.FOLLOWUP_EXACT or any(w in text for w in ["еще", "ещё", "другой", "другую", "следующ"]):
             kind = self._last_kind
         else:
             kind = "joke"

@@ -12,6 +12,7 @@ skills/__pycache__
 surveillance_snaps/
 *.tmp
 skills/chat_history_cache.json
+skills/user_profile.json
 skills/shared_events.json
 quiet_book.json
 quiet_vitality.json

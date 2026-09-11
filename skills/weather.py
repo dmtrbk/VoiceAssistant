@@ -5,6 +5,7 @@ import re
 import logging
 import requests
 from skills.base import BaseSkill, RequestContext
+from skills.text_utils import fuzzy_phrase_match
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ class WeatherSkill(BaseSkill):
             "пойдет ли снег", "зонт нужен", "брать ли зонт",
             "брать зонт", "осадки", "давление", "ветер на улице"
         ]
-        return any(trigger in text for trigger in weather_triggers)
+        return any(trigger in text or fuzzy_phrase_match(text, trigger, min_ratio=0.82) for trigger in weather_triggers)
 
     def accepts_followup(self, context: RequestContext) -> bool:
         """Короткое уточнение прогноза: «а завтра?», «будет дождь», «а в Москве?»."""

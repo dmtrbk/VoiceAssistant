@@ -6,6 +6,7 @@ from difflib import get_close_matches
 
 import nlu
 from skills.base import BaseSkill, RequestContext
+from skills.text_utils import fuzzy_phrase_match
 
 
 class LocalNLUSkill(BaseSkill):
@@ -30,7 +31,10 @@ class LocalNLUSkill(BaseSkill):
             return True
         # Узкий классификатор (прощание / монетка): высокий порог, иначе мелкий
         # разговор («как дела», «спасибо») ошибочно уйдёт в заготовку.
-        return context.confidence >= 0.8 and bool(get_close_matches(text, examples, n=1, cutoff=0.7))
+        return context.confidence >= 0.8 and (
+            bool(get_close_matches(text, examples, n=1, cutoff=0.7))
+            or any(fuzzy_phrase_match(text, ex, min_ratio=0.75) for ex in examples)
+        )
 
     def execute(self, context: RequestContext) -> None:
         intent = context.intent

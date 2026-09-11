@@ -124,6 +124,11 @@ class XiaomiBulbSkill(BaseSkill):
 
     def accepts_followup(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
+        words = text.split()
+        if not words or len(words) > 4:
+            return False
+        if any(w in text for w in ["музык", "трек", "песн", "фильм", "видео", "кухн", "дом", "погод", "сцен"]):
+            return False
         actions = [
             "включи", "выключи", "ярче", "тусклее", "яркость",
             "прибавь", "убавь", "потуши", "зажги", "выруби", "погаси",

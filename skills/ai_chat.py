@@ -20,6 +20,7 @@ from triggers import is_self_echo
 SHARED_EVENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_events.json")
 _EVENTS_LOCK = threading.Lock()
 _HISTORY_LOCK = threading.Lock()
+_PROFILE_LOCK = threading.Lock()
 
 HISTORY_TTL_SEC = 2700  # 45 мин тишины — потом история сбрасывается
 MAX_LIVE_MESSAGES = 8  # только хвост диалога; LLM-выжимку убрали — она давала второй запрос Groq и держала lock
@@ -184,6 +185,7 @@ class AIChatSkill(BaseSkill):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.history_cache_path = os.path.join(base_dir, "chat_history_cache.json")
         self.persona_config_path = os.path.join(base_dir, "persona_config.json")
+        self.user_profile_path = os.path.join(base_dir, "user_profile.json")
 
         self.history: List[Dict[str, str]] = []
         self.last_interaction_time = time.time()
@@ -328,6 +330,69 @@ class AIChatSkill(BaseSkill):
             except Exception:
                 pass
 
+    def _load_user_profile(self) -> dict[str, Any]:
+        with _PROFILE_LOCK:
+            if not os.path.exists(self.user_profile_path):
+                return {"user_name": "", "facts": [], "preferences": []}
+            try:
+                with open(self.user_profile_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    return {"user_name": "", "facts": [], "preferences": []}
+                data.setdefault("user_name", "")
+                data.setdefault("facts", [])
+                data.setdefault("preferences", [])
+                return data
+            except Exception as exc:
+                logging.error(f"[UserProfile] Ошибка загрузки профиля: {exc}")
+                return {"user_name": "", "facts": [], "preferences": []}
+
+    def _save_user_profile(self, profile: dict[str, Any]) -> None:
+        with _PROFILE_LOCK:
+            try:
+                _write_json_atomic(self.user_profile_path, profile, indent=2)
+            except Exception as exc:
+                logging.error(f"[UserProfile] Ошибка сохранения профиля: {exc}")
+
+    def _add_user_fact(self, fact_text: str) -> None:
+        fact_text = fact_text.strip().rstrip(".!?")
+        if not fact_text:
+            return
+        profile = self._load_user_profile()
+        facts: list[str] = profile.get("facts", [])
+        if fact_text.lower() not in [f.lower() for f in facts]:
+            facts.append(fact_text)
+            profile["facts"] = facts[-30:]
+            self._save_user_profile(profile)
+
+    def _set_user_name(self, name: str) -> None:
+        name = name.strip().title()
+        if not name:
+            return
+        profile = self._load_user_profile()
+        profile["user_name"] = name
+        self._save_user_profile(profile)
+
+    def _remove_matching_fact(self, query: str) -> bool:
+        from skills.text_utils import fuzzy_phrase_match
+        profile = self._load_user_profile()
+        facts: list[str] = profile.get("facts", [])
+        new_facts = []
+        removed = False
+        for f in facts:
+            if fuzzy_phrase_match(f, query, min_ratio=0.7) or query.lower() in f.lower():
+                removed = True
+            else:
+                new_facts.append(f)
+        if removed:
+            profile["facts"] = new_facts
+            self._save_user_profile(profile)
+        return removed
+
+    def _clear_user_profile(self) -> None:
+        profile = {"user_name": "", "facts": [], "preferences": []}
+        self._save_user_profile(profile)
+
     def _get_recent_system_events(self) -> str:
         with _EVENTS_LOCK:
             if not os.path.exists(SHARED_EVENTS_PATH):
@@ -349,6 +414,15 @@ class AIChatSkill(BaseSkill):
         if valid_events:
             return "\n[Недавние действия]: " + ", ".join(valid_events)
         return ""
+
+    def _clean_text_for_chat(self, text: str) -> str:
+        """Очистка текста для текстовых каналов (Telegram, CLI): сохраняет markdown и списки."""
+        if not text:
+            return ""
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
+        text = re.sub(r"</?[a-zA-Z_0-9]+(?:\s+[^>]*)?>", "", text)
+        return text.strip()
 
     def _clean_tts_text(self, text: str) -> str:
         """Очистка и нормализация текста под естественную речь Piper TTS."""
@@ -434,26 +508,89 @@ class AIChatSkill(BaseSkill):
         if not text:
             return
 
+        channel = getattr(context, "channel", "voice")
         lowered = text.lower()
+
+        # 1. Управление памятью и профилем пользователя
         if "забудь все" in lowered or "очисти память" in lowered:
             self.reset_chat()
-            context.speak("Память очищена.")
+            self._clear_user_profile()
+            context.speak("Память диалога и профиль полностью очищены.")
             return
 
-        last_assistant = ""
-        with _HISTORY_LOCK:
-            for message in reversed(self.history):
-                if message.get("role") == "assistant" and message.get("content"):
-                    last_assistant = message["content"]
-                    break
-        if last_assistant and is_self_echo(text, last_assistant):
-            # Второй рубеж: Telegram сюда не попадает, голос иногда проскакивает после TTS.
-            logging.info(f"[Groq] Похоже на эхо своей речи, пропускаю: '{text}'")
+        if "забудь все обо мне" in lowered or "забудь всё обо мне" in lowered or "очисти профиль" in lowered:
+            self._clear_user_profile()
+            context.speak("Я очистил все сохранённые сведения о вас.")
             return
 
-        self._reply(text, context.speak)
+        if any(lowered.startswith(p) for p in ("забудь, что", "забудь что", "удали факт")):
+            query = re.sub(r"^(?:забудь,?\s*что|удали\s+факт)\s+", "", text, flags=re.IGNORECASE).strip()
+            if query and self._remove_matching_fact(query):
+                context.speak(f"Удалил из памяти факт: {query}.")
+            else:
+                context.speak("Не нашёл подходящей записи в памяти.")
+            return
 
-    def _reply(self, text: str, speak_func: Callable[[str], None]) -> None:
+        if any(p in lowered for p in ("что ты обо мне знаешь", "что ты обо мне помнишь", "мои данные", "какие факты ты помнишь", "мой профиль")):
+            profile = self._load_user_profile()
+            name = profile.get("user_name", "")
+            facts = profile.get("facts", [])
+            if not name and not facts:
+                context.speak(
+                    "Пока я ничего о вас не сохранял. "
+                    "Вы можете сказать: «Джарвис, запомни, что меня зовут Дмитрий» или «Запомни, что я люблю джаз»."
+                )
+                return
+            lines = []
+            if name:
+                lines.append(f"Имя: {name}")
+            if facts:
+                if channel == "voice":
+                    lines.append("Я помню следующее: " + "; ".join(facts) + ".")
+                else:
+                    lines.append("Сохранённые факты:\n" + "\n".join(f"• {f}" for f in facts))
+            context.speak("\n".join(lines))
+            return
+
+        # Запоминание факта ("запомни, что...", "запомни: ...", "запиши, что...")
+        match_remember = re.match(
+            r"^(?:(?:джарвис|умник|гаврила|гаврюша)\s+)?(?:запомни|запиши|сохрани)(?:\s*[:,]\s*|\s+что\s+|\s+факт\s*[:,]?\s*)(.+)$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match_remember:
+            fact = match_remember.group(1).strip()
+            name_match = re.match(r"^меня зовут\s+([А-Яа-яA-Za-z]+)", fact, flags=re.IGNORECASE)
+            if name_match:
+                self._set_user_name(name_match.group(1))
+            self._add_user_fact(fact)
+            context.speak(f"Запомнил: {fact}.")
+            return
+
+        # Знакомство ("меня зовут [Имя]")
+        name_only_match = re.match(r"^(?:(?:джарвис|умник|гаврила|гаврюша)\s+)?меня зовут\s+([А-Яа-яA-Za-z]+)(?:\.|$)", text, flags=re.IGNORECASE)
+        if name_only_match:
+            u_name = name_only_match.group(1).strip().title()
+            self._set_user_name(u_name)
+            self._add_user_fact(f"Имя пользователя: {u_name}")
+            context.speak(f"Приятно познакомиться, {u_name}. Я запомнил ваше имя.")
+            return
+
+        # 2. Фильтрация эха (только в голосовом канале)
+        if channel == "voice":
+            last_assistant = ""
+            with _HISTORY_LOCK:
+                for message in reversed(self.history):
+                    if message.get("role") == "assistant" and message.get("content"):
+                        last_assistant = message["content"]
+                        break
+            if last_assistant and is_self_echo(text, last_assistant):
+                logging.info(f"[Groq] Похоже на эхо своей речи, пропускаю: '{text}'")
+                return
+
+        self._reply(text, context.speak, channel=channel)
+
+    def _reply(self, text: str, speak_func: Callable[[str], None], channel: str = "voice") -> None:
         with _HISTORY_LOCK:
             self._touch_session()
             self.history.append({"role": "user", "content": text})
@@ -474,9 +611,38 @@ class AIChatSkill(BaseSkill):
             "] О себе только мужской род. "
             "Если хозяин рассказывает про местность или зверей — коротко поддержи разговор по-человечески."
         )
+
+        # Долговременная память о пользователе
+        profile = self._load_user_profile()
+        p_name = profile.get("user_name", "")
+        p_facts = profile.get("facts", [])
+        if p_name or p_facts:
+            extra += "\n[Долговременная память о пользователе]:"
+            if p_name:
+                extra += f" Имя: {p_name}."
+            if p_facts:
+                extra += " Известные факты: " + "; ".join(p_facts) + "."
+
         events = self._get_recent_system_events()
         if events:
             extra += events
+
+        # Формат выдачи в зависимости от канала
+        if channel == "voice":
+            extra += (
+                "\n[Канал: Голосовой ассистент]. Ответ будет озвучен синтезатором речи. "
+                "Отвечай кратко (1–3 предложения), простым языком, без списков, без Markdown, "
+                "без смайликов, без ссылок и без спецсимволов. Только связный произносимый текст."
+            )
+            max_tokens = 300
+        else:
+            extra += (
+                f"\n[Канал: {channel.upper()} чат]. Пользователь читает ответ текстом на экране. "
+                "Отвечай полно, структурированно, понятно и по делу. "
+                "Разрешено использовать Markdown-разметку (жирный шрифт, списки, таблицы, блоки кода), "
+                "ссылки и эмодзи при необходимости."
+            )
+            max_tokens = 750
 
         # Подмешивание реального состояния брокерского фонда при вопросе о сводке
         market_markers = (
@@ -499,6 +665,7 @@ class AIChatSkill(BaseSkill):
                 temp_context = RequestContext(
                     raw_text=text,
                     speak=lambda r: captured_reports.append(str(r)),
+                    channel=channel,
                 )
                 stocks_skill.execute(temp_context)
                 broker_report = " ".join(captured_reports).strip()
@@ -558,7 +725,7 @@ class AIChatSkill(BaseSkill):
                         "messages": messages_for_api,
                         "model": model_name,
                         "temperature": temperature,
-                        "max_tokens": 300,
+                        "max_tokens": max_tokens,
                     }
                     if "gpt-oss" in (model_name or ""):
                         create_kwargs["reasoning_effort"] = "low"
@@ -578,15 +745,18 @@ class AIChatSkill(BaseSkill):
                 raise RuntimeError("No response from Groq")
 
             raw_reply = response.choices[0].message.content or ""
-            sentences, chars = (3, 320)
-            if trading_clip_limit is not None:
-                try:
-                    sentences, chars = trading_clip_limit()
-                except Exception:
-                    sentences, chars = 3, 320
-            cleaned_reply = _fix_self_gender(
-                self._clip_spoken_reply(self._clean_tts_text(raw_reply), sentences, chars)
-            )
+            if channel == "voice":
+                sentences, chars = (3, 320)
+                if trading_clip_limit is not None:
+                    try:
+                        sentences, chars = trading_clip_limit()
+                    except Exception:
+                        sentences, chars = 3, 320
+                cleaned_reply = _fix_self_gender(
+                    self._clip_spoken_reply(self._clean_tts_text(raw_reply), sentences, chars)
+                )
+            else:
+                cleaned_reply = _fix_self_gender(self._clean_text_for_chat(raw_reply))
 
             if cleaned_reply:
                 speak_func(cleaned_reply)

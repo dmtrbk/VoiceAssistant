@@ -77,7 +77,7 @@ def execute_cli_command(user_text: str, mute: bool = False, verbose: bool = Fals
             if not mute:
                 play_audio_feedback(text, mute=mute)
 
-    should_sleep = commands.execute(user_text, speak_cb)
+    should_sleep = commands.execute(user_text, speak_cb, channel="cli")
 
     try:
         if should_sleep:

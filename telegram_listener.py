@@ -83,7 +83,7 @@ def run_telegram_listener():
                     threading.Thread(
                         target=execute_command,
                         args=(text,),
-                        kwargs={"speak_callback": telegram_speak},
+                        kwargs={"speak_callback": telegram_speak, "channel": "telegram"},
                         daemon=True,
                     ).start()
 

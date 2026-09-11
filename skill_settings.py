@@ -19,6 +19,7 @@ CONFIG_PATH = os.path.join(PROJECT_DIR, "skills_enabled.json")
 # не для окна настроек, не для readme/commands.txt, не для публикации.
 OPTIONAL_SKILLS = (
     ("xiaomi_bulb", "Свет", "Лампа Xiaomi / Yeelight"),
+    ("home_assistant", "Home Assistant", "Умный дом: свет, розетки, сцены по имени"),
     ("movie", "Фильмы и видео", "ВК Видео и плеер MPV"),
     ("audacious", "Музыка и радио", "Audacious, папки, плейлисты и поиск песен"),
     ("weather", "Погода", "Прогноз Open-Meteo"),
@@ -66,6 +67,7 @@ def _skill_map() -> dict[str, Any]:
         weather_skill,
         web_search_skill,
         xiaomi_bulb_skill,
+        home_assistant_skill,
     )
 
     return {
@@ -82,6 +84,7 @@ def _skill_map() -> dict[str, Any]:
         "security": security_skill,
         "telegram": telegram_skill,
         "pentagon": pentagon_skill,
+        "home_assistant": home_assistant_skill,
     }
 
 

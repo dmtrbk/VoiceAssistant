@@ -82,6 +82,10 @@ DEFAULT_CITY=Москва
 XIAOMI_BULB_IP=
 XIAOMI_BULB_TOKEN=
 
+# Home Assistant (умный дом)
+HA_URL=http://127.0.0.1:8123
+HA_TOKEN=
+
 # Сессия внимания (в секундах)
 ATTENTION_TIMEOUT=6
 ATTENTION_TIMEOUT_MUSIC=3

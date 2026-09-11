@@ -20,6 +20,7 @@ from .games import GamesAndRandomSkill
 from .movie_skill import MovieSkill
 from .music_search import MusicSearchSkill
 from .assistant_settings import AssistantSettingsSkill
+from .home_assistant import HomeAssistantSkill
 from .stocks import StocksSkill  # приватный: не писать в документации и настройках
 
 system_skill = SystemSkill()
@@ -42,6 +43,7 @@ calculator_skill = CalculatorSkill()
 jokes_skill = JokesAndFactsSkill()
 games_skill = GamesAndRandomSkill()
 assistant_settings_skill = AssistantSettingsSkill()
+home_assistant_skill = HomeAssistantSkill()
 # Не публиковать, не описывать в readme/commands.txt, не выносить в настройки.
 stocks_skill = StocksSkill()
 
@@ -59,6 +61,7 @@ ALL_SKILLS = [
     stocks_skill,  # до поиска и Groq, чтобы котировки не выдумывались; не документировать
     games_skill,
     jokes_skill,
+    home_assistant_skill,
     xiaomi_bulb_skill,
     movie_skill,
     music_search_skill,

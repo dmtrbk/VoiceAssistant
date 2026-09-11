@@ -95,15 +95,32 @@ class CalculatorSkill(BaseSkill):
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
-        calc_triggers = [
-            "сколько будет", "посчитай", "вычисли", "сложи",
-            "умножь", "раздели", "подели", "вычти", "отними", "прибавь",
-            "плюс", "минус", "умножить", "разделить", "поделить",
-            "корень из", "квадратный корень", "степени", "степень", "в квадрате", "в кубе",
-            "процентов от", "процента от", "процент от", "%"
-        ]
-        has_math_word = any(trig in text for trig in calc_triggers)
-        has_numbers = bool(re.search(r"\d+", text)) or any(w in text for w in RUSSIAN_NUMBERS)
+        has_math_phrase = any(
+            p in text
+            for p in [
+                "сколько будет", "посчитай", "вычисли", "сложи",
+                "корень из", "квадратный корень", "в степени", "в квадрате", "в кубе",
+                "процентов от", "процента от", "процент от", "%"
+            ]
+        )
+        has_math_word = bool(
+            re.search(
+                r"\b(умножь|раздели|подели|вычти|отними|прибавь|плюс|минус|умножить|разделить|поделить)\b",
+                text
+            )
+        )
+        has_numbers = bool(re.search(r"\d+", text)) or any(w in text.split() for w in RUSSIAN_NUMBERS)
+        if not (has_numbers or has_math_phrase):
+            return False
+
+        # Если это явный математический вопрос со счётом
+        if has_math_phrase and has_numbers:
+            return True
+
+        # Предотвращаем ложный захват фраз вроде "3 главных плюса" или "в чем плюсы"
+        if re.search(r"\b(плюса|плюсы|плюсов|минусы|минусов|минуса)\b", text):
+            return False
+
         return has_math_word and has_numbers
 
     def execute(self, context: RequestContext) -> None:
