@@ -57,7 +57,12 @@ def forget_skill(skill) -> None:
 
 def _remember_skill(skill) -> None:
     global _last_skill, _last_skill_time
-    if skill is None or skill is ai_chat_skill:
+    if skill is None:
+        return
+    # Смена темы на разговор: «а завтра?» после зайцев уже не прогноз.
+    if skill is ai_chat_skill:
+        _last_skill = None
+        _last_skill_time = 0.0
         return
     if _last_skill is not None and _last_skill is not skill:
         try:

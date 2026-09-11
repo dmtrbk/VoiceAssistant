@@ -59,6 +59,14 @@ CITY_ALIASES = {
     "самара": "Самара",
     "уфе": "Уфа",
     "уфа": "Уфа",
+    "сапуне": "на Сапуне",
+    "сапун": "на Сапуне",
+    "сапун-гора": "на Сапун-горе",
+    "сапун-горе": "на Сапун-горе",
+    "сапун гора": "на Сапун-горе",
+    "сапун горе": "на Сапун-горе",
+    "алатагыле": "в Алатагыле",
+    "алатагыл": "в Алатагыле",
 }
 
 _CITY_FILLERS = (
@@ -66,9 +74,10 @@ _CITY_FILLERS = (
     "утром", "вечером", "днем", "днём", "ночью", "пожалуйста",
 )
 
-_FOLLOWUP_MARKERS = (
-    "завтра", "сегодня", "послезавтра", "дождь", "зонт",
-    "осадки", "там",
+# Только явное уточнение прогноза. «там зайцев полно» сюда не входит.
+_FOLLOWUP_WEATHER = (
+    "дождь", "зонт", "осадки", "давление", "ветер",
+    "градус", "температур", "прогноз",
 )
 
 
@@ -153,20 +162,24 @@ class WeatherSkill(BaseSkill):
         return any(trigger in text for trigger in weather_triggers)
 
     def accepts_followup(self, context: RequestContext) -> bool:
+        """Короткое уточнение прогноза: «а завтра?», «будет дождь», «а в Москве?»."""
         text = context.raw_text.lower().strip()
-        if any(marker in text for marker in _FOLLOWUP_MARKERS):
+        if any(marker in text for marker in _FOLLOWUP_WEATHER):
             return True
-        for alias in CITY_ALIASES:
-            if re.search(rf"\b{re.escape(alias)}\b", text):
-                return True
-        return False
+        words = re.findall(r"[а-яё0-9\-]+", text)
+        if not words or len(words) > 4:
+            return False
+        if any(w in {"завтра", "сегодня", "послезавтра"} for w in words):
+            return True
+        joined = " ".join(words)
+        return any(re.search(rf"\b{re.escape(alias)}\b", joined) for alias in CITY_ALIASES)
 
     def _extract_target_city(self, text: str) -> tuple[str | None, bool]:
-        """Город из фразы. None — точка по умолчанию (координаты или DEFAULT_CITY)."""
+        """Город/место из фразы. None — точка по умолчанию (координаты или DEFAULT_CITY)."""
         is_tomorrow = any(w in text for w in ["завтра", "на завтра", "завтрашний", "завтрашняя"])
 
         match = re.search(
-            r"\b(?:в|во|по|городе|город)\s+([а-яёА-ЯЁ\-]+(?:\s+[а-яёА-ЯЁ\-]+)?)",
+            r"\b(?:в|во|на|по|городе|город)\s+([а-яёА-ЯЁ\-]+(?:\s+[а-яёА-ЯЁ\-]+)?)",
             text,
         )
         if match:
@@ -199,12 +212,37 @@ class WeatherSkill(BaseSkill):
         return None
 
     def _place_clause(self, name: str, is_default: bool) -> str:
-        if is_default and name.lower() in {"здесь", "дома", "у нас"}:
+        name_clean = (name or "").strip()
+        if not name_clean:
             return "Здесь"
-        return f"В городе {name}"
+        low = name_clean.lower()
+        if low in {"здесь", "дома", "у нас", "локально", "тут"}:
+            return "Здесь"
+
+        # Если уже содержит предлог («на сапуне», «в алатагыле», «у горы»)
+        for prep in ("на ", "в ", "во ", "у ", "под ", "около "):
+            if low.startswith(prep):
+                rest = name_clean[len(prep):].strip()
+                return f"{prep.strip().capitalize()} {rest.capitalize() if rest else ''}".strip()
+
+        if "сапун" in low:
+            if "гор" in low:
+                return "На Сапун-горе"
+            return "На Сапуне"
+        if "алатагыл" in low:
+            return "В Алатагыле"
+
+        return f"В городе {name_clean}"
 
     def _get_coordinates(self, city_name: str) -> tuple[float, float, str] | None:
-        """Получает координаты города через Open-Meteo Geocoding API."""
+        """Получает координаты города через Open-Meteo Geocoding API или локальные координаты."""
+        if not city_name:
+            return None
+
+        low = city_name.lower().strip()
+        if self._default_coords is not None and any(place in low for place in ("сапун", "алатагыл", "на сапуне", "здесь", "дома")):
+            return self._default_coords[0], self._default_coords[1], self._default_label or "На Сапуне"
+
         if city_name in self._cached_coords:
             return self._cached_coords[city_name]
 

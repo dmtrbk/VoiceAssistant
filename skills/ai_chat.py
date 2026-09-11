@@ -351,14 +351,63 @@ class AIChatSkill(BaseSkill):
         return ""
 
     def _clean_tts_text(self, text: str) -> str:
-        """Очистка ответа от Markdown, тегов think и спецсимволов для TTS."""
+        """Очистка и нормализация текста под естественную речь Piper TTS."""
+        if not text:
+            return ""
+
+        # 1. Удаление тегов reasoning/think и xml
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
-        text = re.sub(r"[\*\_`\#]", "", text)
+        text = re.sub(r"<[^>]+>", "", text)
+
+        # 2. Удаление ссылок Markdown [текст](url) -> текст и спецсимволов разметки
+        text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
         text = re.sub(r"\[.*?\]\(.*?\)", "", text)
+        text = re.sub(r"[\*\_`\#~]", "", text)
+
+        # 3. Нормализация диапазонов чисел (10-15 -> от 10 до 15), чтобы Piper не читал «минус»
+        text = re.sub(r"\b(\d+)\s*[-–—]\s*(\d+)\b", r"от \1 до \2", text)
+
+        # 4. Нормализация температур (+20°C / -5°)
+        text = re.sub(r"\+(\d+)\s*(?:°C|°|град(?:ус(?:а|ов)?)?\.?)", r"плюс \1 градусов", text)
+        text = re.sub(r"\-(\d+)\s*(?:°C|°|град(?:ус(?:а|ов)?)?\.?)", r"минус \1 градусов", text)
+        text = re.sub(r"(\d+)\s*(?:°C|°)", r"\1 градусов", text)
+
+        # 5. Проценты и валюты
+        text = re.sub(r"(\d+(?:[.,]\d+)?)\s*%", r"\1 процентов", text)
+        text = re.sub(r"(?:[$]|USD\s*)(\d+(?:[.,]\d+)?)", r"\1 долларов", text)
+        text = re.sub(r"(\d+(?:[.,]\d+)?)\s*(?:[$]|USD)", r"\1 долларов", text)
+        text = re.sub(r"(?:[€]|EUR\s*)(\d+(?:[.,]\d+)?)", r"\1 евро", text)
+        text = re.sub(r"(\d+(?:[.,]\d+)?)\s*(?:[€]|EUR)", r"\1 евро", text)
+        text = re.sub(r"(\d+(?:[.,]\d+)?)\s*(?:₽|руб\.?|р\.)", r"\1 рублей", text)
+
+        # 6. Скорость и физические единицы
+        text = re.sub(r"(?i)\b(\d+)\s*км/ч\b", r"\1 километров в час", text)
+        text = re.sub(r"(?i)\b(\d+)\s*м/с\b", r"\1 метров в секунду", text)
+
+        # 7. Римские века (XXI, XX, XIX и т.д.)
+        text = re.sub(r"\bXXI\s+(?=век|в\.)", "21-й ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bXX\s+(?=век|в\.)", "20-й ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bXIX\s+(?=век|в\.)", "19-й ", text, flags=re.IGNORECASE)
+
+        # 8. Общепринятые сокращения
+        text = re.sub(r"(?<![А-Яа-яЁёA-Za-z])т\.е\.(?![А-Яа-яЁёA-Za-z])", "то есть", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?<![А-Яа-яЁёA-Za-z])т\.д\.(?![А-Яа-яЁёA-Za-z])", "так далее", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?<![А-Яа-яЁёA-Za-z])т\.п\.(?![А-Яа-яЁёA-Za-z])", "тому подобное", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?<![А-Яа-яЁёA-Za-z])т\.к\.(?![А-Яа-яЁёA-Za-z])", "так как", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?<![А-Яа-яЁёA-Za-z])и\s+др\.(?![А-Яа-яЁёA-Za-z])", "и другие", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(\d{4})\s*г\.(?![А-Яа-яЁёA-Za-z])", r"\1 года", text)
+        text = re.sub(r"\b(\d{4})\s*гг\.(?![А-Яа-яЁёA-Za-z])", r"\1 годов", text)
+
+        # 9. Удаление Unicode эмодзи и смайлов
+        text = re.sub(r"[\U00010000-\U0010ffff]", "", text)
+        text = re.sub(r"(?::\)|:-\)|;\)|;-\)|:D|:\(|:-\()", "", text)
+
+        # 10. Очистка лишних пробелов и знаков препинания
+        text = re.sub(r"[ \t]+", " ", text)
         return text.strip()
 
-    def _clip_spoken_reply(self, text: str, max_sentences: int = 2, max_chars: int = 280) -> str:
+    def _clip_spoken_reply(self, text: str, max_sentences: int = 3, max_chars: int = 320) -> str:
         """Модель игнорирует «коротко» в промпте. Длинный TTS = эхо в микрофон и самодиалог."""
         text = (text or "").strip()
         if not text:
@@ -412,9 +461,18 @@ class AIChatSkill(BaseSkill):
             messages_for_api = list(self.history)
 
         now = datetime.datetime.now()
-        extra = (
-            f"[Сейчас {now.strftime('%H:%M')}, {DAYS_RU[now.weekday()]}, {now.strftime('%d.%m.%Y')}.] "
-            "О себе только мужской род."  # плюс _fix_self_gender до TTS.
+        extra = f"[Сейчас {now.strftime('%H:%M')}, {DAYS_RU[now.weekday()]}, {now.strftime('%d.%m.%Y')}."
+        city = (os.getenv("DEFAULT_CITY") or "").strip()
+        if city:
+            extra += f" Место: {city}."
+            if any(k in city.lower() for k in ("сапун", "алатагыл")):
+                extra += (
+                    " Это не город, а степь у гранитного карьера Сапун / Алатагыл. "
+                    "Не говори «в городе»."
+                )
+        extra += (
+            "] О себе только мужской род. "
+            "Если хозяин рассказывает про местность или зверей — коротко поддержи разговор по-человечески."
         )
         events = self._get_recent_system_events()
         if events:
@@ -508,12 +566,12 @@ class AIChatSkill(BaseSkill):
                 raise RuntimeError("No response from Groq")
 
             raw_reply = response.choices[0].message.content or ""
-            sentences, chars = (2, 280)
+            sentences, chars = (3, 320)
             if trading_clip_limit is not None:
                 try:
                     sentences, chars = trading_clip_limit()
                 except Exception:
-                    sentences, chars = 2, 280
+                    sentences, chars = 3, 320
             cleaned_reply = _fix_self_gender(
                 self._clip_spoken_reply(self._clean_tts_text(raw_reply), sentences, chars)
             )

@@ -262,7 +262,7 @@ def trading_reason_hint() -> str:
 
 def trading_clip_limit() -> tuple[int, int]:
     """(предложений, символов) для TTS."""
-    return 2, 280
+    return 3, 320
 
 
 _desk_loop_started = False
