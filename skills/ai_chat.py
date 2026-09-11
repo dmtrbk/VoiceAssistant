@@ -478,13 +478,19 @@ class AIChatSkill(BaseSkill):
         if events:
             extra += events
 
-        # Подмешивание реального состояния брокерского фонда при финансовых вопросах
+        # Подмешивание реального состояния брокерского фонда при вопросе о сводке
         market_markers = (
             "акци", "акцы", "портфел", "бирж", "бумаг", "счет", "счёт",
             "доход", "прибыл", "убыт", "котиров", "тихий", "в плюсе", "в минусе",
         )
+        status_ask = (
+            "что там", "как там", "как дела", "покажи", "сколько",
+            "портфел", "котиров", "в плюсе", "в минусе",
+        )
         text_lower = (text or "").lower()
-        if any(m in text_lower for m in market_markers):
+        mentions_market = any(m in text_lower for m in market_markers)
+        wants_report = mentions_market and any(p in text_lower for p in status_ask)
+        if wants_report:
             try:
                 from skills import stocks_skill
                 from skills.base import RequestContext
@@ -510,6 +516,12 @@ class AIChatSkill(BaseSkill):
                     extra += f"\n[Реальное состояние твоего фонда на этот момент]: {broker_report}"
             except Exception as exc:
                 logging.warning(f"[Groq] Не удалось получить сводку брокера: {exc}")
+        elif mentions_market or any(w in text_lower for w in ("торг", "токен", "айди", "закину", "кэш")):
+            extra += (
+                " Хозяин говорит про фонд или планы торговли, сводку не просил. "
+                "Не зачитывай бумаги и проценты заново. "
+                "Торговать хочешь, но без токена, айди счёта и кэша заявки не выставишь — ответь по смыслу."
+            )
 
         # Тон Groq от тихого счёта. Не светить цифры и не предлагать биржу в чате.
         try:

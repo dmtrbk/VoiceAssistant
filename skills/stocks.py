@@ -51,6 +51,18 @@ _MARKET_WORDS = (
     "мои бумаги", "ценные бумаги", "тихий счет", "тихий счёт",
 )
 
+_STATUS_ASK = (
+    "что там", "как там", "как дела", "покажи", "скажи",
+    "сколько", "какой ", "какая ", "какие ", "что с ", "что со ",
+    "состояние", "сводка", "котиров",
+)
+
+_FOLLOWUP = (
+    "подробнее", "подробней", "первая", "вторая", "другую",
+    "ещё", "еще", "прибыл", "убыт", "процент",
+    "что там", "как там",
+)
+
 _PRICE_HINTS = (
     "сколько стоит", "какая цена", "цена на",
     "как там", "что там", "что со ", "что с ", "котиров",
@@ -59,12 +71,6 @@ _PRICE_HINTS = (
 _YIELD_HINTS = (
     "в плюсе", "в минусе", "прибыл", "убыт", "заработал",
     "доход", "сколько я", "результат",
-)
-
-_FOLLOWUP = (
-    "а ", "подробнее", "подробней", "первая", "вторая", "другую",
-    "ещё", "еще", "прибыл", "убыт", "цена", "стоит", "процент",
-    "купи", "продай", "вложи", "все", "всё", "что там", "как там",
 )
 
 _BUY_HINTS = ("купи", "докупи", "возьми")
@@ -149,6 +155,15 @@ def _norm(text: str) -> str:
 
 def _sandbox() -> bool:
     return (os.getenv("TINKOFF_SANDBOX") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _wants_market_report(text: str) -> bool:
+    """Сводка по счёту, а не болтовня «закину денег, потом поторгуешь акциями»."""
+    if not any(word in text for word in _MARKET_WORDS):
+        return False
+    if any(ask in text for ask in _STATUS_ASK):
+        return True
+    return len(text.split()) <= 8
 
 
 def _trade_kind(text: str) -> str | None:
@@ -299,28 +314,31 @@ class StocksSkill(BaseSkill):
         text = _norm(context.raw_text)
         if not text:
             return False
-        if any(word in text for word in _MARKET_WORDS):
-            return True
-        if any(word in text for word in _YIELD_HINTS) and any(
-            word in text for word in ("акци", "портфел", "бирж", "бумаг", "счет", "сбер", "газпром", "втб", "фонд", "тмос")
-        ):
-            return True
-        ticker = self._ticker_from_text(text)
-        if ticker and any(hint in text for hint in _PRICE_HINTS):
-            return True
         kind = _trade_kind(text)
         if kind == "auto":
             return True
+        ticker = self._ticker_from_text(text)
         if kind and (
             ticker
             or any(word in text for word in _MARKET_WORDS)
             or any(word in text for word in ("втб", "фонд", "бирж", "акци", "тмос", "крупнейш"))
         ):
             return True
+        if ticker and any(hint in text for hint in _PRICE_HINTS):
+            return True
+        if _wants_market_report(text):
+            return True
+        if any(word in text for word in _YIELD_HINTS) and any(
+            word in text for word in ("акци", "портфел", "бирж", "бумаг", "счет", "сбер", "газпром", "втб", "фонд", "тмос")
+        ) and len(text.split()) <= 10:
+            return True
         return False
 
     def accepts_followup(self, context: RequestContext) -> bool:
         text = _norm(context.raw_text)
+        words = re.findall(r"[а-яa-z0-9\-]+", text)
+        if not words or len(words) > 6:
+            return False
         if any(marker in text for marker in _FOLLOWUP):
             return True
         return self._ticker_from_text(text) is not None
