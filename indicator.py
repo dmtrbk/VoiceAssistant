@@ -173,9 +173,11 @@ class OrbWidget(QWidget):
             self.drag_position = None
             event.accept()
 
-def run_gui():
-    """Точка входа для графического интерфейса Qt6"""
-    app = QApplication(sys.argv)
+def create_orb_gui():
+    """Создает и настраивает QApplication и OrbWidget с воркерами."""
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
     widget = OrbWidget()
     widget.show()
     
@@ -187,5 +189,12 @@ def run_gui():
     settings_worker = SettingsOpenWorker()
     settings_worker.open_requested.connect(widget.open_settings)
     settings_worker.start()
-    
+
+    return app, widget, worker, settings_worker
+
+
+def run_gui():
+    """Точка входа для графического интерфейса Qt6"""
+    app, widget, worker, settings_worker = create_orb_gui()
     sys.exit(app.exec())
+

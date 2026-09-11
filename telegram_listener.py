@@ -2,6 +2,7 @@
 
 import os
 import time
+import fcntl
 import logging
 import threading
 import requests
@@ -10,8 +11,24 @@ from commands import execute as execute_command
 
 load_dotenv()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ALLOWED_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+ALLOWED_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+
+_listener_lock = threading.Lock()
+_is_listener_running = False
+_lock_file_handle = None
+
+
+def _acquire_process_lock() -> bool:
+    """Гарантирует, что опрос Telegram getUpdates выполняет только один процесс в ОС."""
+    global _lock_file_handle
+    lock_path = "/tmp/voiceassistant_telegram.lock"
+    try:
+        _lock_file_handle = open(lock_path, "w")
+        fcntl.flock(_lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (BlockingIOError, PermissionError, OSError):
+        return False
 
 
 def send_reply(chat_id: str, text: str):
@@ -26,6 +43,15 @@ def send_reply(chat_id: str, text: str):
 
 
 def run_telegram_listener():
+    global _is_listener_running
+    with _listener_lock:
+        if _is_listener_running:
+            return
+        if not _acquire_process_lock():
+            logging.info("[Telegram] Другой процесс ассистента уже слушает Telegram. Повторный опрос пропущен.")
+            return
+        _is_listener_running = True
+
     if not TELEGRAM_TOKEN or not ALLOWED_CHAT_ID:
         logging.error("[Telegram] TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не найдены в .env!")
         return
@@ -64,6 +90,13 @@ def run_telegram_listener():
         except Exception as e:
             logging.error(f"[Telegram Error]: {e}")
             time.sleep(5)
+
+
+def start_telegram_listener_thread():
+    """Запускает фоновый поток Telegram-слушателя, если он еще не запущен."""
+    t = threading.Thread(target=run_telegram_listener, daemon=True, name="TelegramListenerThread")
+    t.start()
+    return t
 
 
 if __name__ == "__main__":

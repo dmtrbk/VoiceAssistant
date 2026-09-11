@@ -41,7 +41,7 @@ import commands
 from indicator import run_gui, status_queue
 from player_control import emergency_silence
 from skills.movie_skill import is_movie_control_phrase, is_movie_playing
-from telegram_listener import run_telegram_listener
+from telegram_listener import start_telegram_listener_thread
 from volume_control import VolumeController
 from tts_cache import get_or_synthesize_wav, precache_common_phrases, SYSTEM_CACHE_PHRASES
 from context_manager import clear_active_context, is_in_context
@@ -56,7 +56,7 @@ from triggers import (
     is_self_echo,
 )
 
-threading.Thread(target=run_telegram_listener, daemon=True).start()
+start_telegram_listener_thread()
 
 WAKE_WORDS = ["джарвис", "умник"]
 SAMPLERATE = 16000
@@ -103,6 +103,7 @@ recognizer_lock = threading.Lock()
 volume_ctrl = VolumeController()
 
 is_speaking = False
+MUTE_SPEECH = False
 is_thinking = False  # пока Groq/навык думает — не гасить сессию по тайм-ауту
 playback_interrupted = False
 is_active = False
@@ -215,7 +216,7 @@ def handle_hold_interrupt(recognizer):
 def speak(text, recognizer=None):
     """Синтезирует аудио (с мгновенной отдачей из TTS-кэша) и проигрывает его в асинхронном режиме."""
     global is_speaking, playback_interrupted, play_process, last_active_time, last_speak_end_time
-    global last_spoken_text
+    global last_spoken_text, MUTE_SPEECH
     if not text:
         return
     
@@ -225,6 +226,23 @@ def speak(text, recognizer=None):
     last_spoken_text = text
     
     logging.info(f"Ассистент: {text}")
+
+    if MUTE_SPEECH:
+        def wait_for_mute():
+            global is_speaking, last_active_time, last_speak_end_time
+            time.sleep(0.4)
+            is_speaking = False
+            last_speak_end_time = time.time()
+            last_active_time = time.time()
+            clear_audio_queue()
+            if recognizer:
+                _reset_recognizer(recognizer)
+            if not playback_interrupted:
+                status_queue.put("listening" if is_active else "idle")
+
+        threading.Thread(target=wait_for_mute, daemon=True).start()
+        return
+
     try:
         audio_file, was_cached = get_or_synthesize_wav(text, TEMP_AUDIO_PATH)
         if not audio_file or not os.path.exists(audio_file):
@@ -600,21 +618,31 @@ def main():
 
 if __name__ == "__main__":
     import argparse
-    from cli import run_interactive_loop
+    from cli import run_cli_with_gui, run_interactive_loop
 
     parser = argparse.ArgumentParser(description="Голосовой ассистент Джарвис (Manjaro GNOME)")
     parser.add_argument("-c", "--cli", action="store_true", help="Запустить в текстовом консольном режиме (CLI)")
     parser.add_argument("--no-gui", "--headless", action="store_true", help="Запустить голосовой ассистент без графического виджета-сферы")
-    parser.add_argument("-m", "--mute", action="store_true", help="Отключить динамики (только для CLI)")
+    parser.add_argument("-m", "--mute", action="store_true", help="Отключить динамики (тихий режим)")
+    parser.add_argument("-d", "--debug", "-v", "--verbose", action="store_true", help="Включить подробный режим отладки (DEBUG logging)")
 
     args, unknown = parser.parse_known_args()
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    if args.mute:
+        MUTE_SPEECH = True
 
     # Проверка переменных окружения
     env_cli = os.getenv("CONSOLE_MODE", "false").lower() in ["1", "true", "yes"]
     env_no_gui = os.getenv("GUI_ENABLED", "true").lower() in ["0", "false", "no"]
 
     if args.cli or env_cli:
-        run_interactive_loop(mute=args.mute)
+        if args.no_gui or env_no_gui:
+            run_interactive_loop(mute=args.mute, verbose=args.debug)
+        else:
+            run_cli_with_gui(mute=args.mute, verbose=args.debug)
         sys.exit(0)
 
     # Создаем обработчик, который перехватит Ctrl+C и закроет программу чисто
