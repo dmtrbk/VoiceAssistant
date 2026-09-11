@@ -4,6 +4,7 @@ import os
 import hashlib
 import logging
 import subprocess
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ PIPER_MODEL_NAME = os.getenv("PIPER_MODEL", "ru_RU-dmitri-medium.onnx")
 PIPER_MODEL = os.path.join(PIPER_DIR, "models", PIPER_MODEL_NAME)
 VOICE_SPEED = os.getenv("VOICE_SPEED", "1.0")
 VOICE_SPEAKER = os.getenv("VOICE_SPEAKER", None)
+_SYNTH_LOCK = threading.Lock()
 
 SYSTEM_CACHE_PHRASES = [
     "Да?",
@@ -74,15 +76,16 @@ def synthesize_to_file(text: str, output_path: str) -> bool:
         cmd.extend(["--speaker", VOICE_SPEAKER])
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8"
-        )
-        _, stderr = proc.communicate(input=text)
+        with _SYNTH_LOCK:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8"
+            )
+            _, stderr = proc.communicate(input=text)
         if proc.returncode != 0:
             logger.error(f"[TTS] Ошибка Piper: {stderr.strip() if stderr else 'неизвестная ошибка'}")
             return False

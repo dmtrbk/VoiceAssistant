@@ -15,6 +15,7 @@ from window_control import (
     detect_window_action,
     show_desktop,
 )
+from browser import chrome_command
 
 SUCCESS_RESPONSES = [
     "Сделано!", "Готово!", "Выполнил.", "Есть!", 
@@ -145,20 +146,26 @@ class SystemSkill(BaseSkill):
 
         if any(w in text for w in ["тик ток", "тиктоку", "tiktok"]):
             context.speak("Открываю Тик Ток.")
-            subprocess.Popen([
-                "/opt/google/chrome/google-chrome", 
-                "--profile-directory=Default", 
-                "--app-id=nlalbmkafgmoifbeooblidblkmlhhpnc"
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                chrome_command() + [
+                    "--profile-directory=Default",
+                    "--app-id=nlalbmkafgmoifbeooblidblkmlhhpnc",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             return
 
         if any(w in text for w in ["ютуб", "youtube"]):
             context.speak("Включаю Ютуб.")
-            subprocess.Popen([
-                "/opt/google/chrome/google-chrome", 
-                "--profile-directory=Default", 
-                "--app-id=agimnkijcaahngcdmfeangaknmldooml"
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                chrome_command() + [
+                    "--profile-directory=Default",
+                    "--app-id=agimnkijcaahngcdmfeangaknmldooml",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             return
 
         if any(w in text for w in ["шахматы", "chess"]):
@@ -167,7 +174,11 @@ class SystemSkill(BaseSkill):
                 subprocess.Popen(["gnome-chess"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
                 context.speak("Локальное приложение не найдено. Открываю шахматный сайт Lichess.")
-                subprocess.Popen(["google-chrome-stable", "--app=https://lichess.org"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(
+                    chrome_command() + ["--app=https://lichess.org"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             return
 
         # 4. Системные и стандартные приложения

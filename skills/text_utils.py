@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 from difflib import SequenceMatcher
-from typing import Iterable, Sequence
+from typing import Iterable
 
 # Гласные русского языка
 _VOWELS = set("аеёиоуыэюя")
@@ -197,3 +197,96 @@ def extract_fuzzy_match(text: str, candidates: Iterable[str], min_ratio: float =
             best_candidate = cand
 
     return best_candidate if best_score >= min_ratio else None
+
+
+WORD_CHAR = r"[а-яёa-z0-9]"
+
+RU_NUM_WORDS = {
+    "ноль": 0, "нуль": 0,
+    "один": 1, "одна": 1, "одно": 1, "одну": 1, "раз": 1, "первый": 1,
+    "два": 2, "две": 2, "второй": 2,
+    "три": 3, "третий": 3,
+    "четыре": 4, "четвертый": 4,
+    "пять": 5, "пятый": 5,
+    "шесть": 6, "шестой": 6,
+    "семь": 7, "седьмой": 7,
+    "восемь": 8, "восьмой": 8,
+    "девять": 9, "девятый": 9,
+    "десять": 10, "десятый": 10,
+    "одиннадцать": 11, "двенадцать": 12, "тринадцать": 13,
+    "четырнадцать": 14, "пятнадцать": 15, "шестнадцать": 16,
+    "семнадцать": 17, "восемнадцать": 18, "девятнадцать": 19,
+    "двадцать": 20, "тридцать": 30, "сорок": 40, "пятьдесят": 50,
+    "шестьдесят": 60, "семьдесят": 70, "восемьдесят": 80, "девяносто": 90,
+    "сто": 100, "двести": 200, "триста": 300, "четыреста": 400,
+    "пятьсот": 500, "шестьсот": 600, "семьсот": 700, "восемьсот": 800, "девятьсот": 900,
+    "тысяча": 1000, "тысячи": 1000, "тысяч": 1000, "тысячу": 1000,
+}
+
+
+def norm(text: str) -> str:
+    """Нижний регистр и ё→е без срезания пунктуации."""
+    return (text or "").lower().replace("ё", "е").strip()
+
+
+def has_word(text: str, word: str) -> bool:
+    """Целое слово, а не подстрока («стоп» не ловит «апостол»)."""
+    needle = (word or "").strip()
+    if not needle:
+        return False
+    return re.search(
+        rf"(?<!{WORD_CHAR}){re.escape(needle)}(?!{WORD_CHAR})",
+        text or "",
+        flags=re.IGNORECASE,
+    ) is not None
+
+
+def has_any_word(text: str, words: Iterable[str]) -> bool:
+    return any(has_word(text, word) for word in words)
+
+
+def plural(n: int, form1: str, form2: str, form5: str) -> str:
+    abs_n = abs(int(n))
+    last_two = abs_n % 100
+    last_one = abs_n % 10
+    if 11 <= last_two <= 14:
+        return form5
+    if last_one == 1:
+        return form1
+    if 2 <= last_one <= 4:
+        return form2
+    return form5
+
+
+def words_to_number(text: str, extra: dict[str, int] | None = None) -> int:
+    """Складывает русские числительные: «сто двадцать пять» → 125."""
+    mapping = RU_NUM_WORDS if not extra else {**RU_NUM_WORDS, **extra}
+    total = 0
+    current = 0
+    found = False
+    for token in re.findall(rf"{WORD_CHAR}+", norm(text)):
+        if token.isdigit():
+            current += int(token)
+            found = True
+            continue
+        value = mapping.get(token)
+        if value is None:
+            continue
+        found = True
+        if value >= 1000:
+            current = (current or 1) * value
+            total += current
+            current = 0
+        else:
+            current += value
+    return (total + current) if found else 0
+
+
+def extract_int(text: str) -> int | None:
+    """Первое арабское число или словесное; ноль из «ноль» тоже число."""
+    match = re.search(r"\b\d+\b", text or "")
+    if match:
+        return int(match.group(0))
+    if not re.search(rf"(?<!{WORD_CHAR})(?:{'|'.join(RU_NUM_WORDS)})(?!{WORD_CHAR})", norm(text)):
+        return None
+    return words_to_number(text)

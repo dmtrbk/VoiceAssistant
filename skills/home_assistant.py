@@ -13,7 +13,7 @@ import requests
 
 from skills.ai_chat import log_system_action
 from skills.base import BaseSkill, RequestContext
-from skills.text_utils import fuzzy_phrase_match
+from skills.text_utils import fuzzy_phrase_match, norm as _norm
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +34,6 @@ _LIST_HINTS = (
 )
 _ON = ("включи", "зажги", "открой", "активируй", "вруби")
 _OFF = ("выключи", "потуши", "закрой", "выруби", "погаси")
-
-
-def _norm(text: str) -> str:
-    return (text or "").lower().replace("ё", "е").strip()
 
 
 def _strip_fillers(text: str) -> str:
@@ -155,8 +151,9 @@ class HomeAssistantSkill(BaseSkill):
         ):
             return True
         if any(verb in text for verb in _ON + _OFF):
-            self._refresh_states()
-            return self._match_entity(text) is not None
+            if not self._states:
+                self._refresh_states()
+            return bool(self._states) and self._match_entity(text) is not None
         return False
 
     def accepts_followup(self, context: RequestContext) -> bool:
@@ -168,8 +165,7 @@ class HomeAssistantSkill(BaseSkill):
             return True
         if any(verb in text for verb in _ON + _OFF):
             return True
-        self._refresh_states()
-        return self._match_entity(text) is not None
+        return bool(self._states) and self._match_entity(text) is not None
 
     def _call_service(self, domain: str, service: str, entity_id: str) -> bool:
         try:

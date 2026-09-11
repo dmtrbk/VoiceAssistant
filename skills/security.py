@@ -120,8 +120,11 @@ class SurveillanceThread(threading.Thread):
 
             frame1_blur = frame2_blur
 
+        stopped = self._stop_event.is_set()
         cap.release()
         logging.info("[Охрана] Поток видеонаблюдения остановлен.")
+        if not stopped:
+            send_telegram_notification("Камера охраны остановилась: нет кадра с веб-камеры.")
 
 
 class SecuritySkill(BaseSkill):
@@ -130,18 +133,37 @@ class SecuritySkill(BaseSkill):
     def __init__(self):
         self.surveillance_thread = None
         self.black_screen_process = None
+        self._arm_lock = threading.Lock()
+        self._arm_id = 0
+
+    def _bump_arm(self) -> int:
+        with self._arm_lock:
+            self._arm_id += 1
+            return self._arm_id
+
+    def _stop_camera(self) -> None:
+        if self.surveillance_thread is not None and self.surveillance_thread.is_alive():
+            self.surveillance_thread.stop()
+            self.surveillance_thread.join(timeout=5.0)
+            if self.surveillance_thread.is_alive():
+                logging.warning("[Охрана] Поток наблюдения не остановился за 5 секунд.")
+            else:
+                self.surveillance_thread = None
+
+    def _start_camera(self) -> None:
+        self._stop_camera()
+        self.surveillance_thread = SurveillanceThread()
+        self.surveillance_thread.start()
 
     def on_disabled(self) -> None:
         """Тихо гасит камеру и заставку, если охрану выключили тумблером."""
+        self._bump_arm()
         try:
             self.control_screens(True)
         except Exception as exc:
             logging.debug("[Охрана] Не удалось убрать заставку: %s", exc)
-        if self.surveillance_thread is not None and self.surveillance_thread.is_alive():
-            self.surveillance_thread.stop()
-            self.surveillance_thread.join(timeout=5.0)
-            if not self.surveillance_thread.is_alive():
-                self.surveillance_thread = None
+        self._stop_camera()
+        if self.surveillance_thread is None:
             logging.info("[Охрана] Наблюдение остановлено: навык выключен в настройках.")
 
     def can_handle(self, context: RequestContext) -> bool:
@@ -176,27 +198,23 @@ class SecuritySkill(BaseSkill):
         if any(w in text for w in ["я ухожу", "включи охрану", "активируй охрану", "режим охраны"]):
             context.speak("Режим охраны активирован. Включаю заставку.")
             send_telegram_notification("🔒 Запущен режим охраны. Наблюдение начнется через 1 минуту.")
-            
-            time.sleep(2.5)  # Даем договорить
-            
-            self.control_screens(False)
-            
-            if self.surveillance_thread is None or not self.surveillance_thread.is_alive():
-                self.surveillance_thread = SurveillanceThread()
-                self.surveillance_thread.start()
+            arm_id = self._bump_arm()
+
+            def _arm() -> None:
+                time.sleep(2.5)
+                with self._arm_lock:
+                    if arm_id != self._arm_id:
+                        return
+                self.control_screens(False)
+                self._start_camera()
+
+            threading.Thread(target=_arm, daemon=True, name="security-arm").start()
             return
 
         if any(w in text for w in ["я пришел", "выключи охрану", "отключи охрану", "я дома", "джарвис я тут", "я тут"]):
+            self._bump_arm()
             self.control_screens(True)
-            
-            if self.surveillance_thread is not None and self.surveillance_thread.is_alive():
-                self.surveillance_thread.stop()
-                self.surveillance_thread.join(timeout=5.0)
-                if self.surveillance_thread.is_alive():
-                    logging.warning("[Охрана] Поток наблюдения не остановился за 5 секунд.")
-                else:
-                    self.surveillance_thread = None
-                
+            self._stop_camera()
             context.speak("С возвращением! Система видеонаблюдения отключена.")
             send_telegram_notification("🔓 Режим охраны успешно отключен. Хозяин дома.")
             return

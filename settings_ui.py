@@ -67,12 +67,20 @@ class SettingsWindow(QWidget):
 
     def _rebuild(self) -> None:
         flags = get_flags()
-        if self._boxes:
+        expected = [item[0] for item in OPTIONAL_SKILLS]
+        if self._boxes and list(self._boxes.keys()) == expected:
             for skill_id, box in self._boxes.items():
                 box.blockSignals(True)
                 box.setChecked(flags.get(skill_id, True))
                 box.blockSignals(False)
             return
+
+        while self._list.count():
+            item = self._list.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._boxes.clear()
 
         for skill_id, title, hint in OPTIONAL_SKILLS:
             row = QFrame()

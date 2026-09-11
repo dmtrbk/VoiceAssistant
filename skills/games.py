@@ -4,53 +4,18 @@ import random
 import re
 import logging
 from skills.base import BaseSkill, RequestContext
+from skills.text_utils import extract_int, plural
 from context_manager import set_active_context, clear_active_context
 
 logger = logging.getLogger(__name__)
 
-NUM_WORDS = {
-    "ноль": 0, "нуль": 0, "один": 1, "одна": 1, "одно": 1, "первый": 1,
-    "два": 2, "две": 2, "второй": 2, "три": 3, "третий": 3,
-    "четыре": 4, "четвертый": 4, "пять": 5, "пятый": 5,
-    "шесть": 6, "шестой": 6, "семь": 7, "седьмой": 7,
-    "восемь": 8, "восьмой": 8, "девять": 9, "девятый": 9,
-    "десять": 10, "десятый": 10, "одиннадцать": 11, "двенадцать": 12,
-    "тринадцать": 13, "четырнадцать": 14, "пятнадцать": 15,
-    "шестнадцать": 16, "семнадцать": 17, "восемнадцать": 18,
-    "девятнадцать": 19, "двадцать": 20, "тридцать": 30,
-    "сорок": 40, "пятьдесят": 50, "шестьдесят": 60,
-    "семьдесят": 70, "восемьдесят": 80, "девяносто": 90, "сто": 100
-}
-
 
 def _extract_int_from_text(text: str) -> int | None:
-    """Извлекает число из цифр или словесного описания."""
-    match = re.search(r"\b\d+\b", text)
-    if match:
-        return int(match.group(0))
-    
-    words = text.lower().split()
-    total = 0
-    found = False
-    for w in words:
-        clean_w = w.strip(".,!?")
-        if clean_w in NUM_WORDS:
-            total += NUM_WORDS[clean_w]
-            found = True
-    return total if found else None
+    return extract_int(text)
 
 
 def _attempts_str(n: int) -> str:
-    abs_n = abs(n)
-    last_two = abs_n % 100
-    last_one = abs_n % 10
-    if 11 <= last_two <= 14:
-        return f"{n} попыток"
-    if last_one == 1:
-        return f"{n} попытку"
-    if 2 <= last_one <= 4:
-        return f"{n} попытки"
-    return f"{n} попыток"
+    return f"{n} {plural(n, 'попытку', 'попытки', 'попыток')}"
 
 
 class GuessNumberGame:

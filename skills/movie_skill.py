@@ -17,6 +17,7 @@ from browser import open_url
 from player_control import stop_player_session
 from skills.ai_chat import log_system_action
 from skills.base import BaseSkill, RequestContext
+from skills.text_utils import WORD_CHAR, has_any_word as _has_any_word, has_word as _has_word
 from window_control import is_window_command_text
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,6 @@ _DEVNULL = subprocess.DEVNULL
 MPV_SOCKET = "/tmp/mpv_jarvis.sock"
 MPV_SCOPE = "jarvis-mpv.scope"
 
-_WORD = r"[а-яёa-z0-9]"
 _MOVIE_NOUNS = (
     "фильме", "фильма", "фильму", "фильм",
     "сериале", "сериала", "сериалу", "сериал",
@@ -42,14 +42,6 @@ _CLIP_JUNK = (
 )
 
 _mpv_proc: Optional[subprocess.Popen] = None
-
-
-def _has_word(text: str, word: str) -> bool:
-    return re.search(rf"(?<!{_WORD}){re.escape(word)}(?!{_WORD})", text) is not None
-
-
-def _has_any_word(text: str, words) -> bool:
-    return any(_has_word(text, w) for w in words)
 
 
 def _send_mpv_ipc(command: List[object]) -> bool:
@@ -185,7 +177,7 @@ def score_vk_item(title: str, duration_sec: int, query: str, kind: str) -> int:
     """Оценка карточки ВК: совпадение названия + длина, минус клипы и трейлеры."""
     title_l = (title or "").lower()
     score = 0
-    tokens = [t for t in re.findall(rf"{_WORD}+", query.lower()) if len(t) > 1]
+    tokens = [t for t in re.findall(rf"{WORD_CHAR}+", query.lower()) if len(t) > 1]
     stop = {"фильм", "сериала", "сериал", "кино", "видео", "трейлер", "мультик", "мультфильм"}
     name_tokens = [t for t in tokens if t not in stop]
     if not name_tokens:

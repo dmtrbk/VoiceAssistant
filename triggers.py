@@ -79,7 +79,17 @@ def _contains_any(text: str, phrases) -> bool:
     lowered = normalize_utterance(text)
     if not lowered:
         return False
-    return any(phrase in lowered for phrase in phrases)
+    for phrase in phrases:
+        needle = normalize_utterance(phrase)
+        if not needle:
+            continue
+        if " " in needle:
+            if needle in lowered:
+                return True
+            continue
+        if re.search(rf"(?<![\w-]){re.escape(needle)}(?![\w-])", lowered, flags=re.UNICODE):
+            return True
+    return False
 
 
 def is_quick_command(text: str) -> bool:

@@ -333,6 +333,8 @@ class WeatherSkill(BaseSkill):
                         f"Завтра {place.lower()} {desc}, днем до {temp_desc}, ночью около {format_temperature(tom_min)}."
                     )
                     return
+                context.speak("Прогноз на завтра пока не пришёл. Спросите текущую погоду или повторите позже.")
+                return
 
             # Текущая погода
             current = data.get("current", {})

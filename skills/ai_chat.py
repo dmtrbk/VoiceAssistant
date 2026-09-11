@@ -186,7 +186,7 @@ class AIChatSkill(BaseSkill):
     """Навык работы с ИИ Groq (Джарвис) с поддержкой памяти и очисткой речи под Piper TTS."""
 
     def __init__(self):
-        self.groq_api_key = os.getenv("GROQ_API_KEY")
+        self.groq_api_key = (os.getenv("GROQ_API_KEY") or "").strip().strip("\"'")
         # Чат, не агент: groq/compound* делают лишний круг и в логе Retrying + второй HTTP.
         self.groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 
@@ -661,6 +661,17 @@ class AIChatSkill(BaseSkill):
 
         self._reply(text, context.speak, channel=channel)
 
+    def _discard_last_user(self, text: str) -> None:
+        """Убирает пользовательскую реплику, если ответ оборвали или API упал."""
+        with _HISTORY_LOCK:
+            if (
+                self.history
+                and self.history[-1].get("role") == "user"
+                and self.history[-1].get("content") == text
+            ):
+                self.history.pop()
+                self._save_history()
+
     def _reply(self, text: str, speak_func: Callable[[str], None], channel: str = "voice") -> None:
         with _REPLY_LOCK:
             self._reply_locked(text, speak_func, channel=channel)
@@ -775,13 +786,14 @@ class AIChatSkill(BaseSkill):
             trading_clip_limit = None
         messages_for_api.insert(-1, {"role": "system", "content": extra})
 
+        epoch = speak_epoch() if channel == "voice" else None
+
+        def aborted() -> bool:
+            return epoch is not None and speak_epoch() != epoch
+
         try:
             unique_models = model_chain(self.groq_model)
             cleaned_reply = ""
-            epoch = speak_epoch() if channel == "voice" else None
-
-            def aborted() -> bool:
-                return epoch is not None and speak_epoch() != epoch
 
             if channel == "voice":
                 sentences, chars = (3, 320)
@@ -858,10 +870,16 @@ class AIChatSkill(BaseSkill):
             if not cleaned_reply:
                 if aborted():
                     logging.info("[Groq] Ответ оборван, в историю не пишу.")
+                    self._discard_last_user(text)
                     return
                 logging.warning("[Groq] Пустой ответ после очистки.")
                 speak_func("Я затрудняюсь с ответом.")
                 cleaned_reply = "Я затрудняюсь с ответом."
+
+            if aborted():
+                logging.info("[Groq] Ответ оборван после начала озвучки, в историю не пишу.")
+                self._discard_last_user(text)
+                return
 
             with _HISTORY_LOCK:
                 self.history.append({"role": "assistant", "content": cleaned_reply})
@@ -870,4 +888,6 @@ class AIChatSkill(BaseSkill):
 
         except Exception as e:
             logging.error(f"[Groq] Ошибка запроса к API: {e}")
-            speak_func("Моё облако мыслей временно недоступно.")
+            self._discard_last_user(text)
+            if not aborted():
+                speak_func("Моё облако мыслей временно недоступно.")

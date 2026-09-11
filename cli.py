@@ -70,8 +70,8 @@ def _cli_tts_worker() -> None:
                     stderr=subprocess.DEVNULL,
                 )
                 release_temp_wav(wav_path, cached)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.warning("[CLI] Ошибка озвучки: %s", exc)
         finally:
             with _cli_tts_lock:
                 _cli_tts_pending = max(0, _cli_tts_pending - 1)
@@ -101,7 +101,8 @@ def play_audio_feedback(text: str, mute: bool = False):
 
 
 def wait_cli_tts(timeout: float = 120.0) -> None:
-    _cli_tts_idle.wait(timeout=timeout)
+    if not _cli_tts_idle.wait(timeout=timeout):
+        logging.warning("[CLI] Озвучка не успела закончиться за %.0f с.", timeout)
 
 
 def execute_cli_command(user_text: str, mute: bool = False, verbose: bool = False) -> bool:
@@ -110,6 +111,9 @@ def execute_cli_command(user_text: str, mute: bool = False, verbose: bool = Fals
     Возвращает should_sleep (True если прощание).
     """
     responses: list[str] = []
+
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     try:
         status_queue.put("thinking")

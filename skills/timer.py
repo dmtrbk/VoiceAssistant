@@ -1,25 +1,13 @@
 # skills/timer.py
 
-import os
 import re
 import time
 import logging
 import threading
-from typing import List, Dict, Any
 from skills.base import BaseSkill, RequestContext
+from skills.text_utils import plural as _plural, words_to_number
 
 logger = logging.getLogger(__name__)
-
-NUM_WORDS = {
-    "ноль": 0, "один": 1, "одна": 1, "одну": 1, "раз": 1,
-    "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5,
-    "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10,
-    "одиннадцать": 11, "двенадцать": 12, "тринадцать": 13,
-    "четырнадцать": 14, "пятнадцать": 15, "шестнадцать": 16,
-    "семнадцать": 17, "восемнадцать": 18, "девятнадцать": 19,
-    "двадцать": 20, "тридцать": 30, "сорок": 40, "пятьдесят": 50,
-    "шестьдесят": 60, "сто": 100
-}
 
 
 def parse_duration_seconds(text: str) -> tuple[int, str]:
@@ -50,7 +38,7 @@ def parse_duration_seconds(text: str) -> tuple[int, str]:
         if val_str.isdigit():
             hours = int(val_str)
         else:
-            hours = _words_to_number(val_str)
+            hours = words_to_number(val_str)
 
     # Поиск минут
     min_match = re.search(r"(\d+|[а-яё\s]+?)\s*(?:минут(?:у|ы|ам)?)", text)
@@ -59,7 +47,7 @@ def parse_duration_seconds(text: str) -> tuple[int, str]:
         if val_str.isdigit():
             minutes = int(val_str)
         else:
-            minutes = _words_to_number(val_str)
+            minutes = words_to_number(val_str)
 
     # Поиск секунд
     sec_match = re.search(r"(\d+|[а-яё\s]+?)\s*(?:секунд(?:у|ы|ам)?)", text)
@@ -68,7 +56,7 @@ def parse_duration_seconds(text: str) -> tuple[int, str]:
         if val_str.isdigit():
             seconds = int(val_str)
         else:
-            seconds = _words_to_number(val_str)
+            seconds = words_to_number(val_str)
 
     # Если единицы не указаны, но есть число после слова "таймер на ..."
     if hours == 0 and minutes == 0 and seconds == 0:
@@ -98,32 +86,10 @@ def _parse_bare_minutes(text: str) -> tuple[int, str]:
         minutes = int(match.group(0))
         if minutes > 0:
             return minutes * 60, f"{minutes} {_plural(minutes, 'минуту', 'минуты', 'минут')}"
-    words_val = _words_to_number(text)
+    words_val = words_to_number(text)
     if words_val > 0:
         return words_val * 60, f"{words_val} {_plural(words_val, 'минуту', 'минуты', 'минут')}"
     return 0, ""
-
-
-def _words_to_number(words_str: str) -> int:
-    tokens = words_str.split()
-    current = 0
-    for t in tokens:
-        if t in NUM_WORDS:
-            current += NUM_WORDS[t]
-    return current
-
-
-def _plural(n: int, form1: str, form2: str, form5: str) -> str:
-    abs_n = abs(n)
-    last_two = abs_n % 100
-    last_one = abs_n % 10
-    if 11 <= last_two <= 14:
-        return form5
-    if last_one == 1:
-        return form1
-    if 2 <= last_one <= 4:
-        return form2
-    return form5
 
 
 def format_remaining_time(seconds_left: int) -> str:
@@ -177,7 +143,7 @@ class TimerSkill(BaseSkill):
     """Фирменный навык управления таймерами в стиле Алисы."""
 
     def __init__(self):
-        self.active_timers: List[ActiveTimer] = []
+        self.active_timers: list[ActiveTimer] = []
         self._lock = threading.Lock()
         self._awaiting_duration = False
 
@@ -195,8 +161,16 @@ class TimerSkill(BaseSkill):
     def on_context_lost(self) -> None:
         self._awaiting_duration = False
 
+    def _prune_timers(self) -> None:
+        self.active_timers = [
+            timer for timer in self.active_timers
+            if not timer.canceled and timer.remaining_seconds > 0
+        ]
+
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
+        with self._lock:
+            self._prune_timers()
 
         # 1. Отмена / сброс таймера
         if any(w in text for w in ["отмени", "сбрось", "выключи", "удали", "стоп", "останови", "закрой"]):
@@ -215,7 +189,7 @@ class TimerSkill(BaseSkill):
         # 2. Проверка статуса / сколько осталось
         if any(w in text for w in ["сколько", "статус", "проверь", "осталось", "что с", "какой"]):
             with self._lock:
-                self.active_timers = [t for t in self.active_timers if not t.canceled and t.remaining_seconds > 0]
+                self._prune_timers()
                 if not self.active_timers:
                     context.speak("Сейчас нет активных таймеров.")
                     return
@@ -236,8 +210,7 @@ class TimerSkill(BaseSkill):
         self._awaiting_duration = False
 
         with self._lock:
-            # Очищаем устаревшие таймеры
-            self.active_timers = [t for t in self.active_timers if not t.canceled and t.remaining_seconds > 0]
+            self._prune_timers()
             new_timer = ActiveTimer(duration_sec, label, context.speak)
             self.active_timers.append(new_timer)
 

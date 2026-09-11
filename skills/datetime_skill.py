@@ -3,6 +3,7 @@
 
 from datetime import datetime
 from skills.base import BaseSkill, RequestContext
+from skills.text_utils import plural as _plural
 
 DAYS_OF_WEEK = [
     "понедельник", "вторник", "среда", "четверг",
@@ -13,19 +14,6 @@ MONTHS = [
     "января", "февраля", "марта", "апреля", "мая", "июня",
     "июля", "августа", "сентября", "октября", "ноября", "декабря"
 ]
-
-
-def _plural(n: int, form1: str, form2: str, form5: str) -> str:
-    abs_n = abs(n)
-    last_two = abs_n % 100
-    last_one = abs_n % 10
-    if 11 <= last_two <= 14:
-        return form5
-    if last_one == 1:
-        return form1
-    if 2 <= last_one <= 4:
-        return form2
-    return form5
 
 
 def format_russian_time(dt: datetime) -> str:

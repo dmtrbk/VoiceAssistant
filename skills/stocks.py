@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from skills.base import BaseSkill, RequestContext
+from skills.text_utils import norm as _norm, plural as _plural
 
 logger = logging.getLogger(__name__)
 
@@ -142,13 +143,28 @@ _SPOKEN = {
     "TCSG": "Т-Технологии",
 }
 
-_mood_lock = threading.Lock()
-_last_day_yield: float | None = None
-_mood_at: float = 0.0
+def _http_error(response: requests.Response) -> RuntimeError:
+    snippet = re.sub(r"t\.[A-Za-z0-9._-]{8,}", "[token]", (response.text or "").replace("\n", " "))
+    return RuntimeError(f"http {response.status_code}: {snippet[:120]}")
 
 
-def _norm(text: str) -> str:
-    return (text or "").lower().replace("ё", "е").strip()
+def _extract_json_object(raw: str) -> dict[str, Any] | None:
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for index, char in enumerate(raw[start:], start):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    payload = json.loads(raw[start : index + 1])
+                except json.JSONDecodeError:
+                    return None
+                return payload if isinstance(payload, dict) else None
+    return None
 
 
 def _sandbox() -> bool:
@@ -204,19 +220,6 @@ def _quotation_to_float(value: Any) -> float:
     return units + nano / 1_000_000_000.0
 
 
-def _plural(n: int, form1: str, form2: str, form5: str) -> str:
-    abs_n = abs(n)
-    last_two = abs_n % 100
-    last_one = abs_n % 10
-    if 11 <= last_two <= 14:
-        return form5
-    if last_one == 1:
-        return form1
-    if 2 <= last_one <= 4:
-        return form2
-    return form5
-
-
 def _format_rub(amount: float, signed: bool = False) -> str:
     if not signed and 0 < abs(amount) < 30:
         rub = int(abs(amount))
@@ -251,13 +254,6 @@ def _format_pct(value: float) -> str:
     if rounded < 0:
         return f"минус {shown.replace('-', '')} процента"
     return "без изменения"
-
-
-def _set_mood(day_yield: float | None) -> None:
-    global _last_day_yield, _mood_at
-    with _mood_lock:
-        _last_day_yield = day_yield
-        _mood_at = time.time()
 
 
 def trading_temperature(base: float = 0.7) -> float:
@@ -446,7 +442,7 @@ class StocksSkill(BaseSkill):
                 for marker in ("permission", "прав", "readonly", "read only", "недостаточно прав")
             ):
                 raise RuntimeError("trade token")
-            raise RuntimeError(f"http {response.status_code}: {response.text[:180]}")
+            raise _http_error(response)
         data = response.json() if response.content else {}
         if cache_key:
             self._cache[cache_key] = (time.time(), data)
@@ -461,7 +457,7 @@ class StocksSkill(BaseSkill):
             try:
                 response = self._session.get(url, params=params, timeout=6)
                 if response.status_code >= 400:
-                    raise RuntimeError(f"http {response.status_code}: {response.text[:180]}")
+                    raise _http_error(response)
                 data = response.json() if response.content else {}
                 self._cache[cache_key] = (time.time(), data)
                 return data
@@ -734,7 +730,6 @@ class StocksSkill(BaseSkill):
         if not day_total:
             day_total = sum(item["daily"] for item in positions)
         total_yield = _quotation_to_float(data.get("expectedYield"))
-        _set_mood(day_total)
         return positions, day_total, total_yield
 
     def _tinkoff_last(self, ticker: str) -> tuple[str, float]:
@@ -784,14 +779,11 @@ class StocksSkill(BaseSkill):
             speech = f"{name} {_format_rub(price)}, {_format_pct((price - avg) / avg * 100.0)}."
             if qty:
                 speech += f" С покупки {_format_rub(pnl, signed=True)}."
-                _set_mood(pnl)
         else:
             speech = f"{name} {_format_rub(price)}, {_format_pct(day_pct)} за день."
         if qty and day_pct:
             daily = qty * price * day_pct / 100.0
             speech += f" За день {_format_rub(daily, signed=True)}."
-            if not avg:
-                _set_mood(daily)
         return speech
 
     def _speak_watch(self, emphasize_yield: bool) -> str:
@@ -819,10 +811,6 @@ class StocksSkill(BaseSkill):
             if qty:
                 day_total += qty * price * (day_pct / 100.0)
                 have_day = True
-        if have_pnl:
-            _set_mood(total_pnl)
-        elif have_day:
-            _set_mood(day_total)
         speech = ". ".join(parts) + "."
         if have_pnl:
             speech += f" С покупки {_format_rub(total_pnl, signed=True)}."
@@ -918,9 +906,11 @@ class StocksSkill(BaseSkill):
 
     def _order_filled(self, data: dict[str, Any]) -> bool:
         status = str(data.get("executionReportStatus") or data.get("status") or "").upper()
+        if any(marker in status for marker in ("REJECT", "CANCEL")):
+            return False
         if not status:
-            return True
-        return any(marker in status for marker in ("FILL", "NEW", "PARTIALLYFILL", "EXECUTION_REPORT_STATUS_FILL"))
+            return False
+        return any(marker in status for marker in ("FILL", "NEW"))
 
     def _place_order(self, ticker: str, direction: str, lots: int) -> str:
         if lots <= 0:
@@ -1020,22 +1010,6 @@ class StocksSkill(BaseSkill):
             raise RuntimeError("no lots")
         parts.append(self._place_order(ticker, "ORDER_DIRECTION_BUY", buy_max))
         return " ".join(parts)
-
-    def _score_universe(self, universe: list[str]) -> dict[str, float]:
-        scores: dict[str, float] = {}
-        for ticker in universe:
-            try:
-                _name, _price, day_pct = self._moex_quote(ticker)
-                scores[ticker] = day_pct
-            except Exception as exc:
-                logger.debug("[Биржа] оценка %s: %s", ticker, exc)
-                scores[ticker] = 0.0
-        return scores
-
-    def _pick_name(self, scores: dict[str, float]) -> str | None:
-        if not scores:
-            return None
-        return max(scores, key=lambda ticker: scores[ticker])
 
     def _held_map(self) -> dict[str, float]:
         held: dict[str, float] = {}
@@ -1207,10 +1181,9 @@ class StocksSkill(BaseSkill):
             for model_name in model_chain(env_model):
                 try:
                     raw = complete_one(messages, model_name, 0.5, 120).strip()
-                    match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-                    if not match:
+                    payload = _extract_json_object(raw)
+                    if not payload:
                         continue
-                    payload = json.loads(match.group(0))
                     raw_alloc = payload.get("portfolio")
                     if not isinstance(raw_alloc, dict):
                         raw_alloc = payload
@@ -1322,10 +1295,16 @@ class StocksSkill(BaseSkill):
                 except Exception as exc:
                     logger.warning("[Биржа] Ошибка при продаже %s: %s", ticker, exc)
 
-        # Очищаем кэш брокера после продаж
+        # После продаж пересчитываем позиции и кэш — иначе покупки идут по старым долям.
         if acted:
             time.sleep(0.4)
             self._bust_broker_cache()
+            positions_list, _day, _total = self._safe_positions()
+            positions = {item["ticker"]: item for item in positions_list}
+            current_values = {
+                ticker: positions.get(ticker, {}).get("qty", 0.0) * prices.get(ticker, 0.0)
+                for ticker in relevant_tickers
+            }
 
         # 2. Цикл ПОКУПКИ: принцип «Сначала считаем — потом покупаем»
         available_cash = self._broker_cash()
@@ -1376,16 +1355,17 @@ class StocksSkill(BaseSkill):
             except Exception as exc:
                 logger.warning("[Биржа] Ошибка при покупке %s: %s", ticker, exc)
 
-        # 3. Парковка кэша: остаток свободных денег направляем на покупку индексного фонда TMOS
-        self._bust_broker_cache()
-        buy_max_tmos, _ = self._max_lots("TMOS")
-        if buy_max_tmos > 0:
-            try:
-                res = self._place_order("TMOS", "ORDER_DIRECTION_BUY", buy_max_tmos)
-                parts.append(res)
-                acted = True
-            except Exception as exc:
-                logger.warning("[Биржа] Ошибка при парковке кэша в TMOS: %s", exc)
+        # 3. Парковка кэша в TMOS только если индексный фонд есть в целевом портфеле.
+        if target_alloc.get("TMOS", 0.0) > 0:
+            self._bust_broker_cache()
+            buy_max_tmos, _ = self._max_lots("TMOS")
+            if buy_max_tmos > 0:
+                try:
+                    res = self._place_order("TMOS", "ORDER_DIRECTION_BUY", buy_max_tmos)
+                    parts.append(res)
+                    acted = True
+                except Exception as exc:
+                    logger.warning("[Биржа] Ошибка при парковке кэша в TMOS: %s", exc)
 
         if not acted or not parts:
             result = "Портфель уже сбалансирован в целевых долях."

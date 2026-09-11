@@ -9,8 +9,6 @@ import queue
 import threading
 from typing import Any
 
-_DEVNULL_IDS = object()
-
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(PROJECT_DIR, "skills_enabled.json")
 
@@ -41,6 +39,7 @@ settings_events: queue.Queue[str] = queue.Queue()
 _lock = threading.Lock()
 _enabled: dict[str, bool] = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
 _loaded = False
+_SKILL_MAP: dict[str, Any] | None = None
 
 
 def _write_json_atomic(path: str, data: Any) -> None:
@@ -52,6 +51,9 @@ def _write_json_atomic(path: str, data: Any) -> None:
 
 
 def _skill_map() -> dict[str, Any]:
+    global _SKILL_MAP
+    if _SKILL_MAP is not None:
+        return _SKILL_MAP
     from skills import (
         audacious_skill,
         calculator_skill,
@@ -70,7 +72,7 @@ def _skill_map() -> dict[str, Any]:
         stocks_skill,
     )
 
-    return {
+    _SKILL_MAP = {
         "xiaomi_bulb": xiaomi_bulb_skill,
         "movie": movie_skill,
         "audacious": audacious_skill,
@@ -87,6 +89,7 @@ def _skill_map() -> dict[str, Any]:
         "home_assistant": home_assistant_skill,
         "stocks": stocks_skill,
     }
+    return _SKILL_MAP
 
 
 def _ensure_loaded() -> None:

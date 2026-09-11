@@ -46,6 +46,8 @@ from skills.movie_skill import is_movie_control_phrase, is_movie_playing
 from telegram_listener import start_telegram_listener_thread
 from volume_control import VolumeController
 from tts_cache import (
+    PIPER_EXE,
+    PIPER_MODEL,
     get_or_synthesize_wav,
     precache_common_phrases,
     release_temp_wav,
@@ -93,12 +95,8 @@ MIN_SPEECH_RMS = _read_min_speech_rms()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "model")
 
-PIPER_DIR = os.path.join(BASE_DIR, "piper")
-PIPER_EXE = os.path.join(PIPER_DIR, "piper")
-PIPER_MODEL_NAME = os.getenv("PIPER_MODEL", "ru_RU-dmitri-medium.onnx")
-PIPER_MODEL = os.path.join(PIPER_DIR, "models", PIPER_MODEL_NAME)
-
-audio_queue = queue.Queue()
+AUDIO_QUEUE_MAX = 80  # ~10 с аудио при blocksize=2000 / 16 кГц
+audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=AUDIO_QUEUE_MAX)
 recognizer_lock = threading.Lock()
 volume_ctrl = VolumeController()
 
@@ -321,14 +319,10 @@ def _tts_worker() -> None:
                 pass
 
             proc = _play_prepared(path, was_cached, gen)
-            if proc is not None and prefetch is not None:
+            if prefetch is not None:
                 ptext, pgen = prefetch
                 if pgen == _tts_generation and not playback_interrupted and not MUTE_SPEECH:
-                    # paplay уже играет — Piper следующего куска параллельно, не два Piper сразу.
-                    prepared = _synth_item(ptext, pgen)
-            elif prefetch is not None:
-                ptext, pgen = prefetch
-                if pgen == _tts_generation and not playback_interrupted and not MUTE_SPEECH:
+                    # paplay уже играет — Piper следующего куска параллельно.
                     prepared = _synth_item(ptext, pgen)
             _wait_play(proc, path, was_cached)
     finally:
@@ -675,7 +669,7 @@ def main():
         global asked_to_repeat, last_active_time
         if not asked_to_repeat:
             asked_to_repeat = True
-            safe_speak("Не расслышал, повторите, пожалуйста")
+            safe_speak("Не расслышал, повторите, пожалуйста.")
         last_active_time = time.time()
 
     def dispatch_phrase(phrase: str) -> None:
@@ -702,7 +696,20 @@ def main():
         volume_ctrl.duck()
 
     def audio_callback(indata, frames, time_info, status):
-        audio_queue.put(bytes(indata))
+        chunk = bytes(indata)
+        try:
+            audio_queue.put_nowait(chunk)
+            return
+        except queue.Full:
+            pass
+        try:
+            audio_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            audio_queue.put_nowait(chunk)
+        except queue.Full:
+            pass
 
     # Запускаем фоновый монитор тайм-аута внимания
     threading.Thread(target=timeout_monitor, daemon=True).start()

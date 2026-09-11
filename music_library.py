@@ -8,11 +8,12 @@ import logging
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
+
+from skills.text_utils import has_any_word as _has_any_word, has_word as _has_word, norm as _norm
 
 logger = logging.getLogger(__name__)
 
-_WORD = r"[а-яёa-z0-9]"
 AUDIO_EXTS = {".mp3", ".opus", ".m4a", ".ogg", ".flac", ".wav", ".aac", ".wma"}
 PLAYLIST_EXTS = {".m3u", ".m3u8"}
 _PLAY_VERBS = ("включи", "запусти", "вруби", "поставь")
@@ -26,18 +27,6 @@ _TRACK_NOUNS = _SONG_NOUNS + ("трек", "трека", "альбом")
 _MUSIC_NOUNS = _TRACK_NOUNS + ("музыку", "музыка", "музыки")
 _ROOT_NAMES = ("музыка", "музыки", "music")
 _SONG_ALT = "|".join(_SONG_NOUNS + ("трек", "трека", "музыку", "альбом"))
-
-
-def _norm(text: str) -> str:
-    return (text or "").lower().replace("ё", "е").strip()
-
-
-def _has_word(text: str, word: str) -> bool:
-    return re.search(rf"(?<!{_WORD}){re.escape(word)}(?!{_WORD})", text) is not None
-
-
-def _has_any_word(text: str, words: Iterable[str]) -> bool:
-    return any(_has_word(text, w) for w in words)
 
 
 def library_root() -> Path:

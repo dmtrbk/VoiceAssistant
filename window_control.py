@@ -9,12 +9,13 @@ import shutil
 import struct
 import subprocess
 import time
-from typing import Iterable, List, Optional
+from typing import List, Optional
+
+from skills.text_utils import has_any_word as _has_any_word, has_word as _has_word, norm as _norm
 
 logger = logging.getLogger(__name__)
 
 _DEVNULL = subprocess.DEVNULL
-_WORD = r"[а-яёa-z0-9]"
 _ATSPI_ROOT = "/org/a11y/atspi/accessible/root"
 _WM_SCHEMA = "org.gnome.desktop.wm.keybindings"
 _SHOW_DESKTOP_TEMP = "<Super><Alt>F12"
@@ -65,18 +66,6 @@ UI_DEV_DESTROY = 0x5502
 EV_SYN = 0
 EV_KEY = 1
 SYN_REPORT = 0
-
-
-def _norm(text: str) -> str:
-    return (text or "").lower().replace("ё", "е").strip()
-
-
-def _has_word(text: str, word: str) -> bool:
-    return re.search(rf"(?<!{_WORD}){re.escape(word)}(?!{_WORD})", text) is not None
-
-
-def _has_any_word(text: str, words: Iterable[str]) -> bool:
-    return any(_has_word(text, w) for w in words)
 
 
 def is_window_command_text(text: str) -> bool:

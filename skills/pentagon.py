@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import logging
 from skills.base import BaseSkill, RequestContext
@@ -21,6 +22,9 @@ class PentagonSkill(BaseSkill):
         return False
 
     def execute(self, context: RequestContext) -> None:
+        if not shutil.which("gnome-terminal") or not shutil.which("cmatrix"):
+            context.speak("Не нашёл программу для этого протокола.")
+            return
         try:
             subprocess.Popen([
                 "gnome-terminal",

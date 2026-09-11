@@ -13,8 +13,8 @@ from commands import execute as execute_command
 
 load_dotenv()
 
-TELEGRAM_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-ALLOWED_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+TELEGRAM_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip().strip("\"'")
+ALLOWED_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip().strip("\"'")
 
 _listener_lock = threading.Lock()
 _is_listener_running = False
@@ -77,6 +77,8 @@ def run_telegram_listener():
 
     if not TELEGRAM_TOKEN or not ALLOWED_CHAT_ID:
         logging.error("[Telegram] TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не найдены в .env!")
+        with _listener_lock:
+            _is_listener_running = False
         return
 
     offset = 0
@@ -85,9 +87,19 @@ def run_telegram_listener():
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-            response = requests.get(url, params={"offset": offset, "timeout": 20}, timeout=25).json()
+            response = requests.get(url, params={"offset": offset, "timeout": 20}, timeout=25)
+            try:
+                payload = response.json()
+            except ValueError:
+                logging.error("[Telegram] getUpdates вернул не JSON (HTTP %s).", response.status_code)
+                time.sleep(5)
+                continue
+            if not payload.get("ok"):
+                logging.error("[Telegram] getUpdates: %s", payload.get("description") or "unknown")
+                time.sleep(5)
+                continue
 
-            for update in response.get("result", []):
+            for update in payload.get("result", []):
                 offset = update["update_id"] + 1
                 message = update.get("message", {})
                 chat_id = str(message.get("chat", {}).get("id", ""))

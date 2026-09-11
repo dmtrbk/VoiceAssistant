@@ -20,6 +20,7 @@ FALLBACK_MODELS = (
 )
 
 _MODEL_MISS = ("model", "not found", "unknown", "404", "400")
+_RETRY_TRANSIENT = ("timeout", "timed out", "temporarily", "429", "rate limit", "overloaded")
 
 
 def model_chain(preferred: str | None = None) -> list[str]:
@@ -35,7 +36,7 @@ def model_chain(preferred: str | None = None) -> list[str]:
 
 def is_retriable_model_error(exc: BaseException, extra: tuple[str, ...] = ()) -> bool:
     err = str(exc).lower()
-    return any(marker in err for marker in _MODEL_MISS + extra)
+    return any(marker in err for marker in _MODEL_MISS + _RETRY_TRANSIENT + extra)
 
 
 def get_client():
@@ -49,7 +50,13 @@ def get_client():
             return None
         from groq import Groq
 
-        _client = Groq(api_key=key, max_retries=0, timeout=8.0)
+        try:
+            import httpx
+
+            timeout: Any = httpx.Timeout(connect=8.0, read=45.0, write=10.0, pool=5.0)
+        except Exception:
+            timeout = 45.0
+        _client = Groq(api_key=key, max_retries=0, timeout=timeout)
         return _client
 
 
@@ -119,6 +126,8 @@ def stream_tokens(
     client = get_client()
     if client is None:
         raise RuntimeError("Groq client unavailable")
+    if abort and abort():
+        return
     stream = client.chat.completions.create(
         **chat_kwargs(messages, model_name, temperature, max_tokens, stream=True)
     )

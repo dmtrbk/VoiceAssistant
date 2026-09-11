@@ -64,5 +64,7 @@ class NLUClassifier:
         max_idx = probs.argmax()
         confidence = probs[0][max_idx]
         predicted_intent = self.classifier.classes_[max_idx]
+        if confidence < 0.5:
+            return None, float(confidence)
 
         return predicted_intent, confidence

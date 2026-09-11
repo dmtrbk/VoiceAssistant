@@ -99,6 +99,9 @@ def download_track(query: str) -> Path | None:
     except Exception as exc:
         logger.debug("[MusicSearch] yt-dlp: %s", exc)
         return None
+    if result.returncode != 0:
+        logger.debug("[MusicSearch] yt-dlp завершился с кодом %s", result.returncode)
+        return None
     found = None
     for line in reversed((result.stdout or "").splitlines()):
         line = line.strip()
@@ -111,8 +114,6 @@ def download_track(query: str) -> Path | None:
         if audio_new:
             audio_new.sort(key=lambda item: item.stat().st_mtime, reverse=True)
             found = audio_new[0]
-        elif result.returncode == 0:
-            found = _newest_audio(dest)
     if found is None:
         return None
     return _rename_if_blank(found, query)
