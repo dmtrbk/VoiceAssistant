@@ -15,14 +15,13 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(PROJECT_DIR, "skills_enabled.json")
 
 # id, заголовок, подсказка. Порядок = порядок в окне.
-# Приватные модули (тихий брокерский счёт) сюда не добавлять:
-# не для окна настроек, не для readme/commands.txt, не для публикации.
 OPTIONAL_SKILLS = (
     ("xiaomi_bulb", "Свет", "Лампа Xiaomi / Yeelight"),
     ("home_assistant", "Home Assistant", "Умный дом: свет, розетки, сцены по имени"),
     ("movie", "Фильмы и видео", "ВК Видео и плеер MPV"),
     ("audacious", "Музыка и радио", "Audacious, папки, плейлисты и поиск песен"),
     ("weather", "Погода", "Прогноз Open-Meteo"),
+    ("stocks", "Биржа и портфель", "Котировки Мосбиржи, брокерский счёт Т-Инвест, сделки и авто-ребалансировка"),
     ("timer", "Таймеры", "Отсчёт и оповещение"),
     ("calculator", "Калькулятор", "Счёт без облака"),
     ("games", "Игры и рандомайзер", "Больше-Меньше, кубики d6/d20, случайные числа"),
@@ -68,6 +67,7 @@ def _skill_map() -> dict[str, Any]:
         web_search_skill,
         xiaomi_bulb_skill,
         home_assistant_skill,
+        stocks_skill,
     )
 
     return {
@@ -85,6 +85,7 @@ def _skill_map() -> dict[str, Any]:
         "telegram": telegram_skill,
         "pentagon": pentagon_skill,
         "home_assistant": home_assistant_skill,
+        "stocks": stocks_skill,
     }
 
 
@@ -160,6 +161,8 @@ def set_flag(skill_id: str, enabled: bool) -> None:
         return
     if was and not enabled:
         _disable_runtime(skill_id)
+    elif (not was) and enabled:
+        _enable_runtime(skill_id)
     logging.info("[Настройки] Навык %s: %s", skill_id, "вкл" if enabled else "выкл")
 
 
@@ -179,3 +182,13 @@ def _disable_runtime(skill_id: str) -> None:
         inst.on_disabled()
     except Exception as exc:
         logging.error("[Настройки] on_disabled у %s: %s", skill_id, exc)
+
+
+def _enable_runtime(skill_id: str) -> None:
+    inst = _skill_map().get(skill_id)
+    if inst is None:
+        return
+    try:
+        inst.on_enabled()
+    except Exception as exc:
+        logging.error("[Настройки] on_enabled у %s: %s", skill_id, exc)

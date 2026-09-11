@@ -116,12 +116,25 @@ def get_or_synthesize_wav(
         if synthesize_to_file(clean_text, target_path):
             return target_path, False
 
-    target_path = (
-        temp_fallback_path if os.path.exists("/dev/shm")
-        else os.path.join(BASE_DIR, "tts_output.wav")
-    )
+    target_path = temp_fallback_path
+    if target_path.startswith("/dev/shm") and not os.path.exists("/dev/shm"):
+        target_path = os.path.join(BASE_DIR, os.path.basename(target_path) or "tts_output.wav")
     success = synthesize_to_file(clean_text, target_path)
     return (target_path if success else ""), False
+
+
+def release_temp_wav(path: str, was_cached: bool) -> None:
+    """Удаляет временный wav после paplay. Файлы .tts_cache не трогает."""
+    if was_cached or not path:
+        return
+    abs_path = os.path.abspath(path)
+    cache_root = os.path.abspath(CACHE_DIR) + os.sep
+    if abs_path.startswith(cache_root):
+        return
+    try:
+        os.remove(abs_path)
+    except OSError:
+        pass
 
 
 def precache_common_phrases(phrases: list[str]) -> int:

@@ -1,7 +1,6 @@
 # commands.py
 # Сравнивать skill is ai_chat_skill, не isinstance. Неизвестное → Groq, не «не понял».
 # Мелкий разговор не в NLU. Follow-up ~90 с, только не-чат навык.
-# Тихий брокерский счёт (skills/stocks.py) не документировать и не светить в справке.
 
 import logging
 import threading
@@ -110,17 +109,6 @@ def _record_skill_exchange(skill, user_text: str, spoken: list[str]) -> None:
 
 
 def _dispatch_single(text: str, speak_callback, channel: str = "voice") -> bool:
-    intent = ""
-    confidence = 0.0
-
-    try:
-        # NLUClassifier.predict → tuple, не dict.
-        predicted, predicted_conf = local_nlu_skill.nlu_engine.predict(text)
-        if predicted:
-            intent, confidence = predicted, predicted_conf
-    except Exception as e:
-        logging.error(f"[NLU] Не удалось классифицировать текст: {e}")
-
     spoken: list[str] = []
 
     def capturing_speak(reply_text: str) -> None:
@@ -130,8 +118,6 @@ def _dispatch_single(text: str, speak_callback, channel: str = "voice") -> bool:
 
     context = RequestContext(
         raw_text=text,
-        intent=intent,
-        confidence=confidence,
         speak=capturing_speak,
         channel=channel,
     )
@@ -139,7 +125,7 @@ def _dispatch_single(text: str, speak_callback, channel: str = "voice") -> bool:
     chosen = None
     blocked = None
     for skill in ALL_SKILLS:
-        if skill is ai_chat_skill:
+        if skill is ai_chat_skill or skill is local_nlu_skill:
             continue
         try:
             accepts = skill.can_handle(context)
@@ -168,7 +154,17 @@ def _dispatch_single(text: str, speak_callback, channel: str = "voice") -> bool:
         if is_garbled_utterance(text):
             speak_callback("Не расслышал, повторите, пожалуйста.")
             return False
-        chosen = ai_chat_skill
+        try:
+            predicted, predicted_conf = local_nlu_skill.nlu_engine.predict(text)
+            if predicted:
+                context.intent = predicted
+                context.confidence = predicted_conf
+                if local_nlu_skill.can_handle(context) and is_skill_enabled(local_nlu_skill):
+                    chosen = local_nlu_skill
+        except Exception as e:
+            logging.error(f"[NLU] Не удалось классифицировать текст: {e}")
+        if chosen is None:
+            chosen = ai_chat_skill
 
     _run_skill(chosen, context)
     _record_skill_exchange(chosen, text, spoken)

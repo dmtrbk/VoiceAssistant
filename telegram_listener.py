@@ -1,6 +1,8 @@
 # telegram_listener.py
 
+import html
 import os
+import re
 import time
 import fcntl
 import logging
@@ -31,13 +33,34 @@ def _acquire_process_lock() -> bool:
         return False
 
 
+def _to_telegram_html(text: str) -> str:
+    """Экранирует HTML и превращает простой Markdown Groq в теги Telegram."""
+    escaped = html.escape(text, quote=False)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"__(.+?)__", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", escaped)
+    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+    return escaped
+
+
 def send_reply(chat_id: str, text: str):
     """Отправка текстового ответа пользователю в Telegram."""
     if not TELEGRAM_TOKEN or not text:
         return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": str(chat_id),
+        "text": _to_telegram_html(text),
+        "parse_mode": "HTML",
+    }
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": str(chat_id), "text": text}, timeout=10)
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code >= 400:
+            requests.post(
+                url,
+                json={"chat_id": str(chat_id), "text": text},
+                timeout=10,
+            )
     except Exception as e:
         logging.error(f"[Telegram] Ошибка отправки сообщения: {e}")
 

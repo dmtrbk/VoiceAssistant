@@ -15,6 +15,20 @@ except ImportError:
     cv2 = None
     logging.warning("[Система] Библиотека opencv-python не найдена. Видеонаблюдение будет недоступно.")
 
+
+def _camera_index() -> int:
+    raw = (os.getenv("CAMERA_INDEX") or os.getenv("VIDEO_DEVICE") or "0").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        if raw.startswith("/dev/video"):
+            suffix = raw[len("/dev/video"):]
+            try:
+                return max(0, int(suffix))
+            except ValueError:
+                return 0
+        return 0
+
 class SurveillanceThread(threading.Thread):
     """Поток для анализа изображения с веб-камеры."""
     def __init__(self, save_dir=None):
@@ -46,9 +60,9 @@ class SurveillanceThread(threading.Thread):
         logging.info("[Охрана] Поток видеонаблюдения запущен в штатный режим.")
         send_telegram_notification("⚠️ Камера видеонаблюдения переведена в активный режим охраны.")
         
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(_camera_index())
         if not cap.isOpened():
-            logging.error("[Охрана] Не удалось открыть веб-камеру (/dev/video0).")
+            logging.error("[Охрана] Не удалось открыть веб-камеру (CAMERA_INDEX=%s).", _camera_index())
             return
 
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)

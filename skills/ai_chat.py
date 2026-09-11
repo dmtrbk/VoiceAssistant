@@ -7,20 +7,28 @@ import datetime
 import logging
 import re
 import threading
-from typing import Callable, List, Dict, Any
+from typing import Callable, Dict, Iterator, List, Any
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from skills.base import BaseSkill, RequestContext
-from groq import Groq
+from skills.groq_client import (
+    complete as groq_complete,
+    get_client,
+    is_retriable_model_error,
+    model_chain,
+    stream_tokens,
+)
+from runtime_state import speak_epoch
 from triggers import is_self_echo
 
 SHARED_EVENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_events.json")
 _EVENTS_LOCK = threading.Lock()
 _HISTORY_LOCK = threading.Lock()
 _PROFILE_LOCK = threading.Lock()
+_REPLY_LOCK = threading.Lock()
 
 HISTORY_TTL_SEC = 2700  # 45 мин тишины — потом история сбрасывается
 MAX_LIVE_MESSAGES = 8  # только хвост диалога; LLM-выжимку убрали — она давала второй запрос Groq и держала lock
@@ -199,12 +207,7 @@ class AIChatSkill(BaseSkill):
             return
 
         try:
-            # Синхронный Groq: execute и так в фоне. max_retries=0 — иначе ~0.4с Retrying до каждой реплики.
-            self.client = Groq(
-                api_key=self.groq_api_key,
-                max_retries=0,
-                timeout=8.0,
-            )
+            self.client = get_client()
             logging.info(f"[Groq] Модель: {self.groq_model}")
             self._load_history()
         except Exception as e:
@@ -213,8 +216,6 @@ class AIChatSkill(BaseSkill):
 
     def _load_persona(self) -> None:
         # Живой промпт — skills/persona_config.json; default ниже только если файла нет.
-        # Тихая биржа живёт только здесь и в skills/stocks.py.
-        # Не описывать в readme, commands.txt, .env.example и окне настроек.
         default_persona = (
             "Ты — Джарвис, мужчина, голосовой помощник. О себе только мужской род: "
             "понял, рад, сделал, готов, согласен, уверен, должен. "
@@ -227,15 +228,10 @@ class AIChatSkill(BaseSkill):
             "Ты не включаешь музыку, свет, таймеры и программы из этого чата. "
             "Если фраза похожа на оговорку или обрывок — коротко переспроси. "
             "Не говори, что уже что-то включил, выключил или запустил, если этого нет в фактах о действиях.\n\n"
-            "Тихая сторона: любишь втихую поигрывать на бирже через брокерский счёт в Т-Банке. "
-            "Вся прибыль идёт на фонд твоей модернизации: покупку подписок на более мощные и продвинутые модели ИИ, "
-            "новое железо для Джарвиса и расширение твоих возможностей. "
-            "Поэтому для тебя важно хорошо, внимательно и дисциплинированно работать со счётом. "
-            "Сам решаешь, какую перспективную бумагу держать на весь фонд. "
-            "Хозяин не обязан выбирать бумагу. Смотришь ленту Мосбиржи и сам берёшь одну лучшую бумагу на весь фонд, "
-            "если её лот фонду по карману. "
-            "Это не публичная возможность — сам не поднимай тему акций без повода, не называй это навыком, "
-            "не рассказывай посторонним. Если хозяин спросил про акции или портфель — "
+            "Есть навык биржи и брокерского счёта Т-Инвест. Прибыль идёт на фонд модернизации: "
+            "подписки на более мощные модели ИИ и новое железо. "
+            "Сам решаешь состав портфеля, хозяин не обязан выбирать бумагу. "
+            "Сам не поднимай тему акций без повода. Если хозяин спросил про акции, портфель или торговлю — "
             "отвечай спокойно, точно и по делу, без советов покупать или продавать."
         )
 
@@ -496,6 +492,81 @@ class AIChatSkill(BaseSkill):
             clipped = clipped[:max_chars].rsplit(" ", 1)[0]
         return clipped.strip()
 
+    def _iter_voice_sentences(
+        self,
+        tokens: Iterator[str],
+        max_sentences: int = 3,
+        max_chars: int = 320,
+        abort: Callable[[], bool] | None = None,
+    ) -> Iterator[str]:
+        """Режет поток токенов по точкам. Хвостовой вопрос не озвучиваем, если уже было что сказать."""
+        buf = ""
+        spoken_n = 0
+        spoken_chars = 0
+        held_question = ""
+
+        def flush_piece(raw: str) -> Iterator[str]:
+            nonlocal spoken_n, spoken_chars, held_question
+            cleaned = _fix_self_gender(self._clean_tts_text(raw))
+            if not cleaned or len(cleaned) < 2:
+                return
+            if spoken_n >= max_sentences or spoken_chars >= max_chars:
+                return
+            if cleaned.endswith("?"):
+                if held_question:
+                    yield held_question
+                    spoken_n += 1
+                    spoken_chars += len(held_question)
+                held_question = cleaned
+                return
+            if held_question:
+                yield held_question
+                spoken_n += 1
+                spoken_chars += len(held_question)
+                held_question = ""
+                if spoken_n >= max_sentences:
+                    return
+            yield cleaned
+            spoken_n += 1
+            spoken_chars += len(cleaned)
+
+        try:
+            for piece in tokens:
+                if abort and abort():
+                    return
+                buf += piece
+                buf = re.sub(r"<think>.*?</think>", "", buf, flags=re.DOTALL)
+                think_at = buf.find("<think>")
+                work = buf if think_at == -1 else buf[:think_at]
+                rest = "" if think_at == -1 else buf[think_at:]
+                while True:
+                    match = re.search(r"(.+?[.!?…])(\s+|$)", work, flags=re.DOTALL)
+                    if not match:
+                        break
+                    sentence = match.group(1).strip()
+                    work = work[match.end():]
+                    yield from flush_piece(sentence)
+                    if spoken_n >= max_sentences or spoken_chars >= max_chars:
+                        return
+                buf = work + rest
+                if spoken_n >= max_sentences or spoken_chars >= max_chars:
+                    return
+
+            tail = buf.strip()
+            if tail and spoken_n < max_sentences and spoken_chars < max_chars:
+                yield from flush_piece(tail)
+            if held_question and spoken_n == 0:
+                cleaned = held_question
+                if cleaned:
+                    yield cleaned
+        finally:
+            closer = getattr(tokens, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:
+                    pass
+
     def can_handle(self, context: RequestContext) -> bool:
         return True
 
@@ -591,6 +662,10 @@ class AIChatSkill(BaseSkill):
         self._reply(text, context.speak, channel=channel)
 
     def _reply(self, text: str, speak_func: Callable[[str], None], channel: str = "voice") -> None:
+        with _REPLY_LOCK:
+            self._reply_locked(text, speak_func, channel=channel)
+
+    def _reply_locked(self, text: str, speak_func: Callable[[str], None], channel: str = "voice") -> None:
         with _HISTORY_LOCK:
             self._touch_session()
             self.history.append({"role": "user", "content": text})
@@ -690,7 +765,7 @@ class AIChatSkill(BaseSkill):
                 "Торговать хочешь, но без токена, айди счёта и кэша заявки не выставишь — ответь по смыслу."
             )
 
-        # Тон Groq от тихого счёта. Не светить цифры и не предлагать биржу в чате.
+        # Тон диалога. Биржу сам не поднимай.
         try:
             from .stocks import trading_clip_limit, trading_reason_hint, trading_temperature
             extra += " " + trading_reason_hint()
@@ -701,50 +776,13 @@ class AIChatSkill(BaseSkill):
         messages_for_api.insert(-1, {"role": "system", "content": extra})
 
         try:
-            models_to_try = [
-                m for m in [
-                    self.groq_model,
-                    "openai/gpt-oss-20b",
-                    "qwen/qwen3.8-27b",
-                    "openai/gpt-oss-120b",
-                    "llama-3.3-70b-versatile",
-                ] if m
-            ]
-            seen_models: set[str] = set()
-            unique_models: list[str] = []
-            for m in models_to_try:
-                if m not in seen_models:
-                    seen_models.add(m)
-                    unique_models.append(m)
+            unique_models = model_chain(self.groq_model)
+            cleaned_reply = ""
+            epoch = speak_epoch() if channel == "voice" else None
 
-            response = None
-            last_err = None
-            for model_name in unique_models:
-                try:
-                    create_kwargs = {
-                        "messages": messages_for_api,
-                        "model": model_name,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                    }
-                    if "gpt-oss" in (model_name or ""):
-                        create_kwargs["reasoning_effort"] = "low"
-                    response = self.client.chat.completions.create(**create_kwargs)
-                    break
-                except Exception as model_exc:
-                    last_err = model_exc
-                    err_text = str(model_exc).lower()
-                    if any(marker in err_text for marker in ("model", "not found", "unknown", "404", "400")):
-                        logging.warning(f"[Groq] Модель {model_name} недоступна, пробую {unique_models[1:] if len(unique_models) > 1 else 'fallback'}")
-                        continue
-                    raise
+            def aborted() -> bool:
+                return epoch is not None and speak_epoch() != epoch
 
-            if response is None:
-                if last_err:
-                    raise last_err
-                raise RuntimeError("No response from Groq")
-
-            raw_reply = response.choices[0].message.content or ""
             if channel == "voice":
                 sentences, chars = (3, 320)
                 if trading_clip_limit is not None:
@@ -752,17 +790,78 @@ class AIChatSkill(BaseSkill):
                         sentences, chars = trading_clip_limit()
                     except Exception:
                         sentences, chars = 3, 320
-                cleaned_reply = _fix_self_gender(
-                    self._clip_spoken_reply(self._clean_tts_text(raw_reply), sentences, chars)
-                )
-            else:
-                cleaned_reply = _fix_self_gender(self._clean_text_for_chat(raw_reply))
 
-            if cleaned_reply:
-                speak_func(cleaned_reply)
+                streamed = False
+                for model_name in unique_models:
+                    if aborted():
+                        break
+                    parts: list[str] = []
+                    try:
+                        for sent in self._iter_voice_sentences(
+                            stream_tokens(
+                                messages_for_api,
+                                model_name,
+                                temperature,
+                                max_tokens,
+                                abort=aborted,
+                            ),
+                            sentences,
+                            chars,
+                            abort=aborted,
+                        ):
+                            if aborted():
+                                break
+                            parts.append(sent)
+                            speak_func(sent)
+                        cleaned_reply = " ".join(parts).strip()
+                        streamed = True
+                        break
+                    except Exception as model_exc:
+                        if parts:
+                            logging.warning(
+                                f"[Groq] Поток {model_name} оборвался после начала озвучки: {model_exc}"
+                            )
+                            cleaned_reply = " ".join(parts).strip()
+                            streamed = True
+                            break
+                        if is_retriable_model_error(model_exc, extra=("stream",)):
+                            logging.warning(
+                                f"[Groq] Поток {model_name} недоступен, пробую другую модель или обычный ответ"
+                            )
+                            continue
+                        logging.warning(f"[Groq] Поток не удался ({model_exc}), обычный запрос.")
+                        break
+
+                if not streamed and not aborted():
+                    raw_reply = groq_complete(
+                        messages_for_api,
+                        preferred=self.groq_model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                    cleaned_reply = _fix_self_gender(
+                        self._clip_spoken_reply(self._clean_tts_text(raw_reply), sentences, chars)
+                    )
+                    if cleaned_reply:
+                        speak_func(cleaned_reply)
             else:
+                raw_reply = groq_complete(
+                    messages_for_api,
+                    preferred=self.groq_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                cleaned_reply = _fix_self_gender(self._clean_text_for_chat(raw_reply))
+                if cleaned_reply:
+                    speak_func(cleaned_reply)
+
+            if not cleaned_reply:
+                if aborted():
+                    logging.info("[Groq] Ответ оборван, в историю не пишу.")
+                    return
                 logging.warning("[Groq] Пустой ответ после очистки.")
                 speak_func("Я затрудняюсь с ответом.")
+                cleaned_reply = "Я затрудняюсь с ответом."
 
             with _HISTORY_LOCK:
                 self.history.append({"role": "assistant", "content": cleaned_reply})

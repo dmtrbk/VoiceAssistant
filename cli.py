@@ -8,8 +8,10 @@
 import sys
 import os
 import argparse
+import queue
 import subprocess
 import threading
+import uuid
 import logging
 
 # Загружаем переменные окружения
@@ -24,7 +26,7 @@ logging.basicConfig(
 
 import commands
 from context_manager import is_in_context, get_active_context
-from tts_cache import get_or_synthesize_wav
+from tts_cache import get_or_synthesize_wav, release_temp_wav
 from indicator import status_queue, create_orb_gui
 from telegram_listener import start_telegram_listener_thread
 
@@ -38,20 +40,68 @@ COLOR_BOLD = "\033[1m"
 COLOR_RESET = "\033[0m"
 
 
+_cli_tts_queue: queue.Queue[str | None] = queue.Queue()
+_cli_tts_lock = threading.Lock()
+_cli_tts_pending = 0
+_cli_tts_idle = threading.Event()
+_cli_tts_idle.set()
+_cli_tts_started = False
+
+
+def _cli_wav_path() -> str:
+    name = f"cli_tts_{uuid.uuid4().hex}.wav"
+    if os.path.exists("/dev/shm"):
+        return os.path.join("/dev/shm", name)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+
+
+def _cli_tts_worker() -> None:
+    global _cli_tts_pending
+    while True:
+        text = _cli_tts_queue.get()
+        if text is None:
+            return
+        try:
+            wav_path, cached = get_or_synthesize_wav(text, _cli_wav_path())
+            if wav_path and os.path.exists(wav_path):
+                subprocess.run(
+                    ["paplay", wav_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                release_temp_wav(wav_path, cached)
+        except Exception:
+            pass
+        finally:
+            with _cli_tts_lock:
+                _cli_tts_pending = max(0, _cli_tts_pending - 1)
+                if _cli_tts_pending == 0:
+                    _cli_tts_idle.set()
+
+
+def _ensure_cli_tts_worker() -> None:
+    global _cli_tts_started
+    with _cli_tts_lock:
+        if _cli_tts_started:
+            return
+        _cli_tts_started = True
+    threading.Thread(target=_cli_tts_worker, daemon=True, name="cli-tts").start()
+
+
 def play_audio_feedback(text: str, mute: bool = False):
-    """Синтезирует и проигрывает аудио ответа через Piper/paplay."""
+    """Кладёт фразу в очередь TTS, не блокируя Groq."""
+    global _cli_tts_pending
     if mute or not text.strip():
         return
-    try:
-        wav_path, _ = get_or_synthesize_wav(text)
-        if wav_path and os.path.exists(wav_path):
-            subprocess.run(
-                ["paplay", wav_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-    except Exception:
-        pass
+    _ensure_cli_tts_worker()
+    with _cli_tts_lock:
+        _cli_tts_pending += 1
+        _cli_tts_idle.clear()
+    _cli_tts_queue.put(text.strip())
+
+
+def wait_cli_tts(timeout: float = 120.0) -> None:
+    _cli_tts_idle.wait(timeout=timeout)
 
 
 def execute_cli_command(user_text: str, mute: bool = False, verbose: bool = False) -> bool:
@@ -78,6 +128,7 @@ def execute_cli_command(user_text: str, mute: bool = False, verbose: bool = Fals
                 play_audio_feedback(text, mute=mute)
 
     should_sleep = commands.execute(user_text, speak_cb, channel="cli")
+    wait_cli_tts()
 
     try:
         if should_sleep:
@@ -129,6 +180,7 @@ def run_interactive_loop(mute: bool = False, verbose: bool = False):
                 print(f"{COLOR_CYAN}[Джарвис]:{COLOR_RESET} До связи!")
                 if not mute:
                     play_audio_feedback("До связи!", mute=mute)
+                    wait_cli_tts()
                 try:
                     status_queue.put("idle")
                 except Exception:

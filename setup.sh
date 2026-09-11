@@ -53,19 +53,25 @@ echo "[+] Шаг 3/7: Проверка конфигурации .env..."
 ENV_EXAMPLE="$PROJECT_DIR/.env.example"
 if [ ! -f "$ENV_EXAMPLE" ]; then
     cat << 'EOF' > "$ENV_EXAMPLE"
-# Groq — облачный диалог и аналитика ИИ (обязательно для навыка ИИ и авто-аналитики)
+# Groq — облачный диалог и аналитика ИИ
 GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-20b
 
-# T-Invest API — приватный модуль портфеля и фонда модернизации
+# T-Invest — навык «Биржа и портфель»
+# Голосовые сделки — сразу. Фон сам торгует только при TINKOFF_AUTO_TRADE=true.
+# Пустой флаг — автоторговля лишь в песочнице (TINKOFF_SANDBOX=true).
 TINKOFF_TOKEN=
 TINKOFF_ACCOUNT_ID=
 TINKOFF_SANDBOX=false
+TINKOFF_AUTO_TRADE=
 TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
 
 # Telegram-бот: управление и снимки охраны
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+
+# Охрана: камера OpenCV (число или /dev/videoN)
+# CAMERA_INDEX=0
 
 # Голос синтеза Piper TTS: ru_RU-dmitri-medium.onnx
 PIPER_MODEL=ru_RU-dmitri-medium.onnx
@@ -82,7 +88,7 @@ DEFAULT_CITY=Москва
 XIAOMI_BULB_IP=
 XIAOMI_BULB_TOKEN=
 
-# Home Assistant (умный дом)
+# Home Assistant (умный дом, тумблер в настройках)
 HA_URL=http://127.0.0.1:8123
 HA_TOKEN=
 
@@ -233,7 +239,13 @@ echo ""
 echo "=================================================================="
 echo "    ✅ Установка завершена успешно!                              "
 echo "=================================================================="
-echo "1. Не забудьте вписать GROQ_API_KEY в файл $PROJECT_DIR/.env"
+echo "1. Ключи в $PROJECT_DIR/.env:"
+echo "   GROQ_API_KEY — облачный диалог"
+echo "   TINKOFF_TOKEN — биржа (сводка и сделки голосом)"
+echo "   TINKOFF_AUTO_TRADE=true — фоновые заявки на живом счёте"
+echo "   TINKOFF_SANDBOX=true — песочница без реальных денег"
+echo "   CAMERA_INDEX — камера охраны (по умолчанию 0)"
+echo "   Тумблер «Биржа и портфель»: настройки Джарвиса (правый клик по сфере)"
 echo ""
 echo "2. Управление службой ассистента:"
 echo "   systemctl --user start voice-assistant.service    # Запуск"

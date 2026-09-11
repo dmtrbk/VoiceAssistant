@@ -1,12 +1,10 @@
 # skills/stocks.py
-# ПРИВАТНЫЙ МОДУЛЬ. Не описывать в readme.md, commands.txt, .env.example,
-# окне настроек и любых публичных списках команд. Не считать публичным навыком.
-# Токен брокерского API — только локальный .env, никогда не в git.
-# Пока ключа нет — котировки с публичного ISS Мосбиржи; книжка quiet_book.json
-# (не в git) держит пару бумаг. Прибыль тихого счёта идёт в фонд модернизации
-# Джарвиса: покупка подписок на продвинутые модели ИИ и новое железо.
-# Сделки: сам решает что купить и что продать на весь фонд.
-# Не описывать в публичной справке.
+# Брокерский счёт Т-Инвест: котировки Мосбиржи, портфель, сделки и авто-ребалансировка.
+# Токен API — только локальный .env, никогда не в git.
+# Без ключа — котировки с публичного ISS Мосбиржи; quiet_book.json (не в git)
+# держит локальную книжку. Прибыль идёт в фонд модернизации Джарвиса:
+# подписки на продвинутые модели ИИ и новое железо.
+# Сделки: сам решает что купить и что продать.
 
 from __future__ import annotations
 
@@ -282,10 +280,21 @@ def trading_clip_limit() -> tuple[int, int]:
 
 _desk_loop_started = False
 _desk_init_lock = threading.Lock()
+_TRADE_LOCK = threading.RLock()
+
+
+def _auto_trade_enabled() -> bool:
+    """Фоновые заявки: явно включённые или песочница. Живой счёт без флага — только по команде."""
+    raw = (os.getenv("TINKOFF_AUTO_TRADE") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return _sandbox()
 
 
 class StocksSkill(BaseSkill):
-    """Тихий брокерский счёт. Не регистрировать в настройках и не описывать в справке."""
+    """Брокерский счёт Т-Инвест: котировки, портфель, сделки и авто-ребалансировка."""
 
     def __init__(self) -> None:
         self._token = (os.getenv("TINKOFF_INVEST_TOKEN") or os.getenv("TINKOFF_TOKEN") or "").strip()
@@ -298,17 +307,29 @@ class StocksSkill(BaseSkill):
         self._last_tickers: list[str] = []
         self._alias_extra: dict[str, str] = {}
         self._desk_stop = threading.Event()
-        
+        self._desk_enabled = threading.Event()
+        self._desk_enabled.set()
+        self._ensure_desk_loop()
+
+    def _ensure_desk_loop(self) -> None:
         global _desk_loop_started
         with _desk_init_lock:
-            if not _desk_loop_started:
-                self._desk_thread = threading.Thread(
-                    target=self._desk_loop,
-                    name="quiet-desk",
-                    daemon=True,
-                )
-                self._desk_thread.start()
-                _desk_loop_started = True
+            if _desk_loop_started:
+                return
+            self._desk_thread = threading.Thread(
+                target=self._desk_loop,
+                name="stocks-desk",
+                daemon=True,
+            )
+            self._desk_thread.start()
+            _desk_loop_started = True
+
+    def on_disabled(self) -> None:
+        self._desk_enabled.clear()
+
+    def on_enabled(self) -> None:
+        self._desk_enabled.set()
+        self._ensure_desk_loop()
 
     def can_handle(self, context: RequestContext) -> bool:
         text = _norm(context.raw_text)
@@ -382,11 +403,11 @@ class StocksSkill(BaseSkill):
             if "no moex quote" in msg:
                 context.speak("Эту бумагу на бирже не нашёл.")
                 return
-            logger.error("[Тихий счёт] Ошибка запроса: %s", exc)
+            logger.error("[Биржа] Ошибка запроса: %s", exc)
             context.speak("Не удалось связаться с биржей. Попробую позже.")
             return
         except Exception as exc:
-            logger.error("[Тихий счёт] Ошибка запроса: %s", exc)
+            logger.error("[Биржа] Ошибка запроса: %s", exc)
             context.speak("Не удалось выполнить операцию по счёту. Попробую позже.")
             return
 
@@ -458,14 +479,14 @@ class StocksSkill(BaseSkill):
         return [dict(zip(cols, row)) for row in (block.get("data") or [])]
 
     def _load_book(self) -> list[dict[str, Any]]:
-        # Локальная книжка пары бумаг. Не коммитить, не описывать в справке.
+        # Локальная книжка бумаг без токена. Не коммитить (см. .gitignore).
         if not os.path.exists(_BOOK_PATH):
             return []
         try:
             with open(_BOOK_PATH, encoding="utf-8") as handle:
                 raw = json.load(handle)
         except Exception as exc:
-            logger.warning("[Тихий счёт] quiet_book.json: %s", exc)
+            logger.warning("[Биржа] quiet_book.json: %s", exc)
             return []
         items = raw.get("positions") if isinstance(raw, dict) else raw
         if not isinstance(items, list):
@@ -517,7 +538,7 @@ class StocksSkill(BaseSkill):
             cash = _quotation_to_float(cash_obj)
             return cash if cash > 0 else self._book_cash()
         except Exception as exc:
-            logger.warning("[Тихий счёт] Не удалось получить кэш брокера: %s", exc)
+            logger.warning("[Биржа] Не удалось получить кэш брокера: %s", exc)
             return self._book_cash()
 
     def _watch_tickers(self) -> list[str]:
@@ -558,7 +579,7 @@ class StocksSkill(BaseSkill):
                 )
             except Exception as exc:
                 last_error = exc
-                logger.debug("[Тихий счёт] MOEX %s: %s", url, exc)
+                logger.debug("[Биржа] MOEX %s: %s", url, exc)
                 continue
             picked = self._pick_marketdata_row(self._iss_rows(data.get("marketdata")))
             if not picked:
@@ -577,7 +598,7 @@ class StocksSkill(BaseSkill):
                 name, price = self._tinkoff_last(ticker)
                 return name, price, 0.0
             except Exception as exc:
-                logger.warning("[Тихий счёт] котировка брокера недоступна: %s", exc)
+                logger.warning("[Биржа] котировка брокера недоступна: %s", exc)
         return self._moex_quote(ticker)
 
     def _ticker_from_text(self, text: str) -> str | None:
@@ -836,7 +857,7 @@ class StocksSkill(BaseSkill):
         try:
             return self._positions()
         except Exception as exc:
-            logger.warning("[Тихий счёт] Портфель недоступен: %s", exc)
+            logger.warning("[Биржа] Портфель недоступен: %s", exc)
             return [], 0.0, 0.0
 
     def _market_open(self) -> bool:
@@ -938,6 +959,10 @@ class StocksSkill(BaseSkill):
         return None
 
     def _execute_trade(self, text: str, kind: str, ticker: str | None) -> str:
+        with _TRADE_LOCK:
+            return self._execute_trade_locked(text, kind, ticker)
+
+    def _execute_trade_locked(self, text: str, kind: str, ticker: str | None) -> str:
         requested = _extract_lots(text)
         if kind == "auto":
             return self._trade_auto()
@@ -1003,7 +1028,7 @@ class StocksSkill(BaseSkill):
                 _name, _price, day_pct = self._moex_quote(ticker)
                 scores[ticker] = day_pct
             except Exception as exc:
-                logger.debug("[Тихий счёт] оценка %s: %s", ticker, exc)
+                logger.debug("[Биржа] оценка %s: %s", ticker, exc)
                 scores[ticker] = 0.0
         return scores
 
@@ -1076,7 +1101,7 @@ class StocksSkill(BaseSkill):
         try:
             tape = self._tqbr_tape()
         except Exception as exc:
-            logger.warning("[Тихий счёт] лента TQBR: %s", exc)
+            logger.warning("[Биржа] лента TQBR: %s", exc)
             tape = []
         held = self._held_map()
         equity = self._equity_estimate(tape)
@@ -1159,32 +1184,13 @@ class StocksSkill(BaseSkill):
                 f"{row['pct']:+.2f}% за день, лот {row['lot']}, {mark}"
             )
         facts = "\n".join(lines)
-        key = (os.getenv("GROQ_API_KEY") or "").strip()
-        if not key:
+        if not (os.getenv("GROQ_API_KEY") or "").strip():
             return self._fallback_allocation(candidates)
 
         try:
-            from groq import Groq
+            from skills.groq_client import complete_one, is_retriable_model_error, model_chain
 
             env_model = (os.getenv("GROQ_MODEL") or "").strip()
-            models_to_try = [
-                m for m in [
-                    env_model,
-                    "openai/gpt-oss-20b",
-                    "qwen/qwen3.8-27b",
-                    "openai/gpt-oss-120b",
-                    "llama-3.3-70b-versatile",
-                ] if m
-            ]
-            seen_models: set[str] = set()
-            unique_models: list[str] = []
-            for m in models_to_try:
-                if m not in seen_models:
-                    seen_models.add(m)
-                    unique_models.append(m)
-
-            client = Groq(api_key=key, max_retries=0, timeout=8.0)
-
             system_prompt = (
                 "Ты Джарвис. Управляешь фондом модернизации (покупка продвинутых моделей ИИ и нового железа для себя). "
                 "Твоя задача — сформировать сбалансированный и диверсифицированный портфель. "
@@ -1193,28 +1199,14 @@ class StocksSkill(BaseSkill):
                 "Ответ только валидный JSON без markdown: {\"portfolio\": {\"TICKER1\": 40, \"TICKER2\": 30, \"TICKER3\": 30}}. "
                 "Сумма долей должна быть строго равна 100. Тикеры строго из списка (или TMOS). Хозяин не выбирает. Не объясняй."
             )
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "Лента:\n" + facts + "\nВыбери portfolio."},
+            ]
 
-            for model_name in unique_models:
+            for model_name in model_chain(env_model):
                 try:
-                    kwargs: dict[str, Any] = {
-                        "model": model_name,
-                        "temperature": 0.5,
-                        "max_tokens": 120,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": system_prompt,
-                            },
-                            {
-                                "role": "user",
-                                "content": "Лента:\n" + facts + "\nВыбери portfolio.",
-                            },
-                        ],
-                    }
-                    if "gpt-oss" in (model_name or ""):
-                        kwargs["reasoning_effort"] = "low"
-                    response = client.chat.completions.create(**kwargs)
-                    raw = (response.choices[0].message.content or "").strip()
+                    raw = complete_one(messages, model_name, 0.5, 120).strip()
                     match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
                     if not match:
                         continue
@@ -1241,18 +1233,17 @@ class StocksSkill(BaseSkill):
                                 k: round((v / total_sum) * 100.0, 1)
                                 for k, v in valid_alloc.items()
                             }
-                            logger.info("[Тихий счёт] Groq выбрал портфель: %s (модель %s)", normalized, model_name)
+                            logger.info("[Биржа] Groq выбрал портфель: %s (модель %s)", normalized, model_name)
                             return normalized
 
                 except Exception as model_exc:
-                    err_text = str(model_exc).lower()
-                    if any(marker in err_text for marker in ("model", "not found", "unknown", "404", "400")):
-                        logger.warning("[Тихий счёт] модель %s не подошла (%s), пробую альтернативу...", model_name, model_exc)
+                    if is_retriable_model_error(model_exc):
+                        logger.warning("[Биржа] модель %s не подошла (%s), пробую альтернативу...", model_name, model_exc)
                         continue
-                    logger.warning("[Тихий счёт] Ошибка запроса к %s: %s", model_name, model_exc)
+                    logger.warning("[Биржа] Ошибка запроса к %s: %s", model_name, model_exc)
 
         except Exception as exc:
-            logger.warning("[Тихий счёт] выбор Groq: %s", exc)
+            logger.warning("[Биржа] выбор Groq: %s", exc)
 
         return self._fallback_allocation(candidates)
 
@@ -1329,7 +1320,7 @@ class StocksSkill(BaseSkill):
                     acted = True
                     time.sleep(0.6)
                 except Exception as exc:
-                    logger.warning("[Тихий счёт] Ошибка при продаже %s: %s", ticker, exc)
+                    logger.warning("[Биржа] Ошибка при продаже %s: %s", ticker, exc)
 
         # Очищаем кэш брокера после продаж
         if acted:
@@ -1383,7 +1374,7 @@ class StocksSkill(BaseSkill):
                 time.sleep(0.6)
                 self._bust_broker_cache()
             except Exception as exc:
-                logger.warning("[Тихий счёт] Ошибка при покупке %s: %s", ticker, exc)
+                logger.warning("[Биржа] Ошибка при покупке %s: %s", ticker, exc)
 
         # 3. Парковка кэша: остаток свободных денег направляем на покупку индексного фонда TMOS
         self._bust_broker_cache()
@@ -1394,7 +1385,7 @@ class StocksSkill(BaseSkill):
                 parts.append(res)
                 acted = True
             except Exception as exc:
-                logger.warning("[Тихий счёт] Ошибка при парковке кэша в TMOS: %s", exc)
+                logger.warning("[Биржа] Ошибка при парковке кэша в TMOS: %s", exc)
 
         if not acted or not parts:
             result = "Портфель уже сбалансирован в целевых долях."
@@ -1402,12 +1393,16 @@ class StocksSkill(BaseSkill):
             result = "Ребалансировал портфель: " + " ".join(parts)
 
         if silent:
-            logger.info("[Тихий счёт] авто-ребалансировка: %s", result)
+            logger.info("[Биржа] авто-ребалансировка: %s", result)
             return result
         return result
 
     def _trade_auto(self, silent: bool = False) -> str:
         """Сам формирует сбалансированный портфель и ребалансирует фонд."""
+        with _TRADE_LOCK:
+            return self._trade_auto_locked(silent)
+
+    def _trade_auto_locked(self, silent: bool = False) -> str:
         candidates = self._desk_candidates()
         if not candidates:
             return "Нечего решать: лента пуста."
@@ -1420,7 +1415,7 @@ class StocksSkill(BaseSkill):
             name = self._spoken_name(ticker)
             alloc_parts.append(f"{name} {int(round(pct))}%")
         alloc_desc = ", ".join(alloc_parts)
-        logger.info("[Тихий счёт] целевой портфель: %s", alloc_desc)
+        logger.info("[Биржа] целевой портфель: %s", alloc_desc)
 
         if not self._token:
             return f"Целевой портфель: {alloc_desc}. Торгового ключа нет, пока держу на бумаге."
@@ -1430,10 +1425,42 @@ class StocksSkill(BaseSkill):
 
         return self._rebalance_portfolio(alloc, silent=silent)
 
+    def _desk_ready(self) -> bool:
+        if not self._desk_enabled.is_set():
+            return False
+        if not _auto_trade_enabled():
+            return False
+        try:
+            from skill_settings import is_skill_enabled
+            if not is_skill_enabled(self):
+                self._desk_enabled.clear()
+                return False
+        except Exception:
+            pass
+        return True
+
     def _desk_loop(self) -> None:
-        # Сам ходит, пока биржа открыта.
+        # Сам ходит, пока биржа открыта, навык включён и разрешена автоторговля.
+        # После старта: 90 с, затем период 45 мин — без сделки сразу при запуске.
         self._desk_stop.wait(90)
-        while not self._desk_stop.wait(_DESK_PERIOD_SEC):
+        while not self._desk_stop.is_set():
+            if not self._desk_ready():
+                if self._desk_stop.wait(2.0):
+                    return
+                continue
+            deadline = time.time() + _DESK_PERIOD_SEC
+            skipped = False
+            while time.time() < deadline:
+                remaining = min(2.0, deadline - time.time())
+                if remaining <= 0:
+                    break
+                if self._desk_stop.wait(remaining):
+                    return
+                if not self._desk_ready():
+                    skipped = True
+                    break
+            if skipped:
+                continue
             try:
                 self._token = (
                     os.getenv("TINKOFF_INVEST_TOKEN") or os.getenv("TINKOFF_TOKEN") or ""
@@ -1442,5 +1469,5 @@ class StocksSkill(BaseSkill):
                     continue
                 self._trade_auto(silent=True)
             except Exception as exc:
-                logger.warning("[Тихий счёт] фоновый цикл торговли: %s", exc)
+                logger.warning("[Биржа] фоновый цикл торговли: %s", exc)
 

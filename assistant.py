@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from difflib import get_close_matches
 
 from dotenv import load_dotenv
@@ -44,7 +45,13 @@ from player_control import emergency_silence
 from skills.movie_skill import is_movie_control_phrase, is_movie_playing
 from telegram_listener import start_telegram_listener_thread
 from volume_control import VolumeController
-from tts_cache import get_or_synthesize_wav, precache_common_phrases, SYSTEM_CACHE_PHRASES
+from tts_cache import (
+    get_or_synthesize_wav,
+    precache_common_phrases,
+    release_temp_wav,
+    SYSTEM_CACHE_PHRASES,
+)
+from runtime_state import bump_speak_epoch, speak_epoch
 from context_manager import clear_active_context, is_in_context
 from triggers import (
     is_quick_command,
@@ -91,14 +98,6 @@ PIPER_EXE = os.path.join(PIPER_DIR, "piper")
 PIPER_MODEL_NAME = os.getenv("PIPER_MODEL", "ru_RU-dmitri-medium.onnx")
 PIPER_MODEL = os.path.join(PIPER_DIR, "models", PIPER_MODEL_NAME)
 
-if os.path.exists("/dev/shm"):
-    TEMP_AUDIO_PATH = "/dev/shm/tts_output.wav"
-else:
-    TEMP_AUDIO_PATH = os.path.join(BASE_DIR, "tts_output.wav")
-
-VOICE_SPEED = os.getenv("VOICE_SPEED", "1.0")
-VOICE_SPEAKER = os.getenv("VOICE_SPEAKER", None)
-
 audio_queue = queue.Queue()
 recognizer_lock = threading.Lock()
 volume_ctrl = VolumeController()
@@ -106,6 +105,8 @@ volume_ctrl = VolumeController()
 is_speaking = False
 MUTE_SPEECH = False
 is_thinking = False  # пока Groq/навык думает — не гасить сессию по тайм-ауту
+_thinking_lock = threading.Lock()
+_thinking_count = 0
 playback_interrupted = False
 is_active = False
 asked_to_repeat = False  # один «не расслышал» на сессию
@@ -115,8 +116,16 @@ last_speak_end_time = 0.0
 last_spoken_text = ""
 play_process = None
 
-ECHO_TAIL_SEC = 2.2  # после длинного TTS колонки ещё звучат; меньше — снова самодиалог
+# Очередь предложений: is_speaking не падает между фразами Groq, иначе Vosk слышит колонки.
+# Воркер один на процесс; Piper следующего куска идёт, пока paplay играет текущий.
+_tts_lock = threading.Lock()
+_tts_queue: queue.Queue = queue.Queue()
+_tts_worker_running = False
+_tts_generation = 0
+
+ECHO_TAIL_SEC = 2.2  # длинный хвост только вне сессии (колонки ещё играют)
 ECHO_TAIL_AFTER_WAKE_SEC = 0.35  # после «Да?» пользователь сразу говорит команду
+ECHO_TAIL_AFTER_REPLY_SEC = 0.55  # сессия уже зелёная: не глотать «молодец» после ответа
 SELF_ECHO_WINDOW_SEC = ATTENTION_TIMEOUT
 
 ACTIVATION_PHRASES = [
@@ -155,21 +164,203 @@ def _strip_wake(text: str, wake: str | None) -> str:
 def stop_speaking(to_idle=True):
     """Принудительно останавливает озвучку и очищает аудио-очередь"""
     global is_speaking, playback_interrupted, play_process, last_speak_end_time
-    playback_interrupted = True
-    is_speaking = False
-    last_speak_end_time = time.time()
-    
-    if play_process is not None:
+    global _tts_generation
+
+    proc = None
+    with _tts_lock:
+        _tts_generation += 1
+        bump_speak_epoch()
+        playback_interrupted = True
+        is_speaking = False
+        last_speak_end_time = time.time()
+        while True:
+            try:
+                _tts_queue.get_nowait()
+            except queue.Empty:
+                break
+        proc = play_process
+        play_process = None
+
+    if proc is not None:
         try:
-            play_process.terminate()
-            play_process.wait(timeout=1.0)
+            proc.terminate()
+            proc.wait(timeout=1.0)
         except Exception:
             pass
-        play_process = None
 
     clear_audio_queue()
     if to_idle:
         status_queue.put("idle")
+
+
+def _tts_wav_path() -> str:
+    name = f"tts_{uuid.uuid4().hex}.wav"
+    if os.path.exists("/dev/shm"):
+        return os.path.join("/dev/shm", name)
+    return os.path.join(BASE_DIR, name)
+
+
+def _synth_item(text: str, gen: int) -> tuple[str, bool, int] | None:
+    if gen != _tts_generation or playback_interrupted:
+        return None
+    path = _tts_wav_path()
+    try:
+        audio_file, was_cached = get_or_synthesize_wav(text, path)
+    except Exception as exc:
+        logging.error(f"[TTS] Ошибка озвучки Piper TTS: {exc}")
+        return None
+    if gen != _tts_generation or playback_interrupted:
+        release_temp_wav(audio_file, was_cached)
+        return None
+    if not audio_file or not os.path.exists(audio_file):
+        logging.error("[TTS] Аудиофайл не был создан.")
+        return None
+    return audio_file, was_cached, gen
+
+
+def _mark_tts_idle() -> None:
+    """Очередь пуста и Groq уже не пишет — можно снова слушать. Воркер не гасим."""
+    global is_speaking, last_active_time, last_speak_end_time
+    with _tts_lock:
+        if not _tts_queue.empty() or play_process is not None:
+            return
+        if is_thinking or not is_speaking:
+            return
+        is_speaking = False
+        last_speak_end_time = time.time()
+        last_active_time = time.time()
+        interrupted = playback_interrupted
+    # Не чистить mic-очередь и не Reset-ить Vosk: похвала часто начинается
+    # в хвосте фразы. Эхо отсечёт is_self_echo, а Reset съедал живую реплику.
+    if not interrupted:
+        status_queue.put("listening" if is_active else "idle")
+
+
+def _play_prepared(path: str, was_cached: bool, gen: int) -> subprocess.Popen | None:
+    """Стартует paplay и возвращает процесс, либо None если фразу уже отменили."""
+    global play_process
+    try:
+        proc = subprocess.Popen(
+            ["paplay", path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        logging.error(f"[TTS] Ошибка запуска paplay: {exc}")
+        release_temp_wav(path, was_cached)
+        return None
+
+    with _tts_lock:
+        if gen != _tts_generation or playback_interrupted:
+            play_process = None
+            abandon = True
+        else:
+            play_process = proc
+            abandon = False
+
+    if abandon:
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except Exception:
+            pass
+        release_temp_wav(path, was_cached)
+        return None
+    return proc
+
+
+def _wait_play(proc: subprocess.Popen | None, path: str, was_cached: bool) -> None:
+    global play_process
+    if proc is None:
+        return
+    try:
+        proc.wait()
+    except Exception:
+        pass
+    with _tts_lock:
+        if play_process is proc:
+            play_process = None
+    release_temp_wav(path, was_cached)
+
+
+def _tts_worker() -> None:
+    """Долгоживущий воркер: один Piper, один paplay. Следующий кусок синтезируется во время игры."""
+    global _tts_worker_running
+    prepared: tuple[str, bool, int] | None = None
+    mute_waited = False
+    try:
+        while True:
+            if prepared is None:
+                try:
+                    text, gen = _tts_queue.get(timeout=0.2)
+                except queue.Empty:
+                    if not is_thinking:
+                        _mark_tts_idle()
+                    continue
+                if gen != _tts_generation or playback_interrupted:
+                    continue
+                if MUTE_SPEECH:
+                    if not mute_waited:
+                        time.sleep(0.4)
+                        mute_waited = True
+                    continue
+                prepared = _synth_item(text, gen)
+                if prepared is None:
+                    continue
+
+            path, was_cached, gen = prepared
+            prepared = None
+            if gen != _tts_generation or playback_interrupted:
+                release_temp_wav(path, was_cached)
+                continue
+
+            prefetch = None
+            try:
+                prefetch = _tts_queue.get_nowait()
+            except queue.Empty:
+                pass
+
+            proc = _play_prepared(path, was_cached, gen)
+            if proc is not None and prefetch is not None:
+                ptext, pgen = prefetch
+                if pgen == _tts_generation and not playback_interrupted and not MUTE_SPEECH:
+                    # paplay уже играет — Piper следующего куска параллельно, не два Piper сразу.
+                    prepared = _synth_item(ptext, pgen)
+            elif prefetch is not None:
+                ptext, pgen = prefetch
+                if pgen == _tts_generation and not playback_interrupted and not MUTE_SPEECH:
+                    prepared = _synth_item(ptext, pgen)
+            _wait_play(proc, path, was_cached)
+    finally:
+        with _tts_lock:
+            _tts_worker_running = False
+
+
+def speak(text, recognizer=None):
+    """Кладёт фразу в очередь TTS. Несколько вызовов подряд — одна сессия без дыр для эха."""
+    global is_speaking, playback_interrupted, last_spoken_text, _tts_worker_running
+    if not text:
+        return
+
+    logging.info(f"Ассистент: {text}")
+    status_queue.put("speaking")
+
+    start_worker = False
+    with _tts_lock:
+        if is_speaking and not playback_interrupted:
+            last_spoken_text = (last_spoken_text + " " + text).strip()
+        else:
+            last_spoken_text = text
+            playback_interrupted = False
+        is_speaking = True
+        gen = _tts_generation
+        _tts_queue.put((text, gen))
+        if not _tts_worker_running:
+            _tts_worker_running = True
+            start_worker = True
+
+    if start_worker:
+        threading.Thread(target=_tts_worker, daemon=True, name="tts-worker").start()
 
 
 def go_idle():
@@ -214,82 +405,6 @@ def handle_hold_interrupt(recognizer):
     _reset_recognizer(recognizer)
     keep_session_alive()
     logging.info("[Сессия] Прерывание речи, слушаю дальше.")
-
-
-def speak(text, recognizer=None):
-    """Синтезирует аудио (с мгновенной отдачей из TTS-кэша) и проигрывает его в асинхронном режиме."""
-    global is_speaking, playback_interrupted, play_process, last_active_time, last_speak_end_time
-    global last_spoken_text, MUTE_SPEECH
-    if not text:
-        return
-    
-    status_queue.put("speaking")
-    is_speaking = True  
-    playback_interrupted = False
-    last_spoken_text = text
-    
-    logging.info(f"Ассистент: {text}")
-
-    if MUTE_SPEECH:
-        def wait_for_mute():
-            global is_speaking, last_active_time, last_speak_end_time
-            time.sleep(0.4)
-            is_speaking = False
-            last_speak_end_time = time.time()
-            last_active_time = time.time()
-            clear_audio_queue()
-            if recognizer:
-                _reset_recognizer(recognizer)
-            if not playback_interrupted:
-                status_queue.put("listening" if is_active else "idle")
-
-        threading.Thread(target=wait_for_mute, daemon=True).start()
-        return
-
-    try:
-        audio_file, was_cached = get_or_synthesize_wav(text, TEMP_AUDIO_PATH)
-        if not audio_file or not os.path.exists(audio_file):
-            logging.error("[TTS] Аудиофайл не был создан.")
-            is_speaking = False
-            status_queue.put("listening" if is_active else "idle")
-            return
-
-        if playback_interrupted:
-            return
-
-        try:
-            play_process = subprocess.Popen(
-                ["paplay", audio_file],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-
-            def wait_for_playback():
-                global is_speaking, play_process, last_active_time, last_speak_end_time
-                if play_process:
-                    play_process.wait()
-                play_process = None
-                is_speaking = False
-                last_speak_end_time = time.time()
-                last_active_time = time.time()
-                clear_audio_queue()
-
-                if recognizer:
-                    _reset_recognizer(recognizer)
-
-                if not playback_interrupted:
-                    status_queue.put("listening" if is_active else "idle")
-
-            threading.Thread(target=wait_for_playback, daemon=True).start()
-        except Exception as e:
-            logging.error(f"[TTS] Ошибка запуска воспроизведения paplay: {e}")
-            is_speaking = False
-            status_queue.put("listening" if is_active else "idle")
-            
-    except Exception as e:
-        logging.error(f"Ошибка озвучки Piper TTS: {e}")
-        is_speaking = False
-        status_queue.put("listening" if is_active else "idle")
 
 
 def is_recent_self_echo(text: str) -> bool:
@@ -427,23 +542,43 @@ def get_wake_word(text: str) -> str | None:
     return None
 
 
+def _begin_thinking() -> None:
+    global is_thinking, _thinking_count
+    with _thinking_lock:
+        _thinking_count += 1
+        is_thinking = True
+
+
+def _end_thinking() -> None:
+    global is_thinking, _thinking_count
+    with _thinking_lock:
+        _thinking_count = max(0, _thinking_count - 1)
+        is_thinking = _thinking_count > 0
+
+
 def execute_command_async(cmd_text, safe_speak_func):
     """Асинхронный запуск выполнения команды в фоновом потоке, чтобы не блокировать STТ."""
     def run():
-        global is_thinking, last_active_time, is_active
+        global last_active_time, is_active
 
         was_active = is_active
         is_quick = is_quick_command(cmd_text)
+        epoch = speak_epoch()
+
+        def gated_speak(text):
+            if epoch != speak_epoch():
+                return
+            safe_speak_func(text)
 
         # Если команда быстрая, передаем пустую функцию вместо озвучки (блокируем синтез Piper)
-        active_speak = (lambda text: None) if is_quick else safe_speak_func
+        active_speak = (lambda text: None) if is_quick else gated_speak
 
         status_queue.put("thinking")
-        is_thinking = True
-
-        should_sleep = commands.execute(cmd_text, active_speak)
-
-        is_thinking = False
+        _begin_thinking()
+        try:
+            should_sleep = commands.execute(cmd_text, active_speak)
+        finally:
+            _end_thinking()
         last_active_time = time.time()
 
         if should_sleep:
@@ -556,8 +691,8 @@ def main():
         awaiting_followup = True
         last_active_time = time.time()
         phrase = random.choice(ACTIVATION_PHRASES)
-        # Не блокировать цикл Vosk синтезом «Да?» — иначе следующая команда сидит в очереди и глохнет.
-        threading.Thread(target=safe_speak, args=(phrase,), daemon=True).start()
+        # speak() только кладёт в очередь — цикл Vosk не блокируем.
+        safe_speak(phrase)
 
     def wake_session() -> None:
         global is_active, asked_to_repeat
@@ -582,8 +717,14 @@ def main():
             chunk_samples = np.frombuffer(data, dtype=np.int16)
             chunk_rms = float(np.sqrt(np.mean(chunk_samples.astype(np.float32) ** 2))) if len(chunk_samples) > 0 else 0.0
 
-            # После «Да?» короткий хвост: иначе «включи музыку» съедается Reset-ом Vosk.
-            echo_tail = ECHO_TAIL_AFTER_WAKE_SEC if awaiting_followup else ECHO_TAIL_SEC
+            # После «Да?» короткий хвост. В зелёной сессии тоже короткий:
+            # иначе «молодец» сразу после ответа попадает в 2.2 с глухоты.
+            if awaiting_followup:
+                echo_tail = ECHO_TAIL_AFTER_WAKE_SEC
+            elif is_active:
+                echo_tail = ECHO_TAIL_AFTER_REPLY_SEC
+            else:
+                echo_tail = ECHO_TAIL_SEC
             if time.time() - last_speak_end_time < echo_tail:
                 _reset_recognizer(recognizer)
                 current_phrase_max_rms = 0.0

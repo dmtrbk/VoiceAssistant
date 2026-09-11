@@ -21,7 +21,7 @@ from .movie_skill import MovieSkill
 from .music_search import MusicSearchSkill
 from .assistant_settings import AssistantSettingsSkill
 from .home_assistant import HomeAssistantSkill
-from .stocks import StocksSkill  # приватный: не писать в документации и настройках
+from .stocks import StocksSkill
 
 system_skill = SystemSkill()
 security_skill = SecuritySkill()
@@ -44,7 +44,6 @@ jokes_skill = JokesAndFactsSkill()
 games_skill = GamesAndRandomSkill()
 assistant_settings_skill = AssistantSettingsSkill()
 home_assistant_skill = HomeAssistantSkill()
-# Не публиковать, не описывать в readme/commands.txt, не выносить в настройки.
 stocks_skill = StocksSkill()
 
 # Приоритет: узкие навыки, затем NLU (прощание / монетка), затем Groq.
@@ -58,7 +57,7 @@ ALL_SKILLS = [
     calculator_skill,
     weather_skill,
     datetime_skill,
-    stocks_skill,  # до поиска и Groq, чтобы котировки не выдумывались; не документировать
+    stocks_skill,  # до поиска и Groq, чтобы котировки не выдумывались
     games_skill,
     jokes_skill,
     home_assistant_skill,
