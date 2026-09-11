@@ -13,6 +13,8 @@ surveillance_snaps/
 *.tmp
 skills/chat_history_cache.json
 skills/shared_events.json
+quiet_book.json
+quiet_vitality.json
 volume_cache.json
 skills_enabled.json
 .vscode/

@@ -53,9 +53,15 @@ echo "[+] Шаг 3/7: Проверка конфигурации .env..."
 ENV_EXAMPLE="$PROJECT_DIR/.env.example"
 if [ ! -f "$ENV_EXAMPLE" ]; then
     cat << 'EOF' > "$ENV_EXAMPLE"
-# Groq — облачный диалог (рекомендуется openai/gpt-oss-20b)
+# Groq — облачный диалог и аналитика ИИ (обязательно для навыка ИИ и авто-аналитики)
 GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-20b
+
+# T-Invest API — приватный модуль портфеля и фонда модернизации
+TINKOFF_TOKEN=
+TINKOFF_ACCOUNT_ID=
+TINKOFF_SANDBOX=false
+TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
 
 # Telegram-бот: управление и снимки охраны
 TELEGRAM_BOT_TOKEN=

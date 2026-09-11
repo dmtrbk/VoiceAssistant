@@ -15,6 +15,8 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(PROJECT_DIR, "skills_enabled.json")
 
 # id, заголовок, подсказка. Порядок = порядок в окне.
+# Приватные модули (тихий брокерский счёт) сюда не добавлять:
+# не для окна настроек, не для readme/commands.txt, не для публикации.
 OPTIONAL_SKILLS = (
     ("xiaomi_bulb", "Свет", "Лампа Xiaomi / Yeelight"),
     ("movie", "Фильмы и видео", "ВК Видео и плеер MPV"),

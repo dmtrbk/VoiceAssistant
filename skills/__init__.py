@@ -20,6 +20,7 @@ from .games import GamesAndRandomSkill
 from .movie_skill import MovieSkill
 from .music_search import MusicSearchSkill
 from .assistant_settings import AssistantSettingsSkill
+from .stocks import StocksSkill  # приватный: не писать в документации и настройках
 
 system_skill = SystemSkill()
 security_skill = SecuritySkill()
@@ -41,6 +42,8 @@ calculator_skill = CalculatorSkill()
 jokes_skill = JokesAndFactsSkill()
 games_skill = GamesAndRandomSkill()
 assistant_settings_skill = AssistantSettingsSkill()
+# Не публиковать, не описывать в readme/commands.txt, не выносить в настройки.
+stocks_skill = StocksSkill()
 
 # Приоритет: узкие навыки, затем NLU (прощание / монетка), затем Groq.
 # Мелкий разговор (привет, как дела) не в NLU — его забирает Groq.
@@ -53,6 +56,7 @@ ALL_SKILLS = [
     calculator_skill,
     weather_skill,
     datetime_skill,
+    stocks_skill,  # до поиска и Groq, чтобы котировки не выдумывались; не документировать
     games_skill,
     jokes_skill,
     xiaomi_bulb_skill,

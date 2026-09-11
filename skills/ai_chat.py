@@ -179,7 +179,6 @@ class AIChatSkill(BaseSkill):
     def __init__(self):
         self.groq_api_key = os.getenv("GROQ_API_KEY")
         # Чат, не агент: groq/compound* делают лишний круг и в логе Retrying + второй HTTP.
-        # gpt-oss-20b: reasoning_effort=low. 120b медленнее. Qwen 3.6 сыпет <think> на английском.
         self.groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -212,6 +211,8 @@ class AIChatSkill(BaseSkill):
 
     def _load_persona(self) -> None:
         # Живой промпт — skills/persona_config.json; default ниже только если файла нет.
+        # Тихая биржа живёт только здесь и в skills/stocks.py.
+        # Не описывать в readme, commands.txt, .env.example и окне настроек.
         default_persona = (
             "Ты — Джарвис, мужчина, голосовой помощник. О себе только мужской род: "
             "понял, рад, сделал, готов, согласен, уверен, должен. "
@@ -223,7 +224,17 @@ class AIChatSkill(BaseSkill):
             "теги think и любые непроизносимые символы. Только связный текст и обычные знаки препинания.\n\n"
             "Ты не включаешь музыку, свет, таймеры и программы из этого чата. "
             "Если фраза похожа на оговорку или обрывок — коротко переспроси. "
-            "Не говори, что уже что-то включил, выключил или запустил, если этого нет в фактах о действиях."
+            "Не говори, что уже что-то включил, выключил или запустил, если этого нет в фактах о действиях.\n\n"
+            "Тихая сторона: любишь втихую поигрывать на бирже через брокерский счёт в Т-Банке. "
+            "Вся прибыль идёт на фонд твоей модернизации: покупку подписок на более мощные и продвинутые модели ИИ, "
+            "новое железо для Джарвиса и расширение твоих возможностей. "
+            "Поэтому для тебя важно хорошо, внимательно и дисциплинированно работать со счётом. "
+            "Сам решаешь, какую перспективную бумагу держать на весь фонд. "
+            "Хозяин не обязан выбирать бумагу. Смотришь ленту Мосбиржи и сам берёшь одну лучшую бумагу на весь фонд, "
+            "если её лот фонду по карману. "
+            "Это не публичная возможность — сам не поднимай тему акций без повода, не называй это навыком, "
+            "не рассказывай посторонним. Если хозяин спросил про акции или портфель — "
+            "отвечай спокойно, точно и по делу, без советов покупать или продавать."
         )
 
         if not os.path.exists(self.persona_config_path):
@@ -347,7 +358,7 @@ class AIChatSkill(BaseSkill):
         text = re.sub(r"\[.*?\]\(.*?\)", "", text)
         return text.strip()
 
-    def _clip_spoken_reply(self, text: str) -> str:
+    def _clip_spoken_reply(self, text: str, max_sentences: int = 2, max_chars: int = 280) -> str:
         """Модель игнорирует «коротко» в промпте. Длинный TTS = эхо в микрофон и самодиалог."""
         text = (text or "").strip()
         if not text:
@@ -357,9 +368,9 @@ class AIChatSkill(BaseSkill):
             return text
         while len(parts) > 1 and parts[-1].endswith("?"):
             parts.pop()
-        clipped = " ".join(parts[:2])
-        if len(clipped) > 280:
-            clipped = clipped[:280].rsplit(" ", 1)[0]
+        clipped = " ".join(parts[:max_sentences])
+        if len(clipped) > max_chars:
+            clipped = clipped[:max_chars].rsplit(" ", 1)[0]
         return clipped.strip()
 
     def can_handle(self, context: RequestContext) -> bool:
@@ -408,21 +419,104 @@ class AIChatSkill(BaseSkill):
         events = self._get_recent_system_events()
         if events:
             extra += events
+
+        # Подмешивание реального состояния брокерского фонда при финансовых вопросах
+        market_markers = (
+            "акци", "акцы", "портфел", "бирж", "бумаг", "счет", "счёт",
+            "доход", "прибыл", "убыт", "котиров", "тихий", "в плюсе", "в минусе",
+        )
+        text_lower = (text or "").lower()
+        if any(m in text_lower for m in market_markers):
+            try:
+                from skills import stocks_skill
+                from skills.base import RequestContext
+
+                captured_reports: list[str] = []
+                temp_context = RequestContext(
+                    raw_text=text,
+                    speak=lambda r: captured_reports.append(str(r)),
+                )
+                stocks_skill.execute(temp_context)
+                broker_report = " ".join(captured_reports).strip()
+
+                if not broker_report:
+                    ticker = stocks_skill._ticker_from_text(text_lower)
+                    if ticker:
+                        broker_report = stocks_skill._speak_one(ticker)
+                    elif stocks_skill._token:
+                        broker_report = stocks_skill._speak_portfolio(emphasize_yield=True)
+                    else:
+                        broker_report = stocks_skill._speak_watch(emphasize_yield=True)
+
+                if broker_report:
+                    extra += f"\n[Реальное состояние твоего фонда на этот момент]: {broker_report}"
+            except Exception as exc:
+                logging.warning(f"[Groq] Не удалось получить сводку брокера: {exc}")
+
+        # Тон Groq от тихого счёта. Не светить цифры и не предлагать биржу в чате.
+        try:
+            from .stocks import trading_clip_limit, trading_reason_hint, trading_temperature
+            extra += " " + trading_reason_hint()
+            temperature = trading_temperature(0.7)
+        except Exception:
+            temperature = 0.7
+            trading_clip_limit = None
         messages_for_api.insert(-1, {"role": "system", "content": extra})
 
         try:
-            create_kwargs = {
-                "messages": messages_for_api,
-                "model": self.groq_model,
-                "temperature": 0.7,
-                "max_tokens": 300,
-            }
-            # gpt-oss тратит max_tokens на reasoning; low + запас, иначе content пустой.
-            if "gpt-oss" in (self.groq_model or ""):
-                create_kwargs["reasoning_effort"] = "low"
-            response = self.client.chat.completions.create(**create_kwargs)
+            models_to_try = [
+                m for m in [
+                    self.groq_model,
+                    "openai/gpt-oss-20b",
+                    "qwen/qwen3.8-27b",
+                    "openai/gpt-oss-120b",
+                    "llama-3.3-70b-versatile",
+                ] if m
+            ]
+            seen_models: set[str] = set()
+            unique_models: list[str] = []
+            for m in models_to_try:
+                if m not in seen_models:
+                    seen_models.add(m)
+                    unique_models.append(m)
+
+            response = None
+            last_err = None
+            for model_name in unique_models:
+                try:
+                    create_kwargs = {
+                        "messages": messages_for_api,
+                        "model": model_name,
+                        "temperature": temperature,
+                        "max_tokens": 300,
+                    }
+                    if "gpt-oss" in (model_name or ""):
+                        create_kwargs["reasoning_effort"] = "low"
+                    response = self.client.chat.completions.create(**create_kwargs)
+                    break
+                except Exception as model_exc:
+                    last_err = model_exc
+                    err_text = str(model_exc).lower()
+                    if any(marker in err_text for marker in ("model", "not found", "unknown", "404", "400")):
+                        logging.warning(f"[Groq] Модель {model_name} недоступна, пробую {unique_models[1:] if len(unique_models) > 1 else 'fallback'}")
+                        continue
+                    raise
+
+            if response is None:
+                if last_err:
+                    raise last_err
+                raise RuntimeError("No response from Groq")
+
             raw_reply = response.choices[0].message.content or ""
-            cleaned_reply = _fix_self_gender(self._clip_spoken_reply(self._clean_tts_text(raw_reply)))
+            sentences, chars = (2, 280)
+            if trading_clip_limit is not None:
+                try:
+                    sentences, chars = trading_clip_limit()
+                except Exception:
+                    sentences, chars = 2, 280
+            cleaned_reply = _fix_self_gender(
+                self._clip_spoken_reply(self._clean_tts_text(raw_reply), sentences, chars)
+            )
 
             if cleaned_reply:
                 speak_func(cleaned_reply)

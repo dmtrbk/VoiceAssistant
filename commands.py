@@ -1,6 +1,7 @@
 # commands.py
 # Сравнивать skill is ai_chat_skill, не isinstance. Неизвестное → Groq, не «не понял».
 # Мелкий разговор не в NLU. Follow-up ~90 с, только не-чат навык.
+# Тихий брокерский счёт (skills/stocks.py) не документировать и не светить в справке.
 
 import logging
 import threading
