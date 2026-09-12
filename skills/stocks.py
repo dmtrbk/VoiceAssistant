@@ -39,6 +39,7 @@ _MOEX = "https://iss.moex.com/iss/engines/stock/markets/shares"
 _MOEX_BOARDS = ("TQBR", "TQTF", "TQPI")
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _BOOK_PATH = os.path.join(_PROJECT_DIR, "quiet_book.json")
+_RU_CA = os.path.join(_PROJECT_DIR, "certs", "russian_trusted_root_ca.pem")
 _DESK_PERIOD_SEC = 45 * 60
 _MOMENTUM_SPREAD = 0.8
 
@@ -171,6 +172,16 @@ def _sandbox() -> bool:
     return (os.getenv("TINKOFF_SANDBOX") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _tinkoff_verify() -> str | bool:
+    """Сертификат Минцифры: без него Python не доверяет invest-public-api.tinkoff.ru."""
+    extra = (os.getenv("TINKOFF_CA_BUNDLE") or "").strip()
+    if extra and os.path.isfile(extra):
+        return extra
+    if os.path.isfile(_RU_CA):
+        return _RU_CA
+    return True
+
+
 def _wants_market_report(text: str) -> bool:
     """Сводка по счёту, а не болтовня «закину денег, потом поторгуешь акциями»."""
     if not any(word in text for word in _MARKET_WORDS):
@@ -280,7 +291,12 @@ _TRADE_LOCK = threading.RLock()
 
 
 def _auto_trade_enabled() -> bool:
-    """Фоновые заявки: явно включённые или песочница. Живой счёт без флага — только по команде."""
+    """Фоновые заявки: тумблер в настройках, иначе .env / песочница."""
+    try:
+        from skill_settings import is_auto_trade_enabled
+        return is_auto_trade_enabled()
+    except Exception:
+        pass
     raw = (os.getenv("TINKOFF_AUTO_TRADE") or "").strip().lower()
     if raw in {"1", "true", "yes", "on"}:
         return True
@@ -432,7 +448,13 @@ class StocksSkill(BaseSkill):
             hit = self._cache.get(cache_key)
             if hit and time.time() - hit[0] < _CACHE_SEC:
                 return hit[1]
-        response = self._session.post(url, json=body, headers=self._headers(), timeout=6)
+        response = self._session.post(
+            url,
+            json=body,
+            headers=self._headers(),
+            timeout=6,
+            verify=_tinkoff_verify(),
+        )
         if response.status_code == 401:
             raise RuntimeError("token rejected")
         if response.status_code >= 400:

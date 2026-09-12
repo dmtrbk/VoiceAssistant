@@ -32,14 +32,26 @@ OPTIONAL_SKILLS = (
 )
 
 OPTIONAL_IDS = {item[0] for item in OPTIONAL_SKILLS}
+AUTO_TRADE_KEY = "stocks_auto_trade"
 
 # GUI-поток читает очередь и открывает окно. Голос только кладёт «open».
 settings_events: queue.Queue[str] = queue.Queue()
 
 _lock = threading.Lock()
 _enabled: dict[str, bool] = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
+_auto_trade = False
 _loaded = False
 _SKILL_MAP: dict[str, Any] | None = None
+
+
+def _env_auto_trade_default() -> bool:
+    """Как в stocks._auto_trade_enabled: явный флаг, иначе только песочница."""
+    raw = (os.getenv("TINKOFF_AUTO_TRADE") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return (os.getenv("TINKOFF_SANDBOX") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _write_json_atomic(path: str, data: Any) -> None:
@@ -100,10 +112,21 @@ def _ensure_loaded() -> None:
     _loaded = True
 
 
+def _persist() -> None:
+    with _lock:
+        snapshot = dict(_enabled)
+        snapshot[AUTO_TRADE_KEY] = bool(_auto_trade)
+    try:
+        _write_json_atomic(CONFIG_PATH, snapshot)
+    except Exception as exc:
+        logging.error("[Настройки] Не удалось сохранить %s: %s", CONFIG_PATH, exc)
+
+
 def reload_from_disk() -> dict[str, bool]:
     """Читает skills_enabled.json. Нет ключа — навык включён."""
-    global _enabled
+    global _enabled, _auto_trade
     flags = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
+    auto_trade = _env_auto_trade_default()
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
@@ -112,10 +135,13 @@ def reload_from_disk() -> dict[str, bool]:
                 for sid in OPTIONAL_IDS:
                     if sid in raw:
                         flags[sid] = bool(raw[sid])
+                if AUTO_TRADE_KEY in raw:
+                    auto_trade = bool(raw[AUTO_TRADE_KEY])
         except Exception as exc:
             logging.error("[Настройки] Не удалось прочитать %s: %s", CONFIG_PATH, exc)
     with _lock:
         _enabled = flags
+        _auto_trade = auto_trade
     return dict(flags)
 
 
@@ -144,6 +170,24 @@ def is_skill_enabled(skill: Any) -> bool:
         return _enabled.get(sid, True)
 
 
+def is_auto_trade_enabled() -> bool:
+    """Фоновые заявки навыка «Биржа и портфель»."""
+    _ensure_loaded()
+    with _lock:
+        return bool(_auto_trade)
+
+
+def set_auto_trade(enabled: bool) -> None:
+    """Тумблер автоторговли: сразу на диск и в окружение процесса."""
+    global _auto_trade
+    _ensure_loaded()
+    with _lock:
+        _auto_trade = bool(enabled)
+    os.environ["TINKOFF_AUTO_TRADE"] = "true" if enabled else "false"
+    _persist()
+    logging.info("[Настройки] Автоторговля: %s", "вкл" if enabled else "выкл")
+
+
 def request_open_settings() -> None:
     settings_events.put("open")
 
@@ -156,12 +200,7 @@ def set_flag(skill_id: str, enabled: bool) -> None:
     with _lock:
         was = _enabled.get(skill_id, True)
         _enabled[skill_id] = bool(enabled)
-        snapshot = dict(_enabled)
-    try:
-        _write_json_atomic(CONFIG_PATH, snapshot)
-    except Exception as exc:
-        logging.error("[Настройки] Не удалось сохранить %s: %s", CONFIG_PATH, exc)
-        return
+    _persist()
     if was and not enabled:
         _disable_runtime(skill_id)
     elif (not was) and enabled:

@@ -68,12 +68,17 @@ EV_KEY = 1
 SYN_REPORT = 0
 
 
+_WINDOW_PLURAL = ("окна", "окон", "окошки", "окошек")
+_WINDOW_ONE = ("окно", "окошко")
+_ALL_WORDS = ("все", "всего", "всем", "всее")
+
+
 def is_window_command_text(text: str) -> bool:
     """Фраза про окна / рабочий стол — не отдавать кино и «голому» закрой."""
     lowered = _norm(text)
     if "рабочий стол" in lowered:
         return True
-    return _has_any_word(lowered, ("окно", "окна", "окон"))
+    return _has_any_word(lowered, _WINDOW_ONE + _WINDOW_PLURAL)
 
 
 def detect_window_action(text: str) -> Optional[str]:
@@ -82,19 +87,23 @@ def detect_window_action(text: str) -> Optional[str]:
     if not lowered:
         return None
 
+    wants_all = _has_any_word(lowered, _ALL_WORDS)
     if "рабочий стол" in lowered and _has_any_word(lowered, ("покажи", "открой", "сверни")):
         return "show_desktop"
     if _has_any_word(lowered, ("сверни", "свернуть")) and (
-        _has_word(lowered, "все") or _has_any_word(lowered, ("окно", "окна", "окон"))
+        wants_all or _has_any_word(lowered, _WINDOW_ONE + _WINDOW_PLURAL)
     ):
         return "show_desktop"
 
     close = _has_any_word(lowered, ("закрой", "закрыть", "убери"))
     if not close:
         return None
-    if _has_word(lowered, "все") and _has_any_word(lowered, ("окна", "окон")):
+    # «закрой окна» / «закрой всего окна» (Vosk часто пишет «всего» вместо «все»)
+    if _has_any_word(lowered, _WINDOW_PLURAL) or (
+        wants_all and _has_any_word(lowered, _WINDOW_ONE)
+    ):
         return "close_all"
-    if _has_word(lowered, "окно") and not _has_word(lowered, "все"):
+    if _has_any_word(lowered, _WINDOW_ONE):
         return "close_focused"
     return None
 
@@ -291,7 +300,7 @@ _EXT_IFACE = "org.gnome.Shell.Extensions.JarvisWindows"
 _EXT_UUID = "jarvis-windows@voiceassistant"
 
 
-def _extension_call(method: str) -> Optional[str]:
+def _extension_call(method: str, *args: str) -> Optional[str]:
     try:
         res = _run(
             [
@@ -304,6 +313,7 @@ def _extension_call(method: str) -> Optional[str]:
                 _EXT_PATH,
                 "--method",
                 f"{_EXT_IFACE}.{method}",
+                *args,
             ]
         )
         if res.returncode == 0:
@@ -311,6 +321,19 @@ def _extension_call(method: str) -> Optional[str]:
     except Exception as exc:
         logger.debug("[Окна] extension %s: %s", method, exc)
     return None
+
+
+def close_matching_windows(pattern: str) -> int:
+    """Закрыть окна по wm_class/заголовку через расширение GNOME."""
+    ensure_jarvis_windows_extension()
+    ext = _extension_call("CloseMatching", pattern)
+    if ext is None:
+        return 0
+    match = re.search(r"(-?\d+)", ext)
+    closed = int(match.group(1)) if match else 0
+    if closed:
+        logger.info("[Окна] Закрыл %s окон по шаблону %s", closed, pattern)
+    return max(closed, 0)
 
 
 def ensure_jarvis_windows_extension() -> None:

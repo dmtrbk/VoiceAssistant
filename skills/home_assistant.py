@@ -13,7 +13,9 @@ import requests
 
 from skills.ai_chat import log_system_action
 from skills.base import BaseSkill, RequestContext
+from browser import is_close_browser_text
 from skills.text_utils import fuzzy_phrase_match, norm as _norm
+from window_control import is_window_command_text
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +76,8 @@ class HomeAssistantSkill(BaseSkill):
     def _refresh_states(self, force: bool = False) -> bool:
         if not self._token:
             return False
-        if not force and self._states and (time.time() - self._states_at) < _CACHE_SEC:
-            return True
+        if not force and self._states_at and (time.time() - self._states_at) < _CACHE_SEC:
+            return bool(self._states)
         try:
             resp = requests.get(
                 f"{self._url}/api/states",
@@ -84,10 +86,14 @@ class HomeAssistantSkill(BaseSkill):
             )
             if resp.status_code == 401:
                 logger.warning("[HA] Токен отклонён.")
+                self._states = []
+                self._states_at = time.time()
                 return False
             resp.raise_for_status()
             raw = resp.json()
             if not isinstance(raw, list):
+                self._states = []
+                self._states_at = time.time()
                 return False
             useful: list[dict[str, Any]] = []
             for item in raw:
@@ -109,6 +115,8 @@ class HomeAssistantSkill(BaseSkill):
             return True
         except Exception as exc:
             logger.warning("[HA] Не удалось получить состояния: %s", exc)
+            self._states = []
+            self._states_at = time.time()
             return False
 
     def _match_entity(self, text: str) -> dict[str, Any] | None:
@@ -151,6 +159,8 @@ class HomeAssistantSkill(BaseSkill):
         ):
             return True
         if any(verb in text for verb in _ON + _OFF):
+            if is_window_command_text(text) or is_close_browser_text(text):
+                return False
             if not self._states:
                 self._refresh_states()
             return bool(self._states) and self._match_entity(text) is not None

@@ -13,6 +13,10 @@ const IFACE = `
     <method name="CloseAll">
       <arg type="i" direction="out" name="closed"/>
     </method>
+    <method name="CloseMatching">
+      <arg type="s" direction="in" name="pattern"/>
+      <arg type="i" direction="out" name="closed"/>
+    </method>
   </interface>
 </node>`;
 
@@ -30,6 +34,8 @@ export default class JarvisWindowsExtension extends Extension {
     }
 
     _windows() {
+        if (global.display.list_all_windows)
+            return global.display.list_all_windows();
         const list = [];
         const manager = global.workspace_manager;
         const n = manager.get_n_workspaces();
@@ -84,6 +90,28 @@ export default class JarvisWindowsExtension extends Extension {
                 continue;
             win.delete(global.get_current_time());
             closed += 1;
+        }
+        return closed;
+    }
+
+    CloseMatching(pattern) {
+        let closed = 0;
+        let regex;
+        try {
+            regex = new RegExp(pattern, 'i');
+        } catch {
+            return 0;
+        }
+        for (const win of this._windows()) {
+            if (!this._isNormal(win) || this._skip(win, true))
+                continue;
+            const wm = win.get_wm_class() || '';
+            const instance = (win.get_wm_class_instance && win.get_wm_class_instance()) || '';
+            const title = win.get_title() || '';
+            if (regex.test(wm) || regex.test(instance) || regex.test(title)) {
+                win.delete(global.get_current_time());
+                closed += 1;
+            }
         }
         return closed;
     }

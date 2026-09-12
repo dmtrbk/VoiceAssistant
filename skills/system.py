@@ -15,7 +15,7 @@ from window_control import (
     detect_window_action,
     show_desktop,
 )
-from browser import chrome_command
+from browser import chrome_command, close_browser, is_close_browser_text
 
 SUCCESS_RESPONSES = [
     "Сделано!", "Готово!", "Выполнил.", "Есть!", 
@@ -24,10 +24,6 @@ SUCCESS_RESPONSES = [
 
 class SystemSkill(BaseSkill):
     """Навык для управления операционной системой Linux (громкость, утилиты, выключение)."""
-
-    def __init__(self):
-        self._shutdown_pending_until = 0.0
-        self._close_windows_pending_until = 0.0
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
@@ -46,7 +42,13 @@ class SystemSkill(BaseSkill):
             "тик ток", "тиктоку", "tiktok", "шахматы", "chess"
         ]
         is_shutdown = any(w in text for w in ["выключ", "отключ"]) and any(w in text for w in ["компьютер", "пк"])
-        return has_wiki or any(w in text for w in triggers) or is_shutdown or detect_window_action(text) is not None
+        return (
+            has_wiki
+            or any(w in text for w in triggers)
+            or is_shutdown
+            or is_close_browser_text(text)
+            or detect_window_action(text) is not None
+        )
 
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
@@ -67,17 +69,12 @@ class SystemSkill(BaseSkill):
             return
 
         if window_action == "close_all":
-            now = time.time()
-            if now < self._close_windows_pending_until:
-                self._close_windows_pending_until = 0.0
-                closed = close_all_windows()
-                if closed:
-                    context.speak("Закрываю окна.")
-                else:
-                    context.speak("Окон не нашёл.")
+            logging.info("[Система] Закрываю все окна.")
+            closed = close_all_windows()
+            if closed:
+                context.speak("Закрываю окна.")
             else:
-                self._close_windows_pending_until = now + 20
-                context.speak("Чтобы закрыть все окна, повторите команду.")
+                context.speak("Окон не нашёл.")
             return
 
         # 1. Поиск по Википедии
@@ -104,6 +101,13 @@ class SystemSkill(BaseSkill):
         is_close = any(w in text for w in ["закрый", "закрой", "выключи", "останови", "убери", "выруби"])
         
         if is_close:
+            if is_close_browser_text(text):
+                if close_browser():
+                    context.speak("Закрываю браузер.")
+                else:
+                    context.speak("Браузер уже закрыт.")
+                return
+
             if "htop" in text:
                 subprocess.Popen(["pkill", "-f", "htop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 context.speak("Закрываю htop.")
@@ -208,13 +212,7 @@ class SystemSkill(BaseSkill):
             return
 
         if any(w in text for w in ["выключ", "отключ"]) and any(w in text for w in ["компьютер", "пк"]):
-            now = time.time()
-            if now < self._shutdown_pending_until:
-                self._shutdown_pending_until = 0.0
-                context.speak("Выключаю компьютер. До свидания!")
-                time.sleep(1)
-                subprocess.Popen(["shutdown", "now"])
-            else:
-                self._shutdown_pending_until = now + 20
-                context.speak("Чтобы выключить компьютер, повторите команду.")
+            context.speak("Выключаю компьютер. До свидания!")
+            time.sleep(1)
+            subprocess.Popen(["shutdown", "now"])
             return

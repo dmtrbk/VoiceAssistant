@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, List, Optional
 
-from browser import open_url
+from browser import is_close_browser_text, open_url
 from player_control import stop_player_session
 from skills.ai_chat import log_system_action
 from skills.base import BaseSkill, RequestContext
@@ -34,6 +34,12 @@ _MOVIE_NOUNS = (
 )
 _LAUNCH_VERBS = ("включи", "запусти", "поставь", "открой", "вруби", "найди", "поищи", "ищи", "покажи")
 _CLOSE_WORDS = ("закрой", "выключи", "выруби", "останови")
+# Пока MPV жив, голое «закрой» гасит плеер. Чужие приложения сюда не отдавать.
+_FOREIGN_CLOSE = (
+    "браузер", "хром", "chrome", "chromium", "firefox", "фаерфокс",
+    "телеграм", "телеграмм", "телега", "telegram",
+    "свет", "музыку", "охрану", "компьютер", "терминал",
+)
 _PAUSE_WORDS = ("пауза", "продолжи", "возобнови", "играй", "плей")
 _SEEK_WORDS = ("перемотай", "перемотка")
 _CLIP_JUNK = (
@@ -370,14 +376,16 @@ def _is_player_control(text: str) -> bool:
 
 
 def _is_close_command(text: str) -> bool:
-    if is_window_command_text(text):
+    if is_window_command_text(text) or is_close_browser_text(text):
+        return False
+    if _has_any_word(text, _CLOSE_WORDS) and _has_any_word(text, _FOREIGN_CLOSE):
         return False
     if _has_any_word(text, _CLOSE_WORDS) and _has_any_word(
         text, _MOVIE_NOUNS + ("плеер", "mpv", "видеоплеер")
     ):
         return True
     if _player_alive() and _has_any_word(text, _CLOSE_WORDS) and not _has_any_word(
-        text, ("свет", "музыку", "охрану", "компьютер", "терминал")
+        text, _FOREIGN_CLOSE
     ):
         return True
     return False

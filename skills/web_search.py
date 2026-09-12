@@ -3,7 +3,7 @@
 import os
 import urllib.parse
 from skills.base import BaseSkill, RequestContext
-from browser import open_url
+from browser import close_browser, is_close_browser_text, open_url
 
 class WebSearchSkill(BaseSkill):
     """Навык для поиска информации в интернете и управления браузером."""
@@ -47,10 +47,17 @@ class WebSearchSkill(BaseSkill):
         has_browser = any(trigger in text for trigger in browser_triggers)
         has_ai = any(trigger in text for trigger in ai_triggers)
         
-        return has_search or has_browser or has_ai
+        return has_search or has_browser or has_ai or is_close_browser_text(text)
 
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
+
+        if is_close_browser_text(text):
+            if close_browser():
+                context.speak("Закрываю браузер.")
+            else:
+                context.speak("Браузер уже закрыт.")
+            return
         
         # 1. Открытие ИИ-ассистентов
         # Явный запрос на Gemini
