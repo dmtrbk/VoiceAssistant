@@ -127,6 +127,7 @@ def reload_from_disk() -> dict[str, bool]:
     global _enabled, _auto_trade
     flags = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
     auto_trade = _env_auto_trade_default()
+    # Ключ stocks_auto_trade в JSON важнее пустого TINKOFF_AUTO_TRADE.
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as handle:

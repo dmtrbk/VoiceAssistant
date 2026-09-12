@@ -102,6 +102,7 @@ class GamesAndRandomSkill(BaseSkill):
                 handler=game.handle_turn,
                 timeout_sec=60.0,
                 on_exit=lambda speak: speak(f"Игра окончена. Было загадано число {game.secret}."),
+                expire_speak=context.alert_speak or context.speak,
             )
             context.speak("Я загадал число от 1 до 100. Попробуйте угадать! Называйте число.")
             return

@@ -617,7 +617,12 @@ class AIChatSkill(BaseSkill):
                 lines.append(f"Имя: {name}")
             if facts:
                 if channel == "voice":
-                    lines.append("Я помню следующее: " + "; ".join(facts) + ".")
+                    preview = facts[:2]
+                    spoken = "Я помню: " + "; ".join(preview) + "."
+                    extra = len(facts) - len(preview)
+                    if extra > 0:
+                        spoken += f" Ещё {extra} в профиле — лучше смотреть в чате."
+                    lines.append(spoken)
                 else:
                     lines.append("Сохранённые факты:\n" + "\n".join(f"• {f}" for f in facts))
             context.speak("\n".join(lines))
@@ -732,11 +737,11 @@ class AIChatSkill(BaseSkill):
 
         # Подмешивание реального состояния брокерского фонда при вопросе о сводке
         market_markers = (
-            "акци", "акцы", "портфел", "бирж", "бумаг", "счет", "счёт",
-            "доход", "прибыл", "убыт", "котиров", "тихий", "в плюсе", "в минусе",
+            "акци", "акцы", "портфел", "бирж", "котиров",
+            "тихий счет", "тихий счёт", "ценные бумаг", "мои бумаг",
         )
         status_ask = (
-            "что там", "как там", "как дела", "покажи", "сколько",
+            "что там", "как там", "покажи", "сколько",
             "портфел", "котиров", "в плюсе", "в минусе",
         )
         text_lower = (text or "").lower()
@@ -744,29 +749,31 @@ class AIChatSkill(BaseSkill):
         wants_report = mentions_market and any(p in text_lower for p in status_ask)
         if wants_report:
             try:
+                from skill_settings import is_skill_enabled
                 from skills import stocks_skill
                 from skills.base import RequestContext
 
-                captured_reports: list[str] = []
-                temp_context = RequestContext(
-                    raw_text=text,
-                    speak=lambda r: captured_reports.append(str(r)),
-                    channel=channel,
-                )
-                stocks_skill.execute(temp_context)
-                broker_report = " ".join(captured_reports).strip()
+                if is_skill_enabled(stocks_skill):
+                    captured_reports: list[str] = []
+                    temp_context = RequestContext(
+                        raw_text=text,
+                        speak=lambda r: captured_reports.append(str(r)),
+                        channel=channel,
+                    )
+                    stocks_skill.execute(temp_context)
+                    broker_report = " ".join(captured_reports).strip()
 
-                if not broker_report:
-                    ticker = stocks_skill._ticker_from_text(text_lower)
-                    if ticker:
-                        broker_report = stocks_skill._speak_one(ticker)
-                    elif stocks_skill._token:
-                        broker_report = stocks_skill._speak_portfolio(emphasize_yield=True)
-                    else:
-                        broker_report = stocks_skill._speak_watch(emphasize_yield=True)
+                    if not broker_report:
+                        ticker = stocks_skill._ticker_from_text(text_lower)
+                        if ticker:
+                            broker_report = stocks_skill._speak_one(ticker)
+                        elif stocks_skill._token:
+                            broker_report = stocks_skill._speak_portfolio(emphasize_yield=True)
+                        else:
+                            broker_report = stocks_skill._speak_watch(emphasize_yield=True)
 
-                if broker_report:
-                    extra += f"\n[Реальное состояние твоего фонда на этот момент]: {broker_report}"
+                    if broker_report:
+                        extra += f"\n[Реальное состояние твоего фонда на этот момент]: {broker_report}"
             except Exception as exc:
                 logging.warning(f"[Groq] Не удалось получить сводку брокера: {exc}")
         elif mentions_market or any(w in text_lower for w in ("торг", "токен", "айди", "закину", "кэш")):
@@ -786,7 +793,7 @@ class AIChatSkill(BaseSkill):
             trading_clip_limit = None
         messages_for_api.insert(-1, {"role": "system", "content": extra})
 
-        epoch = speak_epoch() if channel == "voice" else None
+        epoch = speak_epoch()
 
         def aborted() -> bool:
             return epoch is not None and speak_epoch() != epoch

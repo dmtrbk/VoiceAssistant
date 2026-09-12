@@ -16,7 +16,8 @@ PIPER_EXE = os.path.join(PIPER_DIR, "piper")
 PIPER_MODEL_NAME = os.getenv("PIPER_MODEL", "ru_RU-dmitri-medium.onnx")
 PIPER_MODEL = os.path.join(PIPER_DIR, "models", PIPER_MODEL_NAME)
 VOICE_SPEED = os.getenv("VOICE_SPEED", "1.0")
-VOICE_SPEAKER = os.getenv("VOICE_SPEAKER", None)
+_speaker_raw = (os.getenv("VOICE_SPEAKER") or "").strip()
+VOICE_SPEAKER = _speaker_raw or None
 _SYNTH_LOCK = threading.Lock()
 
 SYSTEM_CACHE_PHRASES = [

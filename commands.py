@@ -8,10 +8,19 @@ import time
 from skills import ALL_SKILLS, local_nlu_skill, ai_chat_skill
 from skills.base import RequestContext
 from skill_settings import is_skill_enabled
-from triggers import is_filler, is_garbled_utterance, split_quick_compound
-from context_manager import is_in_context, handle_context_input
+from triggers import (
+    is_emergency_stop,
+    is_filler,
+    is_garbled_utterance,
+    is_hold_interrupt,
+    is_sleep_command,
+    split_quick_compound,
+)
+from context_manager import clear_active_context, handle_context_input, is_in_context
+from runtime_state import bump_speak_epoch, stop_extra_tts
 
 _ROUTER_LOCK = threading.Lock()
+_EXEC_LOCK = threading.Lock()
 
 # Последний навык (не диалог), чтобы «а завтра?» и «ещё» не улетали в Groq.
 _FOLLOWUP_TTL_SEC = 90.0
@@ -19,7 +28,37 @@ _last_skill = None
 _last_skill_time = 0.0
 
 
-def execute(text: str, speak_callback, channel: str = "voice") -> bool:
+def _channel_session_command(text: str, speak_callback, channel: str) -> bool | None:
+    """Стоп / замолчи / спать для CLI и Telegram. Голос это делает в цикле Vosk."""
+    if channel == "voice":
+        return None
+    if is_emergency_stop(text):
+        bump_speak_epoch()
+        stop_extra_tts()
+        try:
+            from player_control import emergency_silence
+            emergency_silence()
+        except Exception as exc:
+            logging.error("[Маршрутизатор] emergency_silence: %s", exc)
+        return True
+    if is_hold_interrupt(text):
+        bump_speak_epoch()
+        stop_extra_tts()
+        return False
+    if is_sleep_command(text):
+        bump_speak_epoch()
+        stop_extra_tts()
+        clear_active_context(call_on_exit=True, speak_callback=speak_callback)
+        return True
+    return None
+
+
+def execute(
+    text: str,
+    speak_callback,
+    channel: str = "voice",
+    alert_speak=None,
+) -> bool:
     """
     Маршрутизатор: Контекст → NLU → узкие навыки → follow-up → Groq.
     Возвращает True, если сессию нужно усыпить (прощание).
@@ -28,15 +67,39 @@ def execute(text: str, speak_callback, channel: str = "voice") -> bool:
     if not text or is_filler(text):
         return False
 
+    with _EXEC_LOCK:
+        return _execute_unlocked(
+            text,
+            speak_callback,
+            channel=channel,
+            alert_speak=alert_speak,
+        )
+
+
+def _execute_unlocked(
+    text: str,
+    speak_callback,
+    channel: str = "voice",
+    alert_speak=None,
+) -> bool:
     # 1. Если активен интерактивный контекст (игра, опрос, подтверждение)
     if is_in_context():
         handled, should_sleep = handle_context_input(text, speak_callback)
         if handled:
             return should_sleep
 
+    session = _channel_session_command(text, speak_callback, channel)
+    if session is not None:
+        return session
+
     should_sleep = False
     for part in split_quick_compound(text):
-        should_sleep = _dispatch_single(part, speak_callback, channel=channel) or should_sleep
+        should_sleep = _dispatch_single(
+            part,
+            speak_callback,
+            channel=channel,
+            alert_speak=alert_speak,
+        ) or should_sleep
     return should_sleep
 
 
@@ -108,7 +171,12 @@ def _record_skill_exchange(skill, user_text: str, spoken: list[str]) -> None:
         logging.error(f"[Маршрутизатор] Не удалось записать реплику в память диалога: {e}")
 
 
-def _dispatch_single(text: str, speak_callback, channel: str = "voice") -> bool:
+def _dispatch_single(
+    text: str,
+    speak_callback,
+    channel: str = "voice",
+    alert_speak=None,
+) -> bool:
     spoken: list[str] = []
 
     def capturing_speak(reply_text: str) -> None:
@@ -119,6 +187,7 @@ def _dispatch_single(text: str, speak_callback, channel: str = "voice") -> bool:
     context = RequestContext(
         raw_text=text,
         speak=capturing_speak,
+        alert_speak=alert_speak or speak_callback,
         channel=channel,
     )
 

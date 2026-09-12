@@ -40,7 +40,7 @@ logging.basicConfig(
 )
 
 import commands
-from indicator import run_gui, status_queue
+from indicator import put_status, run_gui
 from player_control import emergency_silence
 from skills.movie_skill import is_movie_control_phrase, is_movie_playing
 from telegram_listener import start_telegram_listener_thread
@@ -87,6 +87,16 @@ def _read_min_speech_rms() -> float:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
         return 200.0
+
+
+def _read_audio_input_device() -> int | str | None:
+    raw = (os.getenv("AUDIO_INPUT_DEVICE") or os.getenv("INPUT_DEVICE") or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
 
 
 ATTENTION_TIMEOUT = _read_positive_float("ATTENTION_TIMEOUT", 6.0)
@@ -188,7 +198,7 @@ def stop_speaking(to_idle=True):
 
     clear_audio_queue()
     if to_idle:
-        status_queue.put("idle")
+        put_status("idle")
 
 
 def _tts_wav_path() -> str:
@@ -231,7 +241,7 @@ def _mark_tts_idle() -> None:
     # Не чистить mic-очередь и не Reset-ить Vosk: похвала часто начинается
     # в хвосте фразы. Эхо отсечёт is_self_echo, а Reset съедал живую реплику.
     if not interrupted:
-        status_queue.put("listening" if is_active else "idle")
+        put_status("listening" if is_active else "idle")
 
 
 def _play_prepared(path: str, was_cached: bool, gen: int) -> subprocess.Popen | None:
@@ -337,7 +347,10 @@ def speak(text, recognizer=None):
         return
 
     logging.info(f"Ассистент: {text}")
-    status_queue.put("speaking")
+    if MUTE_SPEECH:
+        return
+
+    put_status("speaking")
 
     start_worker = False
     with _tts_lock:
@@ -363,8 +376,8 @@ def go_idle():
     is_active = False
     asked_to_repeat = False
     awaiting_followup = False
-    clear_active_context()
-    status_queue.put("idle")
+    clear_active_context(call_on_exit=True, speak_callback=speak)
+    put_status("idle")
     volume_ctrl.restore()
 
 
@@ -373,7 +386,7 @@ def keep_session_alive():
     global is_active, last_active_time
     is_active = True
     last_active_time = time.time()
-    status_queue.put("listening")
+    put_status("listening")
 
 
 def handle_emergency_stop(recognizer):
@@ -415,7 +428,6 @@ def is_recent_self_echo(text: str) -> bool:
 _WAKE_FIXES = (
     # Джарвис
     ("дарвис", "джарвис"),
-    ("сервис", "джарвис"),
     ("жарис", "джарвис"),
     ("жарвис", "джарвис"),
     ("джарвиса", "джарвис"),
@@ -452,11 +464,6 @@ _WAKE_FIXES = (
     ("гав рила", "гаврила"),
     ("гав рилу", "гаврила"),
     ("гав рило", "гаврила"),
-    ("говорила", "гаврила"),
-    ("говорили", "гаврила"),
-    ("говорило", "гаврила"),
-    ("горилла", "гаврила"),
-    ("горила", "гаврила"),
 
     # Гаврюша (ошибки Vosk из-за отсутствия в базовом словаре)
     ("гав рюша", "гаврюша"),
@@ -494,30 +501,55 @@ _WAKE_FIXES = (
     ("горюша", "гаврюша"),
     ("горюше", "гаврюша"),
     ("горюшу", "гаврюша"),
+    ("лавроша", "гаврюша"),
+    ("лавруша", "гаврюша"),
+    ("гаврюк", "гаврюша"),
+)
+
+# Обычные русские слова. Только если это начало короткой реплики, иначе будят песню.
+_WAKE_FIXES_RISKY = (
+    ("сервис", "джарвис"),
+    ("говорила", "гаврила"),
+    ("говорили", "гаврила"),
+    ("говорило", "гаврила"),
+    ("горилла", "гаврила"),
+    ("горила", "гаврила"),
+    ("глафира", "гаврюша"),
+    ("глафиру", "гаврюша"),
     ("говорю же", "гаврюша"),
     ("говори уже", "гаврюша"),
     ("говорит уже", "гаврюша"),
     ("говори же", "гаврюша"),
     ("говори уж", "гаврюша"),
     ("говорить уже", "гаврюша"),
-    ("лавроша", "гаврюша"),
-    ("лавруша", "гаврюша"),
-    ("гаврюк", "гаврюша"),
-    ("глафира", "гаврюша"),
-    ("глафиру", "гаврюша"),
 )
+
+
+def _apply_wake_fixes(cleaned: str, fixes: tuple[tuple[str, str], ...]) -> str:
+    for src, dst in fixes:
+        if " " in src and src in cleaned:
+            cleaned = cleaned.replace(src, dst)
+    for src, dst in fixes:
+        if " " not in src:
+            cleaned = re.sub(rf"\b{re.escape(src)}\b", dst, cleaned)
+    return cleaned
 
 
 def normalize_wake_text(text: str) -> str:
     cleaned = (text or "").lower().replace("ё", "е").strip()
-    # Сначала составные ошибки с пробелами
-    for src, dst in _WAKE_FIXES:
-        if " " in src and src in cleaned:
-            cleaned = cleaned.replace(src, dst)
-    # Затем одиночные слова
-    for src, dst in _WAKE_FIXES:
-        if " " not in src:
-            cleaned = re.sub(rf"\b{re.escape(src)}\b", dst, cleaned)
+    cleaned = _apply_wake_fixes(cleaned, _WAKE_FIXES)
+    words = cleaned.split()
+    if words and len(words) <= 2:
+        first = words[0]
+        for src, dst in _WAKE_FIXES_RISKY:
+            if " " in src:
+                if cleaned == src or cleaned.startswith(src + " "):
+                    cleaned = cleaned.replace(src, dst, 1)
+                    break
+            elif first == src:
+                words[0] = dst
+                cleaned = " ".join(words)
+                break
     return cleaned
 
 
@@ -567,10 +599,14 @@ def execute_command_async(cmd_text, safe_speak_func):
         # Если команда быстрая, передаем пустую функцию вместо озвучки (блокируем синтез Piper)
         active_speak = (lambda text: None) if is_quick else gated_speak
 
-        status_queue.put("thinking")
+        put_status("thinking")
         _begin_thinking()
         try:
-            should_sleep = commands.execute(cmd_text, active_speak)
+            should_sleep = commands.execute(
+                cmd_text,
+                active_speak,
+                alert_speak=safe_speak_func,
+            )
         finally:
             _end_thinking()
         last_active_time = time.time()
@@ -587,15 +623,15 @@ def execute_command_async(cmd_text, safe_speak_func):
                 is_active = True
                 last_active_time = time.time()
                 if not is_speaking:
-                    status_queue.put("listening")
+                    put_status("listening")
             else:
                 is_active = False
-                status_queue.put("idle")
+                put_status("idle")
                 if not is_music_volume_command(cmd_text):
                     volume_ctrl.restore()
         else:
             if not is_speaking:
-                status_queue.put("listening" if is_active else "idle")
+                put_status("listening" if is_active else "idle")
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -628,6 +664,8 @@ def timeout_monitor():
         time.sleep(0.5)
         # Проверяем тайм-аут, только если активны, НЕ говорим и НЕ ожидаем ответ от ИИ (заморозка таймера)
         if is_active and not is_speaking and not is_thinking:
+            if is_in_context():
+                continue
             media_on = volume_ctrl.is_ducked_or_playing() or is_movie_playing()
             current_timeout = ATTENTION_TIMEOUT_MUSIC if media_on else ATTENTION_TIMEOUT
             if time.time() - last_active_time > current_timeout:
@@ -692,7 +730,7 @@ def main():
         global is_active, asked_to_repeat
         is_active = True
         asked_to_repeat = False
-        status_queue.put("listening")
+        put_status("listening")
         volume_ctrl.duck()
 
     def audio_callback(indata, frames, time_info, status):
@@ -715,8 +753,18 @@ def main():
     threading.Thread(target=timeout_monitor, daemon=True).start()
 
     current_phrase_max_rms = 0.0
+    input_device = _read_audio_input_device()
+    if input_device is not None:
+        logging.info(f"[Аудио] Используется устройство ввода: {input_device}")
 
-    with sd.RawInputStream(samplerate=SAMPLERATE, blocksize=2000, dtype="int16", channels=1, callback=audio_callback):
+    with sd.RawInputStream(
+        samplerate=SAMPLERATE,
+        blocksize=2000,
+        dtype="int16",
+        channels=1,
+        callback=audio_callback,
+        device=input_device,
+    ):
         while True:
             data = audio_queue.get()
 
@@ -889,6 +937,11 @@ if __name__ == "__main__":
 
     # Создаем обработчик, который перехватит Ctrl+C и закроет программу чисто
     def sigint_handler(sig, frame):
+        try:
+            stop_speaking(to_idle=True)
+            volume_ctrl.restore()
+        except Exception:
+            pass
         logging.info("Ассистент выключен.")
         sys.exit(0)
 
@@ -915,4 +968,9 @@ if __name__ == "__main__":
             # 2. На основном потоке запускаем Qt6 GUI
             run_gui()
     except KeyboardInterrupt:
+        try:
+            stop_speaking(to_idle=True)
+            volume_ctrl.restore()
+        except Exception:
+            pass
         logging.info("Ассистент выключен.")

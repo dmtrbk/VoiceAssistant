@@ -17,6 +17,7 @@ skills/shared_events.json
 quiet_book.json
 quiet_vitality.json
 volume_cache.json
+timers_cache.json
 skills_enabled.json
 .vscode/
 .tts_cache/

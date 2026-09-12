@@ -38,6 +38,29 @@ _ON = ("включи", "зажги", "открой", "активируй", "вр
 _OFF = ("выключи", "потуши", "закрой", "выруби", "погаси")
 
 
+_BARE_LIGHT = {
+    "свет", "лампа", "лампочка", "лампу", "лампой", "освещение", "освещения",
+}
+
+
+def _xiaomi_takes_bare_light(text: str) -> bool:
+    """Голое «включи свет» отдаём локальной лампе, если она настроена и включена."""
+    cleaned = _strip_fillers(text)
+    for verb in _ON + _OFF:
+        cleaned = cleaned.replace(verb, " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if cleaned not in _BARE_LIGHT:
+        return False
+    if not (os.getenv("XIAOMI_BULB_IP") or "").strip():
+        return False
+    try:
+        from skill_settings import is_skill_enabled
+        from skills import xiaomi_bulb_skill
+        return is_skill_enabled(xiaomi_bulb_skill)
+    except Exception:
+        return False
+
+
 def _strip_fillers(text: str) -> str:
     text = _norm(text)
     for marker in _HA_MARKERS:
@@ -160,6 +183,8 @@ class HomeAssistantSkill(BaseSkill):
             return True
         if any(verb in text for verb in _ON + _OFF):
             if is_window_command_text(text) or is_close_browser_text(text):
+                return False
+            if _xiaomi_takes_bare_light(text):
                 return False
             if not self._states:
                 self._refresh_states()

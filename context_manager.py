@@ -31,6 +31,7 @@ class DialogContext:
         self.handler = handler
         self.timeout_sec = timeout_sec
         self.on_exit = on_exit
+        self.expire_speak = None
         self.last_active_time = time.time()
 
     def is_expired(self) -> bool:
@@ -49,11 +50,13 @@ def _call_on_exit(ctx: DialogContext, speak_callback: Optional[Callable[[str], N
         logger.error("[Контекст] Ошибка в on_exit для '%s': %s", ctx.name, exc)
 
 
-def _expire_if_needed() -> Optional[DialogContext]:
+def _expire_if_needed(speak_callback: Optional[Callable[[str], None]] = None) -> Optional[DialogContext]:
     global _active_context
     if _active_context is not None and _active_context.is_expired():
-        logger.info("[Контекст] Контекст '%s' истёк по таймауту.", _active_context.name)
+        ctx = _active_context
         _active_context = None
+        logger.info("[Контекст] Контекст '%s' истёк по таймауту.", ctx.name)
+        _call_on_exit(ctx, speak_callback or ctx.expire_speak)
     return _active_context
 
 
@@ -61,7 +64,8 @@ def set_active_context(
     name: str,
     handler: Callable[[str, Callable[[str], None]], bool],
     timeout_sec: float = 45.0,
-    on_exit: Optional[Callable[[Callable[[str], None]], None]] = None
+    on_exit: Optional[Callable[[Callable[[str], None]], None]] = None,
+    expire_speak: Optional[Callable[[str], None]] = None,
 ) -> None:
     """Устанавливает активный контекст диалога. Предыдущий закрывается без озвучки."""
     global _active_context
@@ -71,6 +75,7 @@ def set_active_context(
         timeout_sec=timeout_sec,
         on_exit=on_exit,
     )
+    new_ctx.expire_speak = expire_speak
     with _ctx_lock:
         old = _active_context
         _active_context = new_ctx
@@ -118,9 +123,11 @@ def handle_context_input(text: str, speak_callback: Callable[[str], None]) -> tu
     global _active_context
     clean_text = text.lower().strip()
     with _ctx_lock:
-        ctx = _expire_if_needed()
+        ctx = _expire_if_needed(speak_callback)
         if ctx is None:
             return False, False
+        if ctx.expire_speak is None:
+            ctx.expire_speak = speak_callback
         if _is_context_exit(clean_text):
             _active_context = None
             exiting = ctx

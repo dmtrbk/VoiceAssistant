@@ -13,7 +13,24 @@ from settings_ui import SettingsWindow
 from skill_settings import settings_events
 
 # Очередь для передачи статусов из основного скрипта ассистента
-status_queue = queue.Queue()
+status_queue: queue.Queue = queue.Queue(maxsize=32)
+
+
+def put_status(status: str) -> None:
+    """Кладёт статус; в headless без читателя старые значения вытесняются."""
+    try:
+        status_queue.put_nowait(status)
+        return
+    except queue.Full:
+        pass
+    try:
+        status_queue.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        status_queue.put_nowait(status)
+    except queue.Full:
+        pass
 
 # Настройки цветов для разных статусов (стиль Manjaro)
 STATUS_COLORS = {

@@ -12,6 +12,8 @@ class RequestContext:
     confidence: float = 0.0
     slots: Dict[str, Any] = field(default_factory=dict)
     speak: Optional[Callable[[str], None]] = None
+    # Отложенные оповещения (таймер, исход игры): не гасить вместе с barge-in команды.
+    alert_speak: Optional[Callable[[str], None]] = None
     should_sleep: bool = False
     channel: str = "voice"  # "voice" | "telegram" | "cli"
 

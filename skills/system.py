@@ -196,7 +196,16 @@ class SystemSkill(BaseSkill):
             subprocess.Popen(["nautilus"])
             return
 
-        if "настройки" in text:
+        if any(w in text for w in ("системные настройки", "настройки системы", "параметры системы")) or (
+            "настройки" in text and any(w in text for w in ("системн", "gnome", "сети", "экрана", "звука"))
+        ):
+            context.speak("Открываю параметры")
+            subprocess.Popen(["gnome-control-center"])
+            return
+
+        if "настройки" in text and not any(
+            w in text for w in ("ассистента", "джарвиса", "окно настроек")
+        ):
             context.speak("Открываю параметры")
             subprocess.Popen(["gnome-control-center"])
             return

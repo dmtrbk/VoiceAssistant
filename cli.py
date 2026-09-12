@@ -27,7 +27,8 @@ logging.basicConfig(
 import commands
 from context_manager import is_in_context, get_active_context
 from tts_cache import get_or_synthesize_wav, release_temp_wav
-from indicator import status_queue, create_orb_gui
+from indicator import create_orb_gui, put_status
+from runtime_state import register_extra_tts_stop
 from telegram_listener import start_telegram_listener_thread
 
 # Цветовое форматирование терминала ANSI
@@ -46,6 +47,7 @@ _cli_tts_pending = 0
 _cli_tts_idle = threading.Event()
 _cli_tts_idle.set()
 _cli_tts_started = False
+_cli_play_proc: subprocess.Popen | None = None
 
 
 def _cli_wav_path() -> str:
@@ -56,7 +58,7 @@ def _cli_wav_path() -> str:
 
 
 def _cli_tts_worker() -> None:
-    global _cli_tts_pending
+    global _cli_tts_pending, _cli_play_proc
     while True:
         text = _cli_tts_queue.get()
         if text is None:
@@ -64,19 +66,45 @@ def _cli_tts_worker() -> None:
         try:
             wav_path, cached = get_or_synthesize_wav(text, _cli_wav_path())
             if wav_path and os.path.exists(wav_path):
-                subprocess.run(
+                proc = subprocess.Popen(
                     ["paplay", wav_path],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+                _cli_play_proc = proc
+                proc.wait()
                 release_temp_wav(wav_path, cached)
         except Exception as exc:
             logging.warning("[CLI] Ошибка озвучки: %s", exc)
         finally:
+            _cli_play_proc = None
             with _cli_tts_lock:
                 _cli_tts_pending = max(0, _cli_tts_pending - 1)
                 if _cli_tts_pending == 0:
                     _cli_tts_idle.set()
+
+
+def stop_cli_tts() -> None:
+    """Гасит очередь и текущий paplay — «стоп» / «замолчи» в CLI."""
+    global _cli_tts_pending
+    while True:
+        try:
+            item = _cli_tts_queue.get_nowait()
+        except queue.Empty:
+            break
+        if item is not None:
+            with _cli_tts_lock:
+                _cli_tts_pending = max(0, _cli_tts_pending - 1)
+    proc = _cli_play_proc
+    if proc is not None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except Exception:
+            pass
+    with _cli_tts_lock:
+        if _cli_tts_pending == 0:
+            _cli_tts_idle.set()
 
 
 def _ensure_cli_tts_worker() -> None:
@@ -85,6 +113,7 @@ def _ensure_cli_tts_worker() -> None:
         if _cli_tts_started:
             return
         _cli_tts_started = True
+    register_extra_tts_stop(stop_cli_tts)
     threading.Thread(target=_cli_tts_worker, daemon=True, name="cli-tts").start()
 
 
@@ -112,11 +141,13 @@ def execute_cli_command(user_text: str, mute: bool = False, verbose: bool = Fals
     """
     responses: list[str] = []
 
+    register_extra_tts_stop(stop_cli_tts)
+    old_level = logging.getLogger().level
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
     try:
-        status_queue.put("thinking")
+        put_status("thinking")
     except Exception:
         pass
 
@@ -124,23 +155,27 @@ def execute_cli_command(user_text: str, mute: bool = False, verbose: bool = Fals
         if text and text.strip():
             responses.append(text.strip())
             try:
-                status_queue.put("speaking")
+                put_status("speaking")
             except Exception:
                 pass
             print(f"{COLOR_CYAN}{COLOR_BOLD}[Джарвис]:{COLOR_RESET} {text}")
             if not mute:
                 play_audio_feedback(text, mute=mute)
 
-    should_sleep = commands.execute(user_text, speak_cb, channel="cli")
-    wait_cli_tts()
+    try:
+        should_sleep = commands.execute(user_text, speak_cb, channel="cli")
+        wait_cli_tts()
+    finally:
+        if verbose:
+            logging.getLogger().setLevel(old_level)
 
     try:
         if should_sleep:
-            status_queue.put("idle")
+            put_status("idle")
         elif is_in_context():
-            status_queue.put("listening")
+            put_status("listening")
         else:
-            status_queue.put("idle")
+            put_status("idle")
     except Exception:
         pass
 
@@ -157,7 +192,7 @@ def run_interactive_loop(mute: bool = False, verbose: bool = False):
     print(f"{COLOR_YELLOW}Для выхода:{COLOR_RESET} введите '{COLOR_BOLD}exit{COLOR_RESET}', '{COLOR_BOLD}quit{COLOR_RESET}' или нажмите {COLOR_BOLD}Ctrl+C{COLOR_RESET}.\n")
 
     try:
-        status_queue.put("idle")
+        put_status("idle")
     except Exception:
         pass
 
@@ -168,7 +203,7 @@ def run_interactive_loop(mute: bool = False, verbose: bool = False):
             prompt_str = f"{COLOR_GREEN}{COLOR_BOLD}Вы {prompt_prefix}> {COLOR_RESET}"
             
             try:
-                status_queue.put("listening" if ctx else "idle")
+                put_status("listening" if ctx else "idle")
             except Exception:
                 pass
 
@@ -178,7 +213,7 @@ def run_interactive_loop(mute: bool = False, verbose: bool = False):
 
             if user_input.lower() in ["exit", "quit", "выход", "q"]:
                 try:
-                    status_queue.put("speaking")
+                    put_status("speaking")
                 except Exception:
                     pass
                 print(f"{COLOR_CYAN}[Джарвис]:{COLOR_RESET} До связи!")
@@ -186,7 +221,7 @@ def run_interactive_loop(mute: bool = False, verbose: bool = False):
                     play_audio_feedback("До связи!", mute=mute)
                     wait_cli_tts()
                 try:
-                    status_queue.put("idle")
+                    put_status("idle")
                 except Exception:
                     pass
                 break
@@ -198,7 +233,7 @@ def run_interactive_loop(mute: bool = False, verbose: bool = False):
         except (KeyboardInterrupt, EOFError):
             print(f"\n{COLOR_CYAN}[Джарвис]:{COLOR_RESET} Завершение работы. До свидания!")
             try:
-                status_queue.put("idle")
+                put_status("idle")
             except Exception:
                 pass
             break

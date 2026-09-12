@@ -1,5 +1,7 @@
 # skills/timer.py
 
+import json
+import os
 import re
 import time
 import logging
@@ -8,6 +10,9 @@ from skills.base import BaseSkill, RequestContext
 from skills.text_utils import plural as _plural, words_to_number
 
 logger = logging.getLogger(__name__)
+
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TIMERS_FILE = os.path.join(PROJECT_DIR, "timers_cache.json")
 
 
 def parse_duration_seconds(text: str) -> tuple[int, str]:
@@ -109,12 +114,20 @@ def format_remaining_time(seconds_left: int) -> str:
 
 
 class ActiveTimer:
-    def __init__(self, duration_sec: int, label: str, speak_callback):
+    def __init__(
+        self,
+        duration_sec: int,
+        label: str,
+        speak_callback,
+        end_time: float | None = None,
+        on_finished=None,
+    ):
         self.duration_sec = duration_sec
         self.label = label
         self.start_time = time.time()
-        self.end_time = self.start_time + duration_sec
+        self.end_time = end_time if end_time is not None else (self.start_time + duration_sec)
         self.speak_callback = speak_callback
+        self.on_finished = on_finished
         self.canceled = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -129,7 +142,15 @@ class ActiveTimer:
         if not self.canceled:
             logger.info(f"[Таймер] Таймер на {self.label} сработал.")
             if self.speak_callback:
-                self.speak_callback(f"Время вышло! Ваш таймер на {self.label} завершён.")
+                try:
+                    self.speak_callback(f"Время вышло! Ваш таймер на {self.label} завершён.")
+                except Exception as exc:
+                    logger.debug("[Таймер] Ошибка в speak_callback: %s", exc)
+        if self.on_finished:
+            try:
+                self.on_finished(self)
+            except Exception:
+                pass
 
     def cancel(self):
         self.canceled = True
@@ -146,6 +167,7 @@ class TimerSkill(BaseSkill):
         self.active_timers: list[ActiveTimer] = []
         self._lock = threading.Lock()
         self._awaiting_duration = False
+        self._restored = False
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
@@ -161,6 +183,59 @@ class TimerSkill(BaseSkill):
     def on_context_lost(self) -> None:
         self._awaiting_duration = False
 
+    def _on_timer_finished(self, timer: ActiveTimer) -> None:
+        with self._lock:
+            self._prune_timers()
+            self._save_timers_locked()
+
+    def _save_timers_locked(self) -> None:
+        data = []
+        for t in self.active_timers:
+            if not t.canceled and t.remaining_seconds > 0:
+                data.append({
+                    "end_time": t.end_time,
+                    "duration_sec": t.duration_sec,
+                    "label": t.label,
+                })
+        try:
+            temp_file = TIMERS_FILE + ".tmp"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(temp_file, TIMERS_FILE)
+        except Exception as e:
+            logger.debug("[Таймер] Не удалось сохранить %s: %s", TIMERS_FILE, e)
+
+    def _ensure_restored_locked(self, default_speak) -> None:
+        if self._restored:
+            return
+        self._restored = True
+        if not os.path.exists(TIMERS_FILE):
+            return
+        try:
+            with open(TIMERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                return
+            now = time.time()
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                end_time = float(item.get("end_time", 0))
+                label = str(item.get("label", "таймер"))
+                duration_sec = int(item.get("duration_sec", 60))
+                if end_time > now:
+                    new_timer = ActiveTimer(
+                        duration_sec=duration_sec,
+                        label=label,
+                        speak_callback=default_speak,
+                        end_time=end_time,
+                        on_finished=self._on_timer_finished,
+                    )
+                    self.active_timers.append(new_timer)
+                    logger.info("[Таймер] Восстановлен активный таймер на %s (осталось %d с).", label, int(end_time - now))
+        except Exception as e:
+            logger.debug("[Таймер] Не удалось восстановить таймеры: %s", e)
+
     def _prune_timers(self) -> None:
         self.active_timers = [
             timer for timer in self.active_timers
@@ -169,8 +244,12 @@ class TimerSkill(BaseSkill):
 
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
+        alert = context.alert_speak or context.speak
+
         with self._lock:
+            self._ensure_restored_locked(alert)
             self._prune_timers()
+            self._save_timers_locked()
 
         # 1. Отмена / сброс таймера
         if any(w in text for w in ["отмени", "сбрось", "выключи", "удали", "стоп", "останови", "закрой"]):
@@ -183,6 +262,7 @@ class TimerSkill(BaseSkill):
                 for t in self.active_timers:
                     t.cancel()
                 self.active_timers.clear()
+                self._save_timers_locked()
             context.speak("Таймер отменён." if count == 1 else "Все таймеры отменены.")
             return
 
@@ -190,6 +270,7 @@ class TimerSkill(BaseSkill):
         if any(w in text for w in ["сколько", "статус", "проверь", "осталось", "что с", "какой"]):
             with self._lock:
                 self._prune_timers()
+                self._save_timers_locked()
                 if not self.active_timers:
                     context.speak("Сейчас нет активных таймеров.")
                     return
@@ -211,7 +292,13 @@ class TimerSkill(BaseSkill):
 
         with self._lock:
             self._prune_timers()
-            new_timer = ActiveTimer(duration_sec, label, context.speak)
+            new_timer = ActiveTimer(
+                duration_sec=duration_sec,
+                label=label,
+                speak_callback=alert,
+                on_finished=self._on_timer_finished,
+            )
             self.active_timers.append(new_timer)
+            self._save_timers_locked()
 
         context.speak(f"Поставил таймер на {label}.")

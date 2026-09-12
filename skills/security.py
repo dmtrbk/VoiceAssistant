@@ -1,6 +1,7 @@
 # skills/security.py
 
 import os
+import re
 import sys
 import time
 import logging
@@ -166,13 +167,33 @@ class SecuritySkill(BaseSkill):
         if self.surveillance_thread is None:
             logging.info("[Охрана] Наблюдение остановлено: навык выключен в настройках.")
 
+    @staticmethod
+    def _norm_security(text: str) -> str:
+        cleaned = (text or "").lower().replace("ё", "е").strip()
+        return re.sub(r"\s+", " ", cleaned)
+
+    def _is_arm_command(self, text: str) -> bool:
+        cleaned = self._norm_security(text)
+        return any(
+            phrase in cleaned
+            for phrase in ("я ухожу", "включи охрану", "активируй охрану", "режим охраны")
+        )
+
+    def _is_disarm_command(self, text: str) -> bool:
+        """«я тут» только целиком или хвостом, не внутри «я тут подумал»."""
+        cleaned = self._norm_security(text)
+        if any(
+            phrase in cleaned
+            for phrase in ("выключи охрану", "отключи охрану", "джарвис я тут")
+        ):
+            return True
+        return bool(re.search(r"(?:^|\s)(?:ну\s+)?я\s+(?:тут|дома|пришел)$", cleaned))
+
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text
-        triggers = [
-            "я ухожу", "включи охрану", "активируй охрану", "режим охраны",
-            "я пришел", "выключи охрану", "отключи охрану", "я дома", "джарвис я тут", "я тут"
-        ]
-        return any(w in text for w in triggers)
+        if self._is_arm_command(text) or self._is_disarm_command(text):
+            return True
+        return False
 
     def control_screens(self, turn_on: bool):
         """Управление черной заставкой на экранах."""
@@ -195,7 +216,7 @@ class SecuritySkill(BaseSkill):
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text
 
-        if any(w in text for w in ["я ухожу", "включи охрану", "активируй охрану", "режим охраны"]):
+        if self._is_arm_command(text):
             context.speak("Режим охраны активирован. Включаю заставку.")
             send_telegram_notification("🔒 Запущен режим охраны. Наблюдение начнется через 1 минуту.")
             arm_id = self._bump_arm()
@@ -211,7 +232,7 @@ class SecuritySkill(BaseSkill):
             threading.Thread(target=_arm, daemon=True, name="security-arm").start()
             return
 
-        if any(w in text for w in ["я пришел", "выключи охрану", "отключи охрану", "я дома", "джарвис я тут", "я тут"]):
+        if self._is_disarm_command(text):
             self._bump_arm()
             self.control_screens(True)
             self._stop_camera()

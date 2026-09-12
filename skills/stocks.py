@@ -60,7 +60,11 @@ _STATUS_ASK = (
 _FOLLOWUP = (
     "подробнее", "подробней", "первая", "вторая", "другую",
     "ещё", "еще", "прибыл", "убыт", "процент",
-    "что там", "как там",
+)
+
+_ENCYCLOPEDIA = (
+    "что такое", "что значит", "кто такой", "кто такая",
+    "расскажи про", "объясни что",
 )
 
 _PRICE_HINTS = (
@@ -183,12 +187,21 @@ def _tinkoff_verify() -> str | bool:
 
 
 def _wants_market_report(text: str) -> bool:
-    """Сводка по счёту, а не болтовня «закину денег, потом поторгуешь акциями»."""
+    """Сводка по счёту, а не «что такое акции» и не болтовня про торговлю."""
+    if any(phrase in text for phrase in _ENCYCLOPEDIA):
+        return False
     if not any(word in text for word in _MARKET_WORDS):
         return False
     if any(ask in text for ask in _STATUS_ASK):
         return True
-    return len(text.split()) <= 8
+    return len(text.split()) <= 3
+
+
+def _has_max_hint(text: str) -> bool:
+    return any(
+        re.search(rf"(?<![а-яёa-z]){re.escape(hint)}(?![а-яёa-z])", text)
+        for hint in _MAX_HINTS
+    )
 
 
 def _trade_kind(text: str) -> str | None:
@@ -201,22 +214,22 @@ def _trade_kind(text: str) -> str | None:
     if any(hint in text for hint in _BUY_HINTS):
         return "buy"
     if "вложи" in text:
-        return "allin" if any(hint in text for hint in _MAX_HINTS) else "buy"
+        return "allin" if _has_max_hint(text) else "buy"
     return None
 
 
 def _extract_lots(text: str) -> int | None:
-    """None — весь доступный объём (кэш или позиция)."""
-    if any(hint in text for hint in _MAX_HINTS):
+    """None — явный «всё». Без числа — один лот, не весь кэш."""
+    if _has_max_hint(text):
         return None
     match = re.search(r"\b(\d+)\b", text)
     if match:
         value = int(match.group(1))
-        return value if value > 0 else None
+        return value if value > 0 else 1
     for word, value in sorted(_LOT_WORDS.items(), key=lambda item: len(item[0]), reverse=True):
         if re.search(rf"(?<![а-яa-z]){word}(?![а-яa-z])", text):
             return value
-    return None
+    return 1
 
 
 def _lots_phrase(n: int) -> str:
@@ -932,7 +945,7 @@ class StocksSkill(BaseSkill):
             return False
         if not status:
             return False
-        return any(marker in status for marker in ("FILL", "NEW"))
+        return any(marker in status for marker in ("FILL", "PARTIAL"))
 
     def _place_order(self, ticker: str, direction: str, lots: int) -> str:
         if lots <= 0:
