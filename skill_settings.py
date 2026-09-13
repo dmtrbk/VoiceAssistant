@@ -73,6 +73,7 @@ def ordered_skill_ids() -> list[str]:
 AUTO_TRADE_KEY = "stocks_auto_trade"
 VOICE_TRADE_KEY = "stocks_voice_trade"
 GROQ_MODEL_KEY = "groq_model"
+STT_MODE_KEY = "stt_mode"
 _CURSOR_COMM = frozenset({"cursor", "cursor-bin"})
 
 # GUI-поток читает очередь и открывает окно. Голос только кладёт «open».
@@ -83,6 +84,7 @@ _enabled: dict[str, bool] = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS
 _auto_trade = False
 _voice_trade = False
 _groq_model = ""
+_stt_mode = ""
 _loaded = False
 _SKILL_MAP: dict[str, Any] | None = None
 
@@ -107,6 +109,27 @@ def _env_groq_model_default() -> str:
     from skills.groq_client import normalize_groq_model
 
     return normalize_groq_model(os.getenv("GROQ_MODEL"))
+
+
+STT_MODE_CHOICES = (
+    ("hybrid", "Гибридное (Vosk + Groq Whisper Turbo)"),
+    ("vosk", "Оффлайн (только Vosk)"),
+)
+
+
+def normalize_stt_mode(raw: str | None) -> str:
+    clean = (raw or "").strip().lower()
+    if clean in {"vosk", "offline", "local"}:
+        return "vosk"
+    return "hybrid"
+
+
+def _env_stt_mode_default() -> str:
+    return normalize_stt_mode(os.getenv("STT_MODE"))
+
+
+def stt_mode_choices() -> list[tuple[str, str]]:
+    return list(STT_MODE_CHOICES)
 
 
 def is_cursor_running() -> bool:
@@ -196,6 +219,7 @@ def _persist() -> None:
         snapshot[AUTO_TRADE_KEY] = bool(_auto_trade)
         snapshot[VOICE_TRADE_KEY] = bool(_voice_trade)
         snapshot[GROQ_MODEL_KEY] = _groq_model
+        snapshot[STT_MODE_KEY] = _stt_mode
     try:
         _write_json_atomic(CONFIG_PATH, snapshot)
     except Exception as exc:
@@ -204,11 +228,12 @@ def _persist() -> None:
 
 def reload_from_disk() -> dict[str, bool]:
     """Читает skills_enabled.json. Нет ключа — навык включён."""
-    global _enabled, _auto_trade, _voice_trade, _groq_model
+    global _enabled, _auto_trade, _voice_trade, _groq_model, _stt_mode
     flags = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
     auto_trade = _env_auto_trade_default()
     voice_trade = _env_voice_trade_default()
     groq_model = _env_groq_model_default()
+    stt_mode = _env_stt_mode_default()
     # Ключи в JSON важнее пустых TINKOFF_* / GROQ_MODEL.
     if os.path.exists(CONFIG_PATH):
         try:
@@ -226,6 +251,8 @@ def reload_from_disk() -> dict[str, bool]:
                     from skills.groq_client import normalize_groq_model
 
                     groq_model = normalize_groq_model(str(raw[GROQ_MODEL_KEY] or ""))
+                if STT_MODE_KEY in raw:
+                    stt_mode = normalize_stt_mode(str(raw[STT_MODE_KEY] or ""))
         except Exception as exc:
             logging.error("[Настройки] Не удалось прочитать %s: %s", CONFIG_PATH, exc)
     with _lock:
@@ -233,6 +260,7 @@ def reload_from_disk() -> dict[str, bool]:
         _auto_trade = auto_trade
         _voice_trade = voice_trade
         _groq_model = groq_model
+        _stt_mode = stt_mode
     return dict(flags)
 
 
@@ -322,6 +350,32 @@ def set_groq_model(model_id: str) -> None:
     os.environ["GROQ_MODEL"] = chosen
     _persist()
     logging.info("[Настройки] Модель диалога: %s", chosen)
+
+
+def get_stt_mode() -> str:
+    """Режим распознавания речи: 'hybrid' или 'vosk'."""
+    _ensure_loaded()
+    with _lock:
+        return _stt_mode or _env_stt_mode_default()
+
+
+def set_stt_mode(mode: str) -> None:
+    """Переключает режим распознавания: сразу на диск и в окружение."""
+    global _stt_mode
+    chosen = normalize_stt_mode(mode)
+    _ensure_loaded()
+    with _lock:
+        _stt_mode = chosen
+    os.environ["STT_MODE"] = chosen
+    _persist()
+    logging.info("[Настройки] Распознавание речи: %s", chosen)
+
+
+def is_online_stt_enabled() -> bool:
+    """Включено ли онлайн/гибридное распознавание через Groq Whisper."""
+    mode = get_stt_mode()
+    has_key = bool((os.getenv("GROQ_API_KEY") or "").strip().strip("\"'"))
+    return mode == "hybrid" and has_key
 
 
 def get_effective_groq_model() -> str:

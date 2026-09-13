@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from skill_settings import (
     get_flags,
     get_groq_model,
+    get_stt_mode,
     grouped_skills,
     is_auto_trade_enabled,
     is_cursor_running,
@@ -26,7 +27,9 @@ from skill_settings import (
     set_auto_trade,
     set_flag,
     set_groq_model,
+    set_stt_mode,
     set_voice_trade,
+    stt_mode_choices,
 )
 from skills.groq_client import FAST_MODEL, groq_model_choices
 from theme_colors import current_palette, load_palette
@@ -90,6 +93,10 @@ class SettingsWindow(QWidget):
 
         self._model_combo: QComboBox | None = None
         self._model_hint: QLabel | None = None
+        self._stt_combo: QComboBox | None = None
+        self._stt_hint: QLabel | None = None
+        root.addWidget(self._section_label("Распознавание речи"))
+        root.addWidget(self._build_stt_card())
         root.addWidget(self._section_label("Модель диалога"))
         root.addWidget(self._build_model_card())
 
@@ -122,6 +129,29 @@ class SettingsWindow(QWidget):
         heading.setContentsMargins(4, 8, 0, 0)
         return heading
 
+    def _build_stt_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        col = QVBoxLayout(card)
+        col.setContentsMargins(16, 12, 16, 12)
+        col.setSpacing(8)
+
+        combo = QComboBox()
+        for mode_id, title in stt_mode_choices():
+            combo.addItem(title, mode_id)
+        combo.currentIndexChanged.connect(self._on_stt_changed)
+        self._stt_combo = combo
+        col.addWidget(combo)
+
+        hint = QLabel()
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        self._stt_hint = hint
+        col.addWidget(hint)
+        self._sync_stt_row()
+        return card
+
     def _build_model_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
@@ -151,8 +181,36 @@ class SettingsWindow(QWidget):
     def showEvent(self, event):
         self._apply_theme()
         self._rebuild()
+        self._sync_stt_row()
         self._sync_model_row()
         super().showEvent(event)
+
+    def _sync_stt_row(self) -> None:
+        if self._stt_combo is None or self._stt_hint is None:
+            return
+        current = get_stt_mode()
+        index = self._stt_combo.findData(current)
+        self._stt_combo.blockSignals(True)
+        if index >= 0:
+            self._stt_combo.setCurrentIndex(index)
+        self._stt_combo.blockSignals(False)
+        if current == "hybrid":
+            self._stt_hint.setText(
+                "Гибридный режим: Vosk для имени и стоп-слов, Groq Whisper Turbo для точного понимания реплик диалога."
+            )
+        else:
+            self._stt_hint.setText(
+                "Оффлайн режим: только локальная модель Vosk без обращений к облаку."
+            )
+
+    def _on_stt_changed(self, index: int) -> None:
+        if self._stt_combo is None or index < 0:
+            return
+        mode_id = self._stt_combo.itemData(index)
+        if not mode_id:
+            return
+        set_stt_mode(str(mode_id))
+        self._sync_stt_row()
 
     def _sync_model_row(self) -> None:
         if self._model_combo is None or self._model_hint is None:

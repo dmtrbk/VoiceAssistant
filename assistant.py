@@ -72,6 +72,7 @@ from triggers import (
     is_garbled_utterance,
     is_self_echo,
 )
+from stt import PhraseAudioBuffer, transcribe_audio
 
 WAKE_WORDS = ["джарвис", "умник", "гаврила", "гаврюша"]
 SAMPLERATE = 16000
@@ -147,6 +148,9 @@ ACTIVATION_PHRASES = [
     "На связи.",
 ]
 
+phrase_audio_buffer: PhraseAudioBuffer | None = None
+
+
 def clear_audio_queue():
     while not audio_queue.empty():
         try:
@@ -160,6 +164,8 @@ def _reset_recognizer(recognizer) -> None:
         return
     with recognizer_lock:
         recognizer.Reset()
+    if phrase_audio_buffer is not None:
+        phrase_audio_buffer.clear()
 
 
 def _strip_wake(text: str, wake: str | None) -> str:
@@ -708,7 +714,7 @@ def _start_runtime_services() -> None:
 
 def main():
     """Основной рабочий цикл ассистента"""
-    global is_active, last_active_time, awaiting_followup
+    global is_active, last_active_time, awaiting_followup, phrase_audio_buffer
 
     if not os.path.exists(MODEL_PATH):
         logging.critical(f"Папка с моделью Vosk не найдена по пути: {MODEL_PATH}")
@@ -725,6 +731,7 @@ def main():
 
     vosk_model = Model(MODEL_PATH)
     recognizer = KaldiRecognizer(vosk_model, SAMPLERATE)
+    phrase_audio_buffer = PhraseAudioBuffer(sample_rate=SAMPLERATE)
     
     logging.info(
         f"[Система] Ассистент готов. Позовите: {', '.join(WAKE_WORDS)}. "
@@ -833,9 +840,11 @@ def main():
                 is_accepted = recognizer.AcceptWaveform(data)
 
             if is_accepted:
-                # Последний чанк фразы тоже входит в оценку громкости
+                # Последний чанк фразы тоже входит в оценку громкости и в аудиобуфер
                 phrase_rms = max(current_phrase_max_rms, chunk_rms)
                 current_phrase_max_rms = 0.0
+                phrase_audio_buffer.add_chunk(data, has_speech=True)
+                captured_audio = phrase_audio_buffer.get_and_reset()
 
                 with recognizer_lock:
                     raw_result = recognizer.Result()
@@ -899,7 +908,15 @@ def main():
                         _reset_recognizer(recognizer)
                         continue
 
-                phrase = _strip_wake(text, detected_wake_word) if detected_wake_word else text
+                # Уточнение фразы через онлайн Groq Whisper для диалога или полной команды
+                vosk_phrase = _strip_wake(text, detected_wake_word) if detected_wake_word else text
+                if is_active or (detected_wake_word and vosk_phrase):
+                    final_text = transcribe_audio(captured_audio, fallback_text=text, sample_rate=SAMPLERATE)
+                    whisper_wake = get_wake_word(final_text) if detected_wake_word else None
+                    wake_to_strip = whisper_wake or detected_wake_word
+                    phrase = _strip_wake(final_text, wake_to_strip) if wake_to_strip else final_text
+                else:
+                    phrase = vosk_phrase
 
                 if is_active:
                     if detected_wake_word and not phrase:
@@ -932,6 +949,7 @@ def main():
                 if partial_text:
                     # Копим RMS только пока Vosk видит речь, а не паузы и музыку между фразами
                     current_phrase_max_rms = max(current_phrase_max_rms, chunk_rms)
+                    phrase_audio_buffer.add_chunk(data, has_speech=True)
 
                     # Короткие обрывки — шум или эхо, не трогаем сессию
                     if len(partial_text) < 4:
@@ -961,6 +979,7 @@ def main():
                         continue
                 else:
                     current_phrase_max_rms = 0.0
+                    phrase_audio_buffer.add_chunk(data, has_speech=False)
 
 
 if __name__ == "__main__":
