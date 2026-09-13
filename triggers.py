@@ -54,6 +54,7 @@ MEDIA_CONTROL_HINTS = [
     "трек", "пауза", "плей", "играй", "возобнови", "тишина",
 ]
 
+# Короткое междометие без смысла. «а» ещё и OIR («а?») — см. dialogue_repair.
 FILLER_PHRASES = {
     "а",
     "м",
@@ -144,7 +145,7 @@ def split_quick_compound(text: str) -> list[str]:
 
 
 def is_filler(text: str) -> bool:
-    """Пусто, один символ или короткое междометие — не отправлять в навыки/Groq."""
+    """Пусто или короткое междометие. Паузу «думаю» и «что?» разбирает dialogue_repair."""
     lowered = normalize_utterance(text)
     if not lowered:
         return True

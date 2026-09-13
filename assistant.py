@@ -2,6 +2,7 @@
 # Vosk-цикл не переписывать с нуля. Эхо: mute ECHO_TAIL_SEC + is_self_echo по хвосту фразы
 # (Vosk коверкает полный TTS). Во время длинного TTS barge-in только по имени.
 # После «Да?» awaiting_followup: короткий хвост и команда без имени, иначе «включи музыку» пропадает.
+# Пауза «мм» не срывает сессию; «что?» повторяет последнюю мысль; каша STT — до 3 уточнений.
 # OMP_* до numpy. logging до import commands. Не возвращать «Чем помочь?» в ACTIVATION_PHRASES.
 
 import json
@@ -55,13 +56,19 @@ from tts_cache import (
 )
 from runtime_state import bump_session_epoch, bump_speak_epoch, session_epoch, speak_epoch
 from context_manager import clear_active_context, is_in_context
+from dialogue_repair import (
+    early_dialogue_turn,
+    next_no_match_line,
+    remember_spoken,
+    reset as reset_dialogue_repair,
+    should_release_session,
+)
 from triggers import (
     is_quick_command,
     is_emergency_stop,
     is_hold_interrupt,
     is_sleep_command,
     is_music_volume_command,
-    is_filler,
     is_garbled_utterance,
     is_self_echo,
 )
@@ -115,7 +122,6 @@ _thinking_lock = threading.Lock()
 _thinking_count = 0
 playback_interrupted = False
 is_active = False
-asked_to_repeat = False  # один «не расслышал» на сессию
 awaiting_followup = False  # после «Да?» ждём команду; не глушить её хвостом эха
 last_active_time = 0.0
 last_speak_end_time = 0.0
@@ -363,6 +369,7 @@ def speak(text, recognizer=None):
         else:
             last_spoken_text = text
             playback_interrupted = False
+        spoken_snapshot = last_spoken_text
         is_speaking = True
         gen = _tts_generation
         _tts_queue.put((text, gen))
@@ -370,19 +377,20 @@ def speak(text, recognizer=None):
             _tts_worker_running = True
             start_worker = True
 
+    remember_spoken(spoken_snapshot)
     if start_worker:
         threading.Thread(target=_tts_worker, daemon=True, name="tts-worker").start()
 
 
 def go_idle(*, stop_tts: bool = False):
     """Полный сон сессии: idle, сброс переспроса, музыка обратно."""
-    global is_active, asked_to_repeat, awaiting_followup
+    global is_active, awaiting_followup
     bump_session_epoch()
     if stop_tts:
         stop_speaking(to_idle=True)
     is_active = False
-    asked_to_repeat = False
     awaiting_followup = False
+    reset_dialogue_repair()
     clear_active_context(call_on_exit=True, speak_callback=speak)
     put_status("idle")
     volume_ctrl.restore()
@@ -696,7 +704,7 @@ def _start_runtime_services() -> None:
 
 def main():
     """Основной рабочий цикл ассистента"""
-    global is_active, last_active_time, asked_to_repeat, awaiting_followup
+    global is_active, last_active_time, awaiting_followup
 
     if not os.path.exists(MODEL_PATH):
         logging.critical(f"Папка с моделью Vosk не найдена по пути: {MODEL_PATH}")
@@ -719,27 +727,33 @@ def main():
         f"Тайм-аут внимания: {ATTENTION_TIMEOUT:g} с (при музыке: {ATTENTION_TIMEOUT_MUSIC:g} с)."
     )
     is_active = False
-    asked_to_repeat = False
     last_active_time = 0.0
 
     def safe_speak(text):
         speak(text, recognizer)
 
-    def prompt_repeat():
-        # Не плодить «не расслышал» на каждый шум в одной сессии.
-        global asked_to_repeat, last_active_time
-        if not asked_to_repeat:
-            asked_to_repeat = True
-            safe_speak("Не расслышал.")
+    def prompt_repair():
+        global last_active_time
+        safe_speak(next_no_match_line())
         last_active_time = time.time()
+        if should_release_session():
+            go_idle()
 
     def dispatch_phrase(phrase: str) -> None:
-        global awaiting_followup
-        if is_filler(phrase) or is_garbled_utterance(phrase):
-            prompt_repeat()
-        else:
-            awaiting_followup = False
-            execute_command_async(phrase, safe_speak)
+        global awaiting_followup, last_active_time
+        early = early_dialogue_turn(phrase)
+        if early is not None:
+            kind, reply = early
+            if kind == "speak" and reply:
+                awaiting_followup = False
+                safe_speak(reply)
+            last_active_time = time.time()
+            return
+        if is_garbled_utterance(phrase):
+            prompt_repair()
+            return
+        awaiting_followup = False
+        execute_command_async(phrase, safe_speak)
 
     def speak_activation() -> None:
         global awaiting_followup, last_active_time
@@ -750,9 +764,9 @@ def main():
         safe_speak(phrase)
 
     def wake_session() -> None:
-        global is_active, asked_to_repeat
+        global is_active
         is_active = True
-        asked_to_repeat = False
+        reset_dialogue_repair(keep_replayable=True)
         put_status("listening")
         volume_ctrl.duck()
 

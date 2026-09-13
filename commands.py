@@ -1,6 +1,7 @@
 # commands.py
 # Сравнивать skill is ai_chat_skill, не isinstance. Неизвестное → Groq, не «не понял».
 # Мелкий разговор не в NLU. Follow-up ~90 с, только не-чат навык.
+# «что?» / пауза «мм» — dialogue_repair, каша STT — уточнение, не поиск.
 
 import logging
 import threading
@@ -18,6 +19,7 @@ from triggers import (
     split_quick_compound,
 )
 from context_manager import clear_active_context, handle_context_input, is_in_context
+from dialogue_repair import early_dialogue_turn, next_no_match_line, remember_spoken
 from runtime_state import bump_speak_epoch, stop_extra_tts
 
 _ROUTER_LOCK = threading.Lock()
@@ -65,6 +67,12 @@ def execute(
     Возвращает True, если сессию нужно усыпить (прощание).
     """
     text = text.lower().strip()
+    early = early_dialogue_turn(text)
+    if early is not None:
+        kind, reply = early
+        if kind == "speak" and reply:
+            speak_callback(reply)
+        return False
     if not text or is_filler(text):
         return False
 
@@ -183,6 +191,7 @@ def _dispatch_single(
     def capturing_speak(reply_text: str) -> None:
         if reply_text:
             spoken.append(str(reply_text))
+            remember_spoken(str(reply_text))
         speak_callback(reply_text)
 
     context = RequestContext(
@@ -230,7 +239,7 @@ def _dispatch_single(
         if is_garbled_utterance(text) or (
             channel == "voice" and is_weak_stt_for_chat(text)
         ):
-            speak_callback("Не расслышал.")
+            speak_callback(next_no_match_line())
             return False
         try:
             predicted, predicted_conf = local_nlu_skill.nlu_engine.predict(text)

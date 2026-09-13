@@ -2,6 +2,7 @@ import os
 import urllib.parse
 from skills.base import BaseSkill, RequestContext
 from browser import open_url
+from dialogue_repair import slot_clarify
 
 # Словарь для конвертации числительных (включая основные падежи и порядковые формы)
 RU_NUMS = {
@@ -139,7 +140,7 @@ class MapsSearchSkill(BaseSkill):
             query = text
 
         if not query:
-            context.speak("Куда?")
+            context.speak(slot_clarify("destination"))
             return
 
         # Преобразуем текстовые числительные в цифры (например, "десять" -> "10")
