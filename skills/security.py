@@ -2,7 +2,6 @@
 
 import os
 import re
-import sys
 import time
 import logging
 import threading
@@ -41,6 +40,67 @@ def _camera_index() -> int:
             except ValueError:
                 return 0
         return 0
+
+
+_BLANK_INTERVAL = 3.0
+_DISPLAY_ON = 0
+_DISPLAY_OFF = 3
+
+
+def _session_env() -> dict:
+    env = os.environ.copy()
+    env.setdefault("DISPLAY", ":0")
+    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+    runtime = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    env.setdefault("XDG_RUNTIME_DIR", runtime)
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime}/bus")
+    return env
+
+
+def _gdbus_call(dest: str, path: str, method: str, *args: str) -> bool:
+    cmd = [
+        "gdbus", "call", "--session",
+        "--dest", dest,
+        "--object-path", path,
+        "--method", method,
+        *args,
+    ]
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=2.5,
+            env=_session_env(),
+        )
+        if res.returncode != 0:
+            logging.debug("[Охрана] %s: %s", method, (res.stderr or "").strip())
+            return False
+        return True
+    except Exception as exc:
+        logging.debug("[Охрана] %s: %s", method, exc)
+        return False
+
+
+def set_display_power(on: bool) -> bool:
+    """Включает или гасит мониторы через Mutter DisplayConfig (GNOME Wayland)."""
+    mode = _DISPLAY_ON if on else _DISPLAY_OFF
+    ok = _gdbus_call(
+        "org.gnome.Mutter.DisplayConfig",
+        "/org/gnome/Mutter/DisplayConfig",
+        "org.freedesktop.DBus.Properties.Set",
+        "org.gnome.Mutter.DisplayConfig",
+        "PowerSaveMode",
+        f"<int32 {mode}>",
+    )
+    if on:
+        _gdbus_call(
+            "org.gnome.ScreenSaver",
+            "/org/gnome/ScreenSaver",
+            "org.gnome.ScreenSaver.WakeUpScreen",
+        )
+    return ok
+
 
 class SurveillanceThread(threading.Thread):
     """Поток для анализа изображения с веб-камеры."""
@@ -142,13 +202,15 @@ class SurveillanceThread(threading.Thread):
 
 
 class SecuritySkill(BaseSkill):
-    """Навык управления безопасностью помещения и заставками."""
-    
+    """Навык охраны: камера, гашение экрана и тревожные снимки."""
+
     def __init__(self):
         self.surveillance_thread = None
-        self.black_screen_process = None
         self._arm_lock = threading.Lock()
         self._arm_id = 0
+        self._blank_stop = threading.Event()
+        self._blank_thread = None
+        self._blank_logged = False
 
     def _bump_arm(self) -> int:
         with self._arm_lock:
@@ -170,12 +232,12 @@ class SecuritySkill(BaseSkill):
         self.surveillance_thread.start()
 
     def on_disabled(self) -> None:
-        """Тихо гасит камеру и заставку, если охрану выключили тумблером."""
+        """Тихо гасит камеру и включает экран, если охрану выключили тумблером."""
         self._bump_arm()
         try:
             self.control_screens(True)
         except Exception as exc:
-            logging.debug("[Охрана] Не удалось убрать заставку: %s", exc)
+            logging.debug("[Охрана] Не удалось включить экран: %s", exc)
         self._stop_camera()
         if self.surveillance_thread is None:
             logging.info("[Охрана] Наблюдение остановлено: навык выключен в настройках.")
@@ -220,23 +282,51 @@ class SecuritySkill(BaseSkill):
             return True
         return False
 
+    def _apply_blank(self) -> None:
+        if set_display_power(False):
+            if not self._blank_logged:
+                logging.info("[Охрана] Экран выключен.")
+                self._blank_logged = True
+            return
+        if not self._blank_logged:
+            logging.error("[Охрана] Не удалось выключить экран через Mutter.")
+            self._blank_logged = True
+
+    def _restore_screens(self) -> None:
+        if set_display_power(True):
+            logging.info("[Охрана] Экран включен.")
+        else:
+            logging.error("[Охрана] Не удалось включить экран через Mutter.")
+        self._blank_logged = False
+
+    def _start_keep_blank(self) -> None:
+        self._stop_keep_blank(restore=False)
+        self._blank_stop = threading.Event()
+        self._blank_logged = False
+        self._apply_blank()
+
+        def _loop() -> None:
+            while not self._blank_stop.wait(_BLANK_INTERVAL):
+                self._apply_blank()
+
+        self._blank_thread = threading.Thread(target=_loop, daemon=True, name="security-blank")
+        self._blank_thread.start()
+
+    def _stop_keep_blank(self, restore: bool = True) -> None:
+        self._blank_stop.set()
+        thread = self._blank_thread
+        self._blank_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        if restore:
+            self._restore_screens()
+
     def control_screens(self, turn_on: bool):
-        """Управление черной заставкой на экранах."""
-        try:
-            if turn_on:
-                if self.black_screen_process is not None:
-                    self.black_screen_process.terminate()
-                    self.black_screen_process = None
-                    logging.info("[Система] Черная заставка отключена.")
-            else:
-                if self.black_screen_process is None:
-                    self.black_screen_process = subprocess.Popen([
-                        sys.executable, "-c",
-                        "import tkinter as tk; r=tk.Tk(); r.overrideredirect(True); r.configure(bg='black'); w=r.winfo_vrootwidth(); h=r.winfo_vrootheight(); r.geometry(f'{w}x{h}+0+0'); r.config(cursor='none'); r.bind('<Escape>', lambda e: r.destroy()); r.mainloop()"
-                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    logging.info("[Система] Черная заставка активирована на всех экранах.")
-        except Exception as e:
-            logging.error(f"Ошибка управления заставкой: {e}")
+        """Гасит мониторы на охране и включает их при снятии."""
+        if turn_on:
+            self._stop_keep_blank(restore=True)
+        else:
+            self._start_keep_blank()
 
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text

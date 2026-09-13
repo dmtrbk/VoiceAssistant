@@ -1,4 +1,5 @@
 import os
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -10,7 +11,7 @@ from skill_settings import (
     ordered_skill_ids,
 )
 from skills.groq_client import FAST_MODEL, STRONG_MODEL, groq_model_choices, model_chain
-from skills.security import SecuritySkill
+from skills.security import SecuritySkill, set_display_power
 from skills.assistant_settings import AssistantSettingsSkill
 from skills.base import RequestContext
 
@@ -41,6 +42,30 @@ class TestSecurityAndSettings(unittest.TestCase):
         self.assertFalse(sec._is_disarm_command("я тут подумал о планах"))
         self.assertFalse(sec._is_disarm_command("я тут сижу работаю"))
         self.assertFalse(sec._is_disarm_command("я дома сделаю потом"))
+
+    def test_display_power_sets_mutter_mode(self):
+        with patch("skills.security.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="()\n", stderr="")
+            self.assertTrue(set_display_power(False))
+            off_args = run.call_args_list[0].args[0]
+            self.assertIn("org.gnome.Mutter.DisplayConfig", off_args)
+            self.assertIn("PowerSaveMode", off_args)
+            self.assertIn("<int32 3>", off_args)
+
+            self.assertTrue(set_display_power(True))
+            on_args = run.call_args_list[1].args[0]
+            self.assertIn("<int32 0>", on_args)
+            wakeup_args = run.call_args_list[2].args[0]
+            self.assertTrue(any("WakeUpScreen" in str(part) for part in wakeup_args))
+
+    def test_control_screens_powers_display(self):
+        sec = SecuritySkill()
+        with patch("skills.security.set_display_power", return_value=True) as power:
+            sec.control_screens(False)
+            power.assert_called_with(False)
+            sec.control_screens(True)
+            power.assert_called_with(True)
+            self.assertIsNone(sec._blank_thread)
 
     def test_assistant_settings_skill(self):
         asst = AssistantSettingsSkill()
