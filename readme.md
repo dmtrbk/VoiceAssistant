@@ -129,9 +129,11 @@ chmod +x setup.sh setup_echo_cancel.sh
 Отредактируйте файл `.env`:
 
 ```ini
-# Groq — облачный диалог (старт: openai/gpt-oss-20b; сильная 120B — в настройках)
+# Groq — облачный диалог и гибридное STT Groq Whisper Turbo
 GROQ_API_KEY=ваш_ключ_groq
 GROQ_MODEL=openai/gpt-oss-20b
+# Режим распознавания речи: hybrid (Vosk + Groq Whisper) или vosk (только оффлайн)
+STT_MODE=hybrid
 
 # T-Invest — навык «Биржа и портфель» (опционально)
 # Сделки голосом по умолчанию выкл (тумблер или TINKOFF_VOICE_TRADE=true).

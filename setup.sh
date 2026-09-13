@@ -58,6 +58,8 @@ if [ ! -f "$ENV_EXAMPLE" ]; then
 # Старт — быстрая 20B. Сильную 120B выбери в настройках (когда Cursor закрыт).
 GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-20b
+# Режим распознавания речи: hybrid (Vosk + Groq Whisper Turbo) или vosk (только оффлайн)
+STT_MODE=hybrid
 
 # T-Invest — навык «Биржа и портфель»
 # Сделки голосом по умолчанию выкл (тумблер или TINKOFF_VOICE_TRADE=true).
@@ -251,7 +253,8 @@ echo "=================================================================="
 echo "    ✅ Установка завершена успешно!                              "
 echo "=================================================================="
 echo "1. Ключи в $PROJECT_DIR/.env:"
-echo "   GROQ_API_KEY — облачный диалог (модель — комбо в настройках, старт 20B)"
+echo "   GROQ_API_KEY — облачный диалог и гибридное STT Groq Whisper Turbo"
+echo "   STT_MODE — режим распознавания: hybrid (Vosk + Whisper) или vosk"
 echo "   TINKOFF_TOKEN — биржа (сводка; сделки — тумблер «Сделки голосом»)"
 echo "   TINKOFF_VOICE_TRADE=true — заявки голосом (по умолчанию выкл)"
 echo "   TINKOFF_AUTO_TRADE=true — фоновые заявки на живом счёте"
