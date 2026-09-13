@@ -18,15 +18,19 @@ from PySide6.QtWidgets import (
 from skill_settings import (
     get_flags,
     get_groq_model,
+    get_persona_hint,
+    get_persona_preset,
     get_stt_mode,
     grouped_skills,
     is_auto_trade_enabled,
     is_cursor_running,
     is_voice_trade_enabled,
     ordered_skill_ids,
+    persona_preset_choices,
     set_auto_trade,
     set_flag,
     set_groq_model,
+    set_persona_preset,
     set_stt_mode,
     set_voice_trade,
     stt_mode_choices,
@@ -95,10 +99,14 @@ class SettingsWindow(QWidget):
         self._model_hint: QLabel | None = None
         self._stt_combo: QComboBox | None = None
         self._stt_hint: QLabel | None = None
+        self._persona_combo: QComboBox | None = None
+        self._persona_hint: QLabel | None = None
         root.addWidget(self._section_label("Распознавание речи"))
         root.addWidget(self._build_stt_card())
         root.addWidget(self._section_label("Модель диалога"))
         root.addWidget(self._build_model_card())
+        root.addWidget(self._section_label("Характер ассистента"))
+        root.addWidget(self._build_persona_card())
 
         subtitle = QLabel("Выключенный навык молчит и в голосе, и в Telegram.")
         subtitle.setObjectName("lead")
@@ -175,6 +183,29 @@ class SettingsWindow(QWidget):
         self._sync_model_row()
         return card
 
+    def _build_persona_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        col = QVBoxLayout(card)
+        col.setContentsMargins(16, 12, 16, 12)
+        col.setSpacing(8)
+
+        combo = QComboBox()
+        for preset_id, title in persona_preset_choices():
+            combo.addItem(title, preset_id)
+        combo.currentIndexChanged.connect(self._on_persona_changed)
+        self._persona_combo = combo
+        col.addWidget(combo)
+
+        hint = QLabel()
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        self._persona_hint = hint
+        col.addWidget(hint)
+        self._sync_persona_row()
+        return card
+
     def _apply_theme(self) -> None:
         self.setStyleSheet(load_palette().stylesheet())
 
@@ -183,7 +214,28 @@ class SettingsWindow(QWidget):
         self._rebuild()
         self._sync_stt_row()
         self._sync_model_row()
+        self._sync_persona_row()
         super().showEvent(event)
+
+    def _sync_persona_row(self) -> None:
+        if self._persona_combo is None or self._persona_hint is None:
+            return
+        current = get_persona_preset()
+        index = self._persona_combo.findData(current)
+        self._persona_combo.blockSignals(True)
+        if index >= 0:
+            self._persona_combo.setCurrentIndex(index)
+        self._persona_combo.blockSignals(False)
+        self._persona_hint.setText(get_persona_hint(current))
+
+    def _on_persona_changed(self, index: int) -> None:
+        if self._persona_combo is None or index < 0:
+            return
+        preset_id = self._persona_combo.itemData(index)
+        if not preset_id:
+            return
+        set_persona_preset(str(preset_id))
+        self._sync_persona_row()
 
     def _sync_stt_row(self) -> None:
         if self._stt_combo is None or self._stt_hint is None:

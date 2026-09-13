@@ -60,6 +60,8 @@ GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-20b
 # Режим распознавания речи: hybrid (Vosk + Groq Whisper Turbo) или vosk (только оффлайн)
 STT_MODE=hybrid
+# Характер ассистента: jarvis, sarcastic, brutal, buddy, custom
+PERSONA_PRESET=jarvis
 
 # T-Invest — навык «Биржа и портфель»
 # Сделки голосом по умолчанию выкл (тумблер или TINKOFF_VOICE_TRADE=true).

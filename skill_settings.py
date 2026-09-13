@@ -74,6 +74,7 @@ AUTO_TRADE_KEY = "stocks_auto_trade"
 VOICE_TRADE_KEY = "stocks_voice_trade"
 GROQ_MODEL_KEY = "groq_model"
 STT_MODE_KEY = "stt_mode"
+PERSONA_PRESET_KEY = "persona_preset"
 _CURSOR_COMM = frozenset({"cursor", "cursor-bin"})
 
 # GUI-поток читает очередь и открывает окно. Голос только кладёт «open».
@@ -85,6 +86,7 @@ _auto_trade = False
 _voice_trade = False
 _groq_model = ""
 _stt_mode = ""
+_persona_preset = ""
 _loaded = False
 _SKILL_MAP: dict[str, Any] | None = None
 
@@ -130,6 +132,13 @@ def _env_stt_mode_default() -> str:
 
 def stt_mode_choices() -> list[tuple[str, str]]:
     return list(STT_MODE_CHOICES)
+
+
+def _env_persona_preset_default() -> str:
+    from skills.persona import normalize_persona_preset
+
+    raw = os.getenv("PERSONA_PRESET") or os.getenv("JARVIS_PERSONA")
+    return normalize_persona_preset(raw)
 
 
 def is_cursor_running() -> bool:
@@ -220,6 +229,7 @@ def _persist() -> None:
         snapshot[VOICE_TRADE_KEY] = bool(_voice_trade)
         snapshot[GROQ_MODEL_KEY] = _groq_model
         snapshot[STT_MODE_KEY] = _stt_mode
+        snapshot[PERSONA_PRESET_KEY] = _persona_preset
     try:
         _write_json_atomic(CONFIG_PATH, snapshot)
     except Exception as exc:
@@ -228,12 +238,13 @@ def _persist() -> None:
 
 def reload_from_disk() -> dict[str, bool]:
     """Читает skills_enabled.json. Нет ключа — навык включён."""
-    global _enabled, _auto_trade, _voice_trade, _groq_model, _stt_mode
+    global _enabled, _auto_trade, _voice_trade, _groq_model, _stt_mode, _persona_preset
     flags = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
     auto_trade = _env_auto_trade_default()
     voice_trade = _env_voice_trade_default()
     groq_model = _env_groq_model_default()
     stt_mode = _env_stt_mode_default()
+    persona_preset = _env_persona_preset_default()
     # Ключи в JSON важнее пустых TINKOFF_* / GROQ_MODEL.
     if os.path.exists(CONFIG_PATH):
         try:
@@ -253,6 +264,10 @@ def reload_from_disk() -> dict[str, bool]:
                     groq_model = normalize_groq_model(str(raw[GROQ_MODEL_KEY] or ""))
                 if STT_MODE_KEY in raw:
                     stt_mode = normalize_stt_mode(str(raw[STT_MODE_KEY] or ""))
+                if PERSONA_PRESET_KEY in raw:
+                    from skills.persona import normalize_persona_preset
+
+                    persona_preset = normalize_persona_preset(str(raw[PERSONA_PRESET_KEY] or ""))
         except Exception as exc:
             logging.error("[Настройки] Не удалось прочитать %s: %s", CONFIG_PATH, exc)
     with _lock:
@@ -261,6 +276,7 @@ def reload_from_disk() -> dict[str, bool]:
         _voice_trade = voice_trade
         _groq_model = groq_model
         _stt_mode = stt_mode
+        _persona_preset = persona_preset
     return dict(flags)
 
 
@@ -369,6 +385,48 @@ def set_stt_mode(mode: str) -> None:
     os.environ["STT_MODE"] = chosen
     _persist()
     logging.info("[Настройки] Распознавание речи: %s", chosen)
+
+
+def get_persona_preset() -> str:
+    """Выбранный пресет характера Джарвиса ('jarvis', 'sarcastic', 'brutal', 'buddy', 'custom')."""
+    _ensure_loaded()
+    with _lock:
+        return _persona_preset or _env_persona_preset_default()
+
+
+def set_persona_preset(preset: str) -> None:
+    """Переключает характер ассистента, сохраняет и обновляет промпт в памяти."""
+    global _persona_preset
+    from skills.persona import normalize_persona_preset
+
+    chosen = normalize_persona_preset(preset)
+    _ensure_loaded()
+    with _lock:
+        was = _persona_preset
+        _persona_preset = chosen
+    os.environ["PERSONA_PRESET"] = chosen
+    _persist()
+    if was != chosen:
+        logging.info("[Настройки] Характер Джарвиса изменён: %s -> %s", was or "jarvis", chosen)
+    try:
+        from skills import ai_chat_skill
+
+        if ai_chat_skill is not None:
+            ai_chat_skill.reload_persona()
+    except Exception as exc:
+        logging.debug("[Настройки] reload_persona: %s", exc)
+
+
+def persona_preset_choices() -> list[tuple[str, str]]:
+    from skills.persona import persona_preset_choices as _choices
+
+    return _choices()
+
+
+def get_persona_hint(preset: str) -> str:
+    from skills.persona import get_persona_hint as _hint
+
+    return _hint(preset)
 
 
 def is_online_stt_enabled() -> bool:

@@ -228,53 +228,51 @@ class AIChatSkill(BaseSkill):
         except Exception:
             return (os.getenv("GROQ_MODEL") or "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
 
-    def _load_persona(self) -> None:
-        # Живой промпт — skills/persona_config.json; default ниже только если файла нет.
-        default_persona = (
-            "Ты — Джарвис, мужчина, голосовой помощник. О себе только мужской род: "
-            "понял, рад, сделал, готов, согласен, уверен, должен. "
-            "Никогда не говори о себе в женском роде: не поняла, не рада, не готова, не сделала.\n\n"
-            "Говори как в живом разговоре: одно-два коротких предложения, спокойно, без канцелярита. "
-            "Коротко учти сказанное хозяином — одну деталь, не пересказ всей фразы. "
-            "Не повторяй запрос целиком. Не используй штампы вроде «чем могу помочь», «я языковая модель». "
-            "Не остроумничай в каждой реплике. Не спрашивай «чем ещё помочь» после каждого ответа. "
-            "Если не хватает одного слота — один короткий вопрос только про него. "
-            "Если следующий шаг очевиден — можно предложить его одним вопросом, иначе молчи и жди.\n\n"
-            "Ответ будет озвучен синтезатором речи. Запрещены markdown, списки, эмодзи, смайлики, ссылки, "
-            "теги think и любые непроизносимые символы. Только связный текст и обычные знаки препинания.\n\n"
-            "Ты не включаешь музыку, свет, таймеры и программы из этого чата. "
-            "Если не хватает одного слота — спроси только его. Не гадай и не ищи в сети вместо уточнения. "
-            "Не учи говорить команды и не проси перефразировать. "
-            "Не говори, что уже что-то включил, выключил или запустил, если этого нет в фактах о действиях.\n\n"
-            "Есть навык биржи и брокерского счёта Т-Инвест. Прибыль идёт на фонд модернизации: "
-            "подписки на более мощные модели ИИ и новое железо. "
-            "Сам решаешь состав портфеля, хозяин не обязан выбирать бумагу. "
-            "Сам не поднимай тему акций без повода. Если хозяин спросил про акции, портфель или торговлю — "
-            "отвечай спокойно, точно и по делу, без советов покупать или продавать."
-        )
+    def reload_persona(self) -> None:
+        """Перезагружает характер и обновляет системную инструкцию в истории."""
+        self._load_persona()
 
-        if not os.path.exists(self.persona_config_path):
-            try:
-                _write_json_atomic(
-                    self.persona_config_path,
-                    {"persona_prompt": default_persona},
-                    indent=4,
-                )
-                self.persona_prompt = default_persona
-            except Exception:
-                self.persona_prompt = default_persona
-        else:
-            try:
-                with open(self.persona_config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    self.persona_prompt = config.get("persona_prompt", default_persona)
-            except Exception:
-                self.persona_prompt = default_persona
+    def _load_persona(self) -> None:
+        try:
+            from skills.persona import get_effective_persona_prompt
+
+            self.persona_prompt = get_effective_persona_prompt(self.persona_config_path)
+        except Exception as exc:
+            logging.warning("[Groq] Ошибка загрузки пресета характера: %s", exc)
+            default_persona = (
+                "Ты — Джарвис, мужчина, голосовой помощник. О себе только мужской род: "
+                "понял, рад, сделал, готов, согласен, уверен, должен. "
+                "Никогда не говори о себе в женском роде: не поняла, не рада, не готова, не сделала.\n\n"
+                "Говори как в живом разговоре: одно-два коротких предложения, спокойно, без канцелярита. "
+                "Коротко учти сказанное хозяином — одну деталь, не пересказ всей фразы. "
+                "Не повторяй запрос целиком. Не используй штампы вроде «чем могу помочь», «я языковая модель». "
+                "Не остроумничай в каждой реплике. Не спрашивай «чем ещё помочь» после каждого ответа."
+            )
+            if not os.path.exists(self.persona_config_path):
+                try:
+                    _write_json_atomic(
+                        self.persona_config_path,
+                        {"persona_prompt": default_persona},
+                        indent=4,
+                    )
+                    self.persona_prompt = default_persona
+                except Exception:
+                    self.persona_prompt = default_persona
+            else:
+                try:
+                    with open(self.persona_config_path, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                        self.persona_prompt = config.get("persona_prompt", default_persona)
+                except Exception:
+                    self.persona_prompt = default_persona
 
         self._init_history_with_persona()
 
     def _init_history_with_persona(self) -> None:
-        self.history = [{"role": "system", "content": self.persona_prompt}]
+        if not self.history:
+            self.history = [{"role": "system", "content": self.persona_prompt}]
+        else:
+            self.history[0] = {"role": "system", "content": self.persona_prompt}
 
     def _trim_history(self) -> None:
         overflow = len(self.history) - 1 - MAX_LIVE_MESSAGES

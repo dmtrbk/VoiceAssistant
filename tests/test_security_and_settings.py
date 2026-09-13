@@ -86,6 +86,15 @@ class TestSecurityAndSettings(unittest.TestCase):
         self.assertEqual(set(ordered), OPTIONAL_IDS)
         self.assertEqual(len(ordered), len(set(ordered)))
 
+    def test_persona_choices_present(self):
+        from skill_settings import get_persona_preset, persona_preset_choices
+        choices = persona_preset_choices()
+        self.assertTrue(any("Классический" in title for _pid, title in choices))
+        self.assertTrue(any("Саркастичный" in title for _pid, title in choices))
+        self.assertTrue(any("Брутальный" in title for _pid, title in choices))
+        self.assertTrue(any("Бро" in title for _pid, title in choices))
+        self.assertIn(get_persona_preset(), {"jarvis", "sarcastic", "brutal", "buddy", "custom"})
+
 
 if __name__ == "__main__":
     unittest.main()
