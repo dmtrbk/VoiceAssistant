@@ -4,7 +4,7 @@ import random
 import re
 import logging
 from skills.base import BaseSkill, RequestContext
-from skills.text_utils import extract_int, plural
+from skills.text_utils import extract_int
 from context_manager import set_active_context, clear_active_context
 
 logger = logging.getLogger(__name__)
@@ -12,10 +12,6 @@ logger = logging.getLogger(__name__)
 
 def _extract_int_from_text(text: str) -> int | None:
     return extract_int(text)
-
-
-def _attempts_str(n: int) -> str:
-    return f"{n} {plural(n, 'попытку', 'попытки', 'попыток')}"
 
 
 class GuessNumberGame:
@@ -32,24 +28,23 @@ class GuessNumberGame:
         """
         clean = user_text.lower().strip()
         if any(w in clean for w in ["сдаюсь", "хватит", "стоп", "выход", "закончить"]):
-            speak_callback(f"Игра окончена. Я загадал число {self.secret}.")
+            speak_callback(f"Было {self.secret}.")
             return True
 
         num = _extract_int_from_text(clean)
         if num is None:
-            speak_callback("Назовите число от 1 до 100 или скажите 'сдаюсь'.")
+            speak_callback("Число.")
             return False
 
         self.attempts += 1
         if num < self.secret:
-            speak_callback("Моё число больше.")
+            speak_callback("Больше.")
             return False
         elif num > self.secret:
-            speak_callback("Моё число меньше.")
+            speak_callback("Меньше.")
             return False
         else:
-            att_text = _attempts_str(self.attempts)
-            speak_callback(f"В точку! Вы угадали число {self.secret} за {att_text}! Отличная игра.")
+            speak_callback(f"Верно. {self.secret}.")
             return True
 
 
@@ -101,28 +96,26 @@ class GamesAndRandomSkill(BaseSkill):
                 name="game_more_less",
                 handler=game.handle_turn,
                 timeout_sec=60.0,
-                on_exit=lambda speak: speak(f"Игра окончена. Было загадано число {game.secret}."),
+                on_exit=lambda speak: speak(f"Было {game.secret}."),
                 expire_speak=context.alert_speak or context.speak,
             )
-            context.speak("Я загадал число от 1 до 100. Попробуйте угадать! Называйте число.")
+            context.speak("Загадал число.")
             return
 
         if any(t in text for t in DICE_TRIGGERS):
             if "d20" in text or "двадцатигранник" in text:
                 val = random.randint(1, 20)
-                context.speak(f"Бросил двадцатигранник. Выпало {val}.")
+                context.speak(f"{val}.")
                 return
 
             if "два" in text or "2" in text or "пару" in text:
                 d1 = random.randint(1, 6)
                 d2 = random.randint(1, 6)
-                context.speak(
-                    f"Бросил два кубика. На первом {d1}, на втором {d2}. В сумме {d1 + d2}."
-                )
+                context.speak(f"{d1} и {d2}.")
                 return
 
             val = random.randint(1, 6)
-            context.speak(f"Бросил кубик. Выпало {val}.")
+            context.speak(f"{val}.")
             return
 
         if any(t in text for t in RANDOM_TRIGGERS):
@@ -133,18 +126,18 @@ class GamesAndRandomSkill(BaseSkill):
                 if min_v > max_v:
                     min_v, max_v = max_v, min_v
                 val = random.randint(min_v, max_v)
-                context.speak(f"Случайное число от {min_v} до {max_v}: {val}.")
+                context.speak(f"{val}.")
                 return
 
             match_single = re.search(r"до\s+(\d+)", text)
             if match_single:
                 max_v = int(match_single.group(1))
                 val = random.randint(1, max(1, max_v))
-                context.speak(f"Случайное число до {max_v}: {val}.")
+                context.speak(f"{val}.")
                 return
 
             val = random.randint(1, 100)
-            context.speak(f"Случайное число: {val}.")
+            context.speak(f"{val}.")
             return
 
         if "или" in text:
@@ -155,15 +148,7 @@ class GamesAndRandomSkill(BaseSkill):
             options = [p.strip() for p in parts.split("или") if p.strip()]
             if len(options) >= 2:
                 chosen = random.choice(options).rstrip(".,!?")
-                templates = [
-                    f"Я выбираю {chosen}.",
-                    f"Определённо {chosen}.",
-                    f"Мой выбор — {chosen}.",
-                    f"Думаю, лучше {chosen}.",
-                ]
-                context.speak(random.choice(templates))
+                context.speak(f"{chosen}.")
                 return
 
-        context.speak(
-            "Не удалось определить параметры игры. Скажите, например: брось кубик или сыграем в больше меньше."
-        )
+        context.speak("Не понял.")

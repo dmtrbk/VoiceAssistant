@@ -133,7 +133,7 @@ class CalculatorSkill(BaseSkill):
             pct_val = float(pct_match.group(1))
             total_val = float(pct_match.group(2))
             res = (pct_val / 100.0) * total_val
-            context.speak(f"{format_calc_result(pct_val)} процентов от {format_calc_result(total_val)} — это {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         # 2. Квадратный корень: "корень из 144"
@@ -141,10 +141,10 @@ class CalculatorSkill(BaseSkill):
         if sqrt_match:
             num = float(sqrt_match.group(1))
             if num < 0:
-                context.speak("Из отрицательных чисел квадратный корень не извлекается.")
+                context.speak("Нельзя.")
                 return
             res = math.sqrt(num)
-            context.speak(f"Квадратный корень из {format_calc_result(num)} равен {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         # 3. Степени: "5 в квадрате", "2 в кубе", "2 в 10 степени", "2 в степени 8"
@@ -152,14 +152,14 @@ class CalculatorSkill(BaseSkill):
         if sq_match:
             num = float(sq_match.group(1))
             res = num ** 2
-            context.speak(f"{format_calc_result(num)} в квадрате будет {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         cube_match = re.search(r"(\d+(?:\.\d+)?)\s*в\s*кубе", normalized)
         if cube_match:
             num = float(cube_match.group(1))
             res = num ** 3
-            context.speak(f"{format_calc_result(num)} в кубе будет {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         pow_match = re.search(r"(\d+(?:\.\d+)?)\s*в\s*(?:(\d+(?:\.\d+)?)\s*(?:-й|-ой)?\s*)?(?:степени|степень)\s*(\d+(?:\.\d+)?)?", normalized)
@@ -170,10 +170,10 @@ class CalculatorSkill(BaseSkill):
                 exp_num = float(exp_val)
                 try:
                     res = base_num ** exp_num
-                    context.speak(f"{format_calc_result(base_num)} в степени {format_calc_result(exp_num)} равно {format_calc_result(res)}.")
+                    context.speak(f"{format_calc_result(res)}.")
                     return
                 except OverflowError:
-                    context.speak("Получилось слишком большое число!")
+                    context.speak("Слишком большое.")
                     return
 
         # 4. Префиксные команды деления: "раздели 100 на 4", "подели 250 на 5"
@@ -182,10 +182,10 @@ class CalculatorSkill(BaseSkill):
             n1 = float(prefix_div.group(1))
             n2 = float(prefix_div.group(2))
             if n2 == 0:
-                context.speak("На ноль делить нельзя!")
+                context.speak("Нельзя.")
                 return
             res = n1 / n2
-            context.speak(f"Получается {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         # 5. Префиксные команды умножения: "умножь 25 на 4"
@@ -194,7 +194,7 @@ class CalculatorSkill(BaseSkill):
             n1 = float(prefix_mult.group(1))
             n2 = float(prefix_mult.group(2))
             res = n1 * n2
-            context.speak(f"Будет {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         # 6. Префиксные сложение/вычитание: "прибавь к 10 5", "отними от 20 7"
@@ -203,7 +203,7 @@ class CalculatorSkill(BaseSkill):
             n1 = float(prefix_add.group(1))
             n2 = float(prefix_add.group(2))
             res = n1 + n2
-            context.speak(f"Будет {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         prefix_sub = re.search(r"(?:отними|вычти)\s*(?:из|от\s*)?(\d+(?:\.\d+)?)\s*(\d+(?:\.\d+)?)", normalized)
@@ -211,7 +211,7 @@ class CalculatorSkill(BaseSkill):
             n1 = float(prefix_sub.group(1))
             n2 = float(prefix_sub.group(2))
             res = n1 - n2
-            context.speak(f"Будет {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         # 7. Инфиксная арифметика (+, -, *, /)
@@ -220,7 +220,7 @@ class CalculatorSkill(BaseSkill):
             n1 = float(mult_match.group(1))
             n2 = float(mult_match.group(2))
             res = n1 * n2
-            context.speak(f"Будет {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         div_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:разделить на|поделить на|раздели на|подели на|/|:)\s*(\d+(?:\.\d+)?)", normalized)
@@ -228,10 +228,10 @@ class CalculatorSkill(BaseSkill):
             n1 = float(div_match.group(1))
             n2 = float(div_match.group(2))
             if n2 == 0:
-                context.speak("На ноль делить нельзя!")
+                context.speak("Нельзя.")
                 return
             res = n1 / n2
-            context.speak(f"Получается {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         plus_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:плюс|прибавить|\+)\s*(\d+(?:\.\d+)?)", normalized)
@@ -239,7 +239,7 @@ class CalculatorSkill(BaseSkill):
             n1 = float(plus_match.group(1))
             n2 = float(plus_match.group(2))
             res = n1 + n2
-            context.speak(f"Будет {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
         minus_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:минус|отнять|-)\s*(\d+(?:\.\d+)?)", normalized)
@@ -247,7 +247,7 @@ class CalculatorSkill(BaseSkill):
             n1 = float(minus_match.group(1))
             n2 = float(minus_match.group(2))
             res = n1 - n2
-            context.speak(f"Будет {format_calc_result(res)}.")
+            context.speak(f"{format_calc_result(res)}.")
             return
 
-        context.speak("Извините, не смог посчитать это выражение.")
+        context.speak("Не посчитал.")

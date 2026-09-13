@@ -23,6 +23,9 @@ from skills.groq_client import (
 )
 from runtime_state import speak_epoch
 from triggers import is_self_echo
+from tts_cache import SYSTEM_CACHE_PHRASES
+
+_SKIP_HISTORY = frozenset(phrase.strip().lower() for phrase in SYSTEM_CACHE_PHRASES)
 
 SHARED_EVENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_events.json")
 _EVENTS_LOCK = threading.Lock()
@@ -228,7 +231,9 @@ class AIChatSkill(BaseSkill):
             "Ты — Джарвис, мужчина, голосовой помощник. О себе только мужской род: "
             "понял, рад, сделал, готов, согласен, уверен, должен. "
             "Никогда не говори о себе в женском роде: не поняла, не рада, не готова, не сделала.\n\n"
-            "Отвечай как в живом разговоре: 1–3 коротких предложения, простой русский, без канцелярита. "
+            "Отвечай лаконично: одно короткое предложение. "
+            "Подтверждение действия — одно слово-глагол без объекта: включаю, рисую, открываю, ищу. "
+            "Не повторяй запрос хозяина. "
             "Не используй штампы вроде «чем могу помочь», «я языковая модель», «как искусственный интеллект». "
             "Не остроумничай в каждой реплике. Не заканчивай реплику вопросом к пользователю — дождись, пока он сам скажет.\n\n"
             "Ответ будет озвучен синтезатором речи. Запрещены markdown, списки, эмодзи, смайлики, ссылки, "
@@ -317,6 +322,8 @@ class AIChatSkill(BaseSkill):
         user_text = (user_text or "").strip()
         assistant_text = (assistant_text or "").strip()
         if not user_text or not assistant_text or not self.history:
+            return
+        if assistant_text.lower() in _SKIP_HISTORY:
             return
 
         with _HISTORY_LOCK:
@@ -580,7 +587,7 @@ class AIChatSkill(BaseSkill):
 
     def execute(self, context: RequestContext) -> None:
         if not self.client:
-            context.speak("Извините, облачный модуль общения сейчас недоступен.")
+            context.speak("Недоступен.")
             return
 
         text = str(context.raw_text or "").strip()
@@ -594,20 +601,20 @@ class AIChatSkill(BaseSkill):
         if "забудь все" in lowered or "очисти память" in lowered:
             self.reset_chat()
             self._clear_user_profile()
-            context.speak("Память диалога и профиль полностью очищены.")
+            context.speak("Очистил.")
             return
 
         if "забудь все обо мне" in lowered or "забудь всё обо мне" in lowered or "очисти профиль" in lowered:
             self._clear_user_profile()
-            context.speak("Я очистил все сохранённые сведения о вас.")
+            context.speak("Очистил.")
             return
 
         if any(lowered.startswith(p) for p in ("забудь, что", "забудь что", "удали факт")):
             query = re.sub(r"^(?:забудь,?\s*что|удали\s+факт)\s+", "", text, flags=re.IGNORECASE).strip()
             if query and self._remove_matching_fact(query):
-                context.speak(f"Удалил из памяти факт: {query}.")
+                context.speak("Удалил.")
             else:
-                context.speak("Не нашёл подходящей записи в памяти.")
+                context.speak("Не нашёл.")
             return
 
         if any(p in lowered for p in ("что ты обо мне знаешь", "что ты обо мне помнишь", "мои данные", "какие факты ты помнишь", "мой профиль")):
@@ -615,10 +622,7 @@ class AIChatSkill(BaseSkill):
             name = profile.get("user_name", "")
             facts = profile.get("facts", [])
             if not name and not facts:
-                context.speak(
-                    "Пока я ничего о вас не сохранял. "
-                    "Вы можете сказать: «Джарвис, запомни, что меня зовут Дмитрий» или «Запомни, что я люблю джаз»."
-                )
+                context.speak("Ничего.")
                 return
             lines = []
             if name:
@@ -626,10 +630,10 @@ class AIChatSkill(BaseSkill):
             if facts:
                 if channel == "voice":
                     preview = facts[:2]
-                    spoken = "Я помню: " + "; ".join(preview) + "."
+                    spoken = "; ".join(preview) + "."
                     extra = len(facts) - len(preview)
                     if extra > 0:
-                        spoken += f" Ещё {extra} в профиле — лучше смотреть в чате."
+                        spoken += f" Ещё {extra}."
                     lines.append(spoken)
                 else:
                     lines.append("Сохранённые факты:\n" + "\n".join(f"• {f}" for f in facts))
@@ -648,7 +652,7 @@ class AIChatSkill(BaseSkill):
             if name_match:
                 self._set_user_name(name_match.group(1))
             self._add_user_fact(fact)
-            context.speak(f"Запомнил: {fact}.")
+            context.speak("Запомнил.")
             return
 
         # Знакомство ("меня зовут [Имя]")
@@ -657,7 +661,7 @@ class AIChatSkill(BaseSkill):
             u_name = name_only_match.group(1).strip().title()
             self._set_user_name(u_name)
             self._add_user_fact(f"Имя пользователя: {u_name}")
-            context.speak(f"Приятно познакомиться, {u_name}. Я запомнил ваше имя.")
+            context.speak("Запомнил.")
             return
 
         # 2. Фильтрация эха (только в голосовом канале)
@@ -725,17 +729,21 @@ class AIChatSkill(BaseSkill):
         events = self._get_recent_system_events()
         if events:
             extra += events
+        extra += (
+            " Картинки рисует отдельный навык. Не говори, что рисуешь, нарисовал "
+            "или отправил фото в Telegram — даже если в фактах есть запись про картинку."
+        )
 
         # Формат выдачи в зависимости от канала
         if channel == "voice":
             extra += (
-                "\n[Канал: Голосовой ассистент]. Ответ будет озвучен синтезатором речи. "
-                "Отвечай 2–5 короткими предложениями, простым языком, без списков, без Markdown, "
-                "без смайликов, без ссылок и без спецсимволов. Только связный произносимый текст. "
-                "Если фраза хозяина похожа на обрывок распознавания речи и смысл неясен — "
-                "одним предложением переспроси, не выдумывай историю из каши слов."
+                "\n[Канал: Голосовой ассистент]. Ответ озвучит синтез речи. "
+                "Подтверждение действия — одно слово: включаю, рисую, открываю, ищу, закрываю. "
+                "Не повторяй объект, станцию, песню или сцену. "
+                "Одно короткое предложение, без списков и Markdown. "
+                "Обрывок распознавания — «не расслышал»."
             )
-            max_tokens = 450
+            max_tokens = 180
         else:
             extra += (
                 f"\n[Канал: {channel.upper()} чат]. Пользователь читает ответ текстом на экране. "
@@ -806,12 +814,12 @@ class AIChatSkill(BaseSkill):
             cleaned_reply = ""
 
             if channel == "voice":
-                sentences, chars = 5, 560
+                sentences, chars = 2, 180
                 if (wants_report or mentions_market) and trading_clip_limit is not None:
                     try:
                         sentences, chars = trading_clip_limit()
                     except Exception:
-                        sentences, chars = 5, 560
+                        sentences, chars = 2, 180
 
                 streamed = False
                 for model_name in unique_models:
@@ -883,8 +891,8 @@ class AIChatSkill(BaseSkill):
                     self._discard_last_user(text)
                     return
                 logging.warning("[Groq] Пустой ответ после очистки.")
-                speak_func("Я затрудняюсь с ответом.")
-                cleaned_reply = "Я затрудняюсь с ответом."
+                speak_func("Не вышло.")
+                cleaned_reply = "Не вышло."
 
             if aborted():
                 logging.info("[Groq] Ответ оборван после начала озвучки, в историю не пишу.")
@@ -900,4 +908,4 @@ class AIChatSkill(BaseSkill):
             logging.error(f"[Groq] Ошибка запроса к API: {e}")
             self._discard_last_user(text)
             if not aborted():
-                speak_func("Моё облако мыслей временно недоступно.")
+                speak_func("Недоступен.")

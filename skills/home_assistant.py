@@ -263,24 +263,21 @@ class HomeAssistantSkill(BaseSkill):
             and ent["domain"] != "scene"
         ]
         if not active:
-            context.speak("В умном доме сейчас ничего явно не включено.")
+            context.speak("Ничего.")
             return
         names = [ent["name"] for ent in active[:6]]
         tail = "" if len(active) <= 6 else f" И ещё {len(active) - 6}."
-        context.speak("Сейчас включено: " + ", ".join(names) + "." + tail)
+        context.speak(", ".join(names) + "." + tail)
 
     def execute(self, context: RequestContext) -> None:
         self._reload_env()
         text = _norm(context.raw_text)
         if not self._token:
-            context.speak(
-                "Для умного дома нужен токен Home Assistant. "
-                "Пропиши HA_TOKEN в файле энв."
-            )
+            context.speak("Нет токена.")
             return
 
         if not self._refresh_states(force=True):
-            context.speak("Дом не ответил. Проверь, что Home Assistant запущен.")
+            context.speak("Дом молчит.")
             return
 
         if any(hint in text for hint in _LIST_HINTS) and not any(v in text for v in _ON + _OFF):
@@ -308,16 +305,16 @@ class HomeAssistantSkill(BaseSkill):
             if any(marker in text for marker in _HA_MARKERS):
                 self._speak_list(context)
                 return
-            context.speak("Не нашёл такое устройство в умном доме.")
+            context.speak("Не нашёл.")
             return
 
         if want_off:
             ok = self._turn(entity, False)
-            context.speak(f"Выключил {entity['name']}." if ok else f"Не смог выключить {entity['name']}.")
+            context.speak("Выключил." if ok else "Не вышло.")
             return
         if want_on or entity["domain"] in {"scene", "script"}:
             ok = self._turn(entity, True)
-            context.speak(f"Включил {entity['name']}." if ok else f"Не смог включить {entity['name']}.")
+            context.speak("Включил." if ok else "Не вышло.")
             return
 
         state = entity["state"]

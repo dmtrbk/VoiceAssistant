@@ -79,7 +79,7 @@ class TestStocks(unittest.TestCase):
             place.assert_not_called()
         self.assertEqual(
             spoken,
-            ["Голосовые сделки выключены. Если нужно — зайди в приложение брокера."],
+            ["Сделки выключены."],
         )
 
     def test_quote_works_when_voice_trade_off(self):

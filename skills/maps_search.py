@@ -139,7 +139,7 @@ class MapsSearchSkill(BaseSkill):
             query = text
 
         if not query:
-            context.speak("Какое именно место вы хотите найти?")
+            context.speak("Куда?")
             return
 
         # Преобразуем текстовые числительные в цифры (например, "десять" -> "10")
@@ -151,16 +151,16 @@ class MapsSearchSkill(BaseSkill):
         if is_route:
             if any(w in text for w in ["пройти", "дойти", "пешком"]):
                 transport_type = "pedestrian"
-                context.speak(f"Строю пеший маршрут до: {query}")
+                context.speak("Строю.")
             elif any(w in text for w in ["автобус", "метро", "трамвай", "транспорт", "троллейбус"]):
                 transport_type = "transit"
-                context.speak(f"Строю маршрут на общественном транспорте до: {query}")
+                context.speak("Строю.")
             elif any(w in text for w in ["велосипед", "самокат"]):
                 transport_type = "bicycle"
-                context.speak(f"Строю велосипедный маршрут до: {query}")
+                context.speak("Строю.")
             else:
                 transport_type = "driving"
-                context.speak(f"Строю автомобильный маршрут до: {query}")
+                context.speak("Строю.")
 
             if self.provider == "yandex":
                 rtt_map = {"driving": "auto", "pedestrian": "pd", "transit": "mt", "bicycle": "bc"}
@@ -174,10 +174,10 @@ class MapsSearchSkill(BaseSkill):
         # 2. Сценарий: Обычный поиск объектов
         else:
             if self.provider == "yandex":
-                context.speak(f"Ищу на Яндекс Картах: {query}")
+                context.speak("Ищу.")
                 maps_url = f"https://yandex.ru/maps/?text={encoded_query}"
             else:
-                context.speak(f"Ищу на Google Картах: {query}")
+                context.speak("Ищу.")
                 maps_url = f"https://www.google.com/maps/search/?api=1&query={encoded_query}"
 
         open_url(maps_url)

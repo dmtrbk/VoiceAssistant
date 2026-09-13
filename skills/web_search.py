@@ -54,49 +54,49 @@ class WebSearchSkill(BaseSkill):
 
         if is_close_browser_text(text):
             if close_browser():
-                context.speak("Закрываю браузер.")
+                context.speak("Закрываю.")
             else:
-                context.speak("Браузер уже закрыт.")
+                context.speak("Уже закрыт.")
             return
         
         # 1. Открытие ИИ-ассистентов
         # Явный запрос на Gemini
         if any(w in text for w in ["джемини", "gemini"]):
-            context.speak("Открываю нейросеть Gemini в браузере.")
+            context.speak("Открываю.")
             open_url("https://gemini.google.com")
             return
             
         # Явный запрос на веб-версию нейросети Алиса
         if any(w in text for w in ["нейросеть алиса", "яндекс алис"]):
-            context.speak("Открываю веб-версию нейросети Алиса в браузере.")
+            context.speak("Открываю.")
             open_url("https://alice.yandex.ru")
             return
 
         # Общий запрос на ИИ (открываем то, что настроено по умолчанию)
         if any(w in text for w in ["включи ии", "открой ии", "запусти ии", "открой нейросеть", "нейросеть"]):
             if self.ai_provider == "gemini":
-                context.speak("Открываю нейросеть Gemini в браузере.")
+                context.speak("Открываю.")
                 open_url("https://gemini.google.com")
             else:
-                context.speak("Открываю нейросеть Алиса ИИ в браузере.")
+                context.speak("Открываю.")
                 open_url("https://alice.yandex.ru")
             return
 
         # 2. Простое открытие главной страницы поисковиков или браузера
         if any(w in text for w in ["открой яндекс", "запусти яндекс", "включи яндекс"]):
-            context.speak("Открываю Яндекс.")
+            context.speak("Открываю.")
             open_url("https://ya.ru")
             return
 
         if any(w in text for w in ["открой гугл", "запусти гугл", "включи гугл"]):
-            context.speak("Открываю Google.")
+            context.speak("Открываю.")
             open_url("https://www.google.com")
             return
 
         if any(w in text for w in ["открой браузер", "запусти браузер", "включи браузер"]):
             # Проверяем, что это не поисковый запрос (например, "найди в браузере...")
             if not any(t in text for t in ["найди", "поиск", "ищи"]):
-                context.speak("Открываю браузер.")
+                context.speak("Открываю.")
                 # В качестве домашней страницы открываем выбранный по умолчанию поисковик
                 start_url = "https://ya.ru" if self.search_provider == "yandex" else "https://www.google.com"
                 open_url(start_url)
@@ -123,21 +123,21 @@ class WebSearchSkill(BaseSkill):
                 
                 # Принудительный поиск в Google
                 if any(g in used_trigger for g in ["гугл", "гугле", "загугли", "погугли"]):
-                    context.speak(f"Ищу в Гугле: {query}")
+                    context.speak("Ищу.")
                     search_url = f"https://www.google.com/search?q={encoded_query}"
                 # Принудительный поиск в Яндексе
                 elif "яндекс" in used_trigger:
-                    context.speak(f"Ищу в Яндексе: {query}")
+                    context.speak("Ищу.")
                     search_url = f"https://ya.ru/search/?text={encoded_query}"
                 # Поиск через провайдера по умолчанию
                 else:
                     if self.search_provider == "google":
-                        context.speak(f"Ищу в Гугле: {query}")
+                        context.speak("Ищу.")
                         search_url = f"https://www.google.com/search?q={encoded_query}"
                     else:
-                        context.speak(f"Ищу в Яндексе: {query}")
+                        context.speak("Ищу.")
                         search_url = f"https://ya.ru/search/?text={encoded_query}"
                     
                 open_url(search_url)
             else:
-                context.speak("Что именно вы хотите найти?")
+                context.speak("Что найти?")

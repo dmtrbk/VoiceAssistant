@@ -1,13 +1,16 @@
 # settings_ui.py
-# Обычное окно Qt: только необязательные навыки. Каркас скрыт.
+# Окно Qt: модель диалога и необязательные навыки. Каркас скрыт.
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -25,6 +28,76 @@ from skill_settings import (
     set_voice_trade,
 )
 from skills.groq_client import FAST_MODEL, groq_model_choices
+from theme_colors import current_palette, load_palette
+
+SKILL_GROUPS = (
+    ("Дом", ("home_assistant", "xiaomi_bulb", "security")),
+    ("Медиа", ("audacious", "movie", "image_gen", "site_apps")),
+    ("Сеть", ("web_search", "wikipedia", "maps", "telegram")),
+    ("Сервисы", ("weather", "stocks", "timer", "calculator")),
+    ("Разное", ("games", "jokes", "pentagon")),
+)
+
+class ToggleSwitch(QCheckBox):
+    """Короткий тумблер без стандартного квадрата Qt."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("toggle")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(44, 26)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def hitButton(self, pos):
+        return self.contentsRect().contains(pos)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        track = QRectF(self.rect()).adjusted(1, 2, -1, -2)
+        palette = current_palette()
+        if not self.isEnabled():
+            track_color = QColor(palette.divider)
+            knob_color = QColor(palette.muted)
+        elif self.isChecked():
+            track_color = QColor(palette.accent)
+            knob_color = QColor(palette.on_knob)
+        else:
+            track_color = QColor(palette.off_track)
+            knob_color = QColor(palette.off_knob)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(track_color)
+        painter.drawRoundedRect(track, track.height() / 2, track.height() / 2)
+        knob = 18
+        y = (self.height() - knob) / 2
+        x = self.width() - knob - 4 if self.isChecked() else 4
+        painter.setBrush(knob_color)
+        painter.drawEllipse(QRectF(x, y, knob, knob))
+        painter.end()
+
+
+def _grouped_skills() -> list[tuple[str, list[tuple[str, str, str]]]]:
+    catalog = {sid: (title, hint) for sid, title, hint in OPTIONAL_SKILLS}
+    seen: set[str] = set()
+    groups: list[tuple[str, list[tuple[str, str, str]]]] = []
+    for name, ids in SKILL_GROUPS:
+        rows = []
+        for sid in ids:
+            item = catalog.get(sid)
+            if item is None:
+                continue
+            rows.append((sid, item[0], item[1]))
+            seen.add(sid)
+        if rows:
+            groups.append((name, rows))
+    leftover = [(sid, title, hint) for sid, title, hint in OPTIONAL_SKILLS if sid not in seen]
+    if leftover:
+        groups.append(("Другое", leftover))
+    return groups
+
+
+def _ordered_skill_ids() -> list[str]:
+    return [sid for _name, rows in _grouped_skills() for sid, _title, _hint in rows]
 
 
 class SettingsWindow(QWidget):
@@ -32,55 +105,38 @@ class SettingsWindow(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setObjectName("root")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowTitle("Настройки Джарвиса")
-        self.setMinimumWidth(380)
-        self.setMinimumHeight(460)
-        self.resize(400, 560)
+        self.setMinimumWidth(420)
+        self.setMinimumHeight(520)
+        self.resize(440, 680)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-        self.setStyleSheet(
-            """
-            QWidget { background: #2d3339; color: #ecf0f1; font-size: 14px; }
-            QLabel#title { font-size: 18px; font-weight: 600; color: #35BF5C; }
-            QLabel#hint { color: #95a5a6; font-size: 12px; }
-            QCheckBox { spacing: 10px; padding: 4px 0; }
-            QCheckBox::indicator { width: 20px; height: 20px; }
-            QComboBox {
-                background: #3d444b; color: #ecf0f1; padding: 4px 8px;
-                border: 1px solid #4d555c; border-radius: 4px; min-height: 26px;
-            }
-            QComboBox::drop-down { border: none; width: 22px; }
-            QComboBox QAbstractItemView {
-                background: #3d444b; color: #ecf0f1; selection-background-color: #1f7a3a;
-            }
-            QFrame#row { border-bottom: 1px solid #3d444b; padding: 6px 0; }
-            QFrame#submenu { padding: 6px 0 2px 22px; }
-            """
-        )
+        self._apply_theme()
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 16)
-        root.setSpacing(10)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(8)
 
         self._model_combo: QComboBox | None = None
         self._model_hint: QLabel | None = None
-        self._add_model_row(root)
+        root.addWidget(self._section_label("Модель диалога"))
+        root.addWidget(self._build_model_card())
 
-        title = QLabel("Навыки")
-        title.setObjectName("title")
-        root.addWidget(title)
-
-        subtitle = QLabel("Выключенный навык не отвечает на голос и в Telegram.")
-        subtitle.setObjectName("hint")
+        subtitle = QLabel("Выключенный навык молчит и в голосе, и в Telegram.")
+        subtitle.setObjectName("lead")
         subtitle.setWordWrap(True)
         root.addWidget(subtitle)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
+        body.setObjectName("root")
         self._list = QVBoxLayout(body)
-        self._list.setContentsMargins(0, 8, 8, 8)
-        self._list.setSpacing(2)
+        self._list.setContentsMargins(0, 0, 6, 8)
+        self._list.setSpacing(16)
         scroll.setWidget(body)
         root.addWidget(scroll)
 
@@ -90,30 +146,43 @@ class SettingsWindow(QWidget):
         self._stocks_menu: QFrame | None = None
         self._rebuild()
 
-    def showEvent(self, event):
-        self._rebuild()
-        self._sync_model_row()
-        super().showEvent(event)
+    def _section_label(self, text: str) -> QLabel:
+        heading = QLabel(text)
+        heading.setObjectName("section")
+        heading.setContentsMargins(4, 8, 0, 0)
+        return heading
 
-    def _add_model_row(self, parent: QVBoxLayout) -> None:
-        heading = QLabel("Модель диалога")
-        heading.setObjectName("title")
-        heading.setStyleSheet("font-size: 15px; font-weight: 600; color: #35BF5C;")
-        parent.addWidget(heading)
+    def _build_model_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        col = QVBoxLayout(card)
+        col.setContentsMargins(16, 12, 16, 12)
+        col.setSpacing(8)
 
         combo = QComboBox()
         for model_id, title in groq_model_choices():
             combo.addItem(title, model_id)
         combo.currentIndexChanged.connect(self._on_model_changed)
         self._model_combo = combo
-        parent.addWidget(combo)
+        col.addWidget(combo)
 
         hint = QLabel()
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         self._model_hint = hint
-        parent.addWidget(hint)
+        col.addWidget(hint)
         self._sync_model_row()
+        return card
+
+    def _apply_theme(self) -> None:
+        self.setStyleSheet(load_palette().stylesheet())
+
+    def showEvent(self, event):
+        self._apply_theme()
+        self._rebuild()
+        self._sync_model_row()
+        super().showEvent(event)
 
     def _sync_model_row(self) -> None:
         if self._model_combo is None or self._model_hint is None:
@@ -132,8 +201,8 @@ class SettingsWindow(QWidget):
         strong = current != FAST_MODEL
         if cursor_on and strong:
             self._model_hint.setText(
-                "Сильная выбрана. Пока открыт Cursor, отвечает быстрая — квота Groq не угорает. "
-                "Закрой редактор, и Джарвис переключится."
+                "Сильная выбрана. Пока открыт Cursor, отвечает быстрая. "
+                "Закрой редактор — Джарвис переключится."
             )
         elif cursor_on:
             self._model_hint.setText(
@@ -157,9 +226,48 @@ class SettingsWindow(QWidget):
         set_groq_model(str(model_id))
         self._sync_model_row()
 
+    def _make_toggle(self, checked: bool) -> QCheckBox:
+        box = ToggleSwitch()
+        box.setChecked(checked)
+        return box
+
+    def _add_text_toggle(
+        self,
+        parent: QVBoxLayout,
+        title: str,
+        hint: str,
+        box: QCheckBox,
+    ) -> None:
+        row = QFrame()
+        row.setObjectName("cardRow")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 6, 0, 6)
+        layout.setSpacing(12)
+
+        text = QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(2)
+        name = QLabel(title)
+        name.setObjectName("rowTitle")
+        name.setWordWrap(True)
+        caption = QLabel(hint)
+        caption.setObjectName("hint")
+        caption.setWordWrap(True)
+        text.addWidget(name)
+        text.addWidget(caption)
+        layout.addLayout(text, 1)
+        layout.addWidget(box, 0, Qt.AlignmentFlag.AlignVCenter)
+        parent.addWidget(row)
+
+    def _add_divider(self, parent: QVBoxLayout) -> None:
+        line = QFrame()
+        line.setObjectName("divider")
+        line.setFrameShape(QFrame.Shape.NoFrame)
+        parent.addWidget(line)
+
     def _rebuild(self) -> None:
         flags = get_flags()
-        expected = [item[0] for item in OPTIONAL_SKILLS]
+        expected = _ordered_skill_ids()
         if (
             self._boxes
             and list(self._boxes.keys()) == expected
@@ -183,62 +291,58 @@ class SettingsWindow(QWidget):
         self._auto_trade_box = None
         self._stocks_menu = None
 
-        for skill_id, title, hint in OPTIONAL_SKILLS:
-            row = QFrame()
-            row.setObjectName("row")
-            col = QVBoxLayout(row)
-            col.setContentsMargins(0, 6, 0, 8)
-            col.setSpacing(2)
+        for group_name, rows in _grouped_skills():
+            self._list.addWidget(self._section_label(group_name))
+            card = QFrame()
+            card.setObjectName("card")
+            card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            col = QVBoxLayout(card)
+            col.setContentsMargins(16, 8, 16, 8)
+            col.setSpacing(0)
 
-            box = QCheckBox(title)
-            box.setChecked(flags.get(skill_id, True))
-            box.toggled.connect(lambda checked, sid=skill_id: set_flag(sid, checked))
-            if skill_id == "stocks":
-                box.toggled.connect(self._on_stocks_toggled)
-            self._boxes[skill_id] = box
-            col.addWidget(box)
+            for index, (skill_id, title, hint) in enumerate(rows):
+                if index:
+                    self._add_divider(col)
+                box = self._make_toggle(flags.get(skill_id, True))
+                box.toggled.connect(lambda checked, sid=skill_id: set_flag(sid, checked))
+                if skill_id == "stocks":
+                    box.toggled.connect(self._on_stocks_toggled)
+                self._boxes[skill_id] = box
+                self._add_text_toggle(col, title, hint, box)
+                if skill_id == "stocks":
+                    self._add_stocks_menu(col, flags.get("stocks", True))
 
-            caption = QLabel(hint)
-            caption.setObjectName("hint")
-            caption.setWordWrap(True)
-            col.addWidget(caption)
-            if skill_id == "stocks":
-                self._add_stocks_menu(col, flags.get("stocks", True))
-            self._list.addWidget(row)
+            self._list.addWidget(card)
 
         self._list.addStretch(1)
 
     def _add_stocks_menu(self, parent: QVBoxLayout, stocks_on: bool) -> None:
         menu = QFrame()
         menu.setObjectName("submenu")
+        menu.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         col = QVBoxLayout(menu)
-        col.setContentsMargins(0, 4, 0, 0)
+        col.setContentsMargins(10, 10, 10, 10)
         col.setSpacing(8)
 
-        voice_box = QCheckBox("Сделки голосом")
-        voice_box.setChecked(is_voice_trade_enabled())
+        voice_box = self._make_toggle(is_voice_trade_enabled())
         voice_box.toggled.connect(set_voice_trade)
-        col.addWidget(voice_box)
-
-        voice_hint = QLabel(
-            "«Купи», «продай», «поторгуй» выставляют заявки. "
-            "Выключено — только сводка, сделки в приложении брокера."
+        self._add_text_toggle(
+            col,
+            "Сделки голосом",
+            "«Купи», «продай», «поторгуй» выставляют заявки. Выключено — только сводка.",
+            voice_box,
         )
-        voice_hint.setObjectName("hint")
-        voice_hint.setWordWrap(True)
-        col.addWidget(voice_hint)
 
-        auto_box = QCheckBox("Автоторговля")
-        auto_box.setChecked(is_auto_trade_enabled())
+        self._add_divider(col)
+
+        auto_box = self._make_toggle(is_auto_trade_enabled())
         auto_box.toggled.connect(set_auto_trade)
-        col.addWidget(auto_box)
-
-        auto_hint = QLabel(
-            "Фон сам ставит заявки примерно раз в 45 минут. На живом счёте — реальные сделки."
+        self._add_text_toggle(
+            col,
+            "Автоторговля",
+            "Фон сам ставит заявки примерно раз в 45 минут. На живом счёте — реальные сделки.",
+            auto_box,
         )
-        auto_hint.setObjectName("hint")
-        auto_hint.setWordWrap(True)
-        col.addWidget(auto_hint)
 
         self._voice_trade_box = voice_box
         self._auto_trade_box = auto_box

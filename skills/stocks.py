@@ -434,31 +434,31 @@ class StocksSkill(BaseSkill):
             else:
                 reply = self._speak_watch(emphasize_yield=want_yield)
         except requests.Timeout:
-            context.speak("Биржа не ответила. Попробую позже.")
+            context.speak("Биржа молчит.")
             return
         except RuntimeError as exc:
             msg = str(exc)
             if "token rejected" in msg:
-                context.speak("Ключ от брокерского счёта не подошёл. Проверь настройки.")
+                context.speak("Ключ не подошёл.")
                 return
             if "trade token" in msg:
-                context.speak("Для сделок нужен токен с правами торговли, не только чтение.")
+                context.speak("Нет прав.")
                 return
             if "market closed" in msg:
-                context.speak("Биржа сейчас закрыта. Заявку выставлю в торговые часы.")
+                context.speak("Биржа закрыта.")
                 return
             if "no lots" in msg:
-                context.speak("Свободного объёма или средств на сделку не хватает.")
+                context.speak("Не хватает.")
                 return
             if "no moex quote" in msg:
-                context.speak("Эту бумагу на бирже не нашёл.")
+                context.speak("Не нашёл.")
                 return
             logger.error("[Биржа] Ошибка запроса: %s", exc)
-            context.speak("Не удалось связаться с биржей. Попробую позже.")
+            context.speak("Биржа молчит.")
             return
         except Exception as exc:
             logger.error("[Биржа] Ошибка запроса: %s", exc)
-            context.speak("Не удалось выполнить операцию по счёту. Попробую позже.")
+            context.speak("Не вышло.")
             return
 
         context.speak(reply)
@@ -1014,7 +1014,7 @@ class StocksSkill(BaseSkill):
 
     def _execute_trade_locked(self, text: str, kind: str, ticker: str | None) -> str:
         if not _voice_trade_enabled():
-            return "Голосовые сделки выключены. Если нужно — зайди в приложение брокера."
+            return "Сделки выключены."
         requested = _extract_lots(text)
         if kind == "auto":
             return self._trade_auto()

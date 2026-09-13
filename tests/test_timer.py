@@ -84,7 +84,7 @@ class TestTimer(unittest.TestCase):
         self.skill.start_background(spoken.append)
         self.assertEqual(len(self.skill.active_timers), 0)
         self.assertTrue(spoken)
-        self.assertIn("пока меня не было", spoken[0].lower())
+        self.assertIn("сработал", spoken[0].lower())
 
 
 if __name__ == "__main__":

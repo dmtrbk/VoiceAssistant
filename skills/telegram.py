@@ -14,6 +14,8 @@ class TelegramSkill(BaseSkill):
         self.open_actions = ["открой", "включи", "запусти"]
         self.close_actions = ["закрой", "выключи", "убери", "выруби", "останови"]
         self.app_names = ["телеграм", "телеграмм", "телега", "telegram"]
+        self._telegram_cmd = None
+        self._telegram_looked_up = False
 
     def can_handle(self, context: RequestContext) -> bool:
         text = context.raw_text.lower().strip()
@@ -26,6 +28,13 @@ class TelegramSkill(BaseSkill):
 
     def _find_telegram_cmd(self) -> list | None:
         """Ищет способ запуска Telegram в системе (локальный путь, pacman/apt, flatpak, snap)."""
+        if self._telegram_looked_up:
+            return self._telegram_cmd
+        self._telegram_looked_up = True
+        self._telegram_cmd = self._lookup_telegram_cmd()
+        return self._telegram_cmd
+
+    def _lookup_telegram_cmd(self) -> list | None:
         # 1. Проверяем локальный бинарник в домашней папке текущего пользователя
         local_path = os.path.expanduser("~/Telegram/Telegram")
         if os.path.exists(local_path) and os.access(local_path, os.X_OK):
@@ -68,7 +77,7 @@ class TelegramSkill(BaseSkill):
         is_close_command = any(action in text for action in self.close_actions)
         
         if is_close_command:
-            context.speak("Закрываю Телеграм.")
+            context.speak("Закрываю.")
             # comm в Linux — 15 символов, поэтому telegram-desktop обрезается.
             for name in ("telegram-desktop", "telegram-deskto", "Telegram"):
                 subprocess.Popen(
@@ -81,7 +90,7 @@ class TelegramSkill(BaseSkill):
             cmd = self._find_telegram_cmd()
             
             if cmd:
-                context.speak("Запускаю Телеграм.")
+                context.speak("Запускаю.")
                 subprocess.Popen(
                     cmd, 
                     stdout=subprocess.DEVNULL, 
@@ -92,4 +101,4 @@ class TelegramSkill(BaseSkill):
                     "[Telegram] Не удалось обнаружить Telegram в системе. "
                     "Проверены: домашняя папка, PATH, flatpak, snap."
                 )
-                context.speak("Я не смог найти установленный Телеграм в вашей системе.")
+                context.speak("Не нашёл.")

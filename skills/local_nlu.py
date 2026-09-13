@@ -42,7 +42,7 @@ class LocalNLUSkill(BaseSkill):
 
         responses = self.nlu_engine.intents.get(intent, {}).get("responses", [])
         if not responses:
-            context.speak("Извините, не знаю, как на это ответить.")
+            context.speak("Не знаю.")
             return
 
         context.speak(random.choice(responses))

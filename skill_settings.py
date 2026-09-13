@@ -17,6 +17,7 @@ OPTIONAL_SKILLS = (
     ("xiaomi_bulb", "Свет", "Лампа Xiaomi / Yeelight"),
     ("home_assistant", "Home Assistant", "Умный дом: свет, розетки, сцены по имени"),
     ("movie", "Фильмы и видео", "ВК Видео и плеер MPV"),
+    ("site_apps", "Сайты", "YouTube, TikTok и другие приложения из браузера"),
     ("audacious", "Музыка и радио", "Audacious, папки, плейлисты и поиск песен"),
     ("weather", "Погода", "Прогноз Open-Meteo"),
     ("stocks", "Биржа и портфель", "Котировки Мосбиржи и сводка счёта Т-Инвест. Сделки — тумблеры ниже"),
@@ -25,7 +26,9 @@ OPTIONAL_SKILLS = (
     ("games", "Игры и рандомайзер", "Больше-Меньше, кубики d6/d20, случайные числа"),
     ("jokes", "Анекдоты и факты", "Шутки, тосты, сказки"),
     ("web_search", "Поиск в интернете", "Яндекс / Google в браузере"),
+    ("wikipedia", "Википедия", "Краткая справка: что такое, кто такой"),
     ("maps", "Карты", "Поиск мест и маршруты"),
+    ("image_gen", "Картинки", "Рисует бесплатно и шлёт в Telegram"),
     ("security", "Охрана", "Камера и снимки в Telegram"),
     ("telegram", "Telegram", "Открыть или закрыть приложение"),
     ("pentagon", "Пентагон", "Шутка с зелёным кодом в терминале"),
@@ -116,6 +119,9 @@ def _skill_map() -> dict[str, Any]:
         xiaomi_bulb_skill,
         home_assistant_skill,
         stocks_skill,
+        image_gen_skill,
+        wikipedia_skill,
+        site_apps_skill,
     )
 
     _SKILL_MAP = {
@@ -134,6 +140,9 @@ def _skill_map() -> dict[str, Any]:
         "pentagon": pentagon_skill,
         "home_assistant": home_assistant_skill,
         "stocks": stocks_skill,
+        "image_gen": image_gen_skill,
+        "wikipedia": wikipedia_skill,
+        "site_apps": site_apps_skill,
     }
     return _SKILL_MAP
 

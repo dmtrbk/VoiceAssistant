@@ -212,7 +212,7 @@ WorkingDirectory=$PROJECT_DIR
 ExecStart=$VENV_DIR/bin/python assistant.py
 Restart=always
 RestartSec=3
-TimeoutStopSec=15
+TimeoutStopSec=5
 
 # === НАСТРОЙКИ ===
 Environment=PYTHONUNBUFFERED=1
@@ -261,7 +261,7 @@ echo "   Тумблеры: правый клик по сфере или «отк
 echo ""
 echo "2. Служба systemd --user:"
 echo "   Юнит: $SERVICE_FILE"
-echo "   TimeoutStopSec=15 (SIGTERM будит Qt, процесс выходит сразу)"
+echo "   TimeoutStopSec=5 (SIGTERM сразу os._exit, без ожидания TTS)"
 echo "   systemctl --user start voice-assistant.service    # Запуск"
 echo "   systemctl --user restart voice-assistant.service  # Перезапуск"
 echo "   systemctl --user status voice-assistant.service   # Статус"

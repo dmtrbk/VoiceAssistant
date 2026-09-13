@@ -1,23 +1,22 @@
 import json
 import logging
 import os
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+from difflib import SequenceMatcher
 
 # Только farewell/coin в intents.json. Приветствия и «как дела» — Groq.
-# predict всегда (intent|None, confidence). Не возвращать train_nlu_model / INTENTS.
+# predict всегда (intent|None, confidence). Совпадение фраз, не линейная модель.
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INTENTS_PATH = os.path.join(BASE_DIR, "intents.json")
 
+
 class NLUClassifier:
     def __init__(self, intents_path: str = INTENTS_PATH):
         self.intents_path = intents_path
         self.intents = self._load_intents()
-        self.vectorizer = None
-        self.classifier = None
+        self._examples: list[tuple[str, str]] = []
 
     def _load_intents(self) -> dict:
         if not os.path.exists(self.intents_path):
@@ -31,40 +30,33 @@ class NLUClassifier:
             return {}
 
     def train(self) -> bool:
+        self._examples = []
         if not self.intents:
             return False
-
-        X, y = [], []
         for intent_name, intent_data in self.intents.items():
             for example in intent_data.get("examples", []):
                 cleaned = example.lower().strip()
                 if cleaned:
-                    X.append(cleaned)
-                    y.append(intent_name)
-
-        if not X:
+                    self._examples.append((cleaned, intent_name))
+        if not self._examples:
             return False
-
-        # Используем символ-буквенный анализ (лучшее решение для русского языка)
-        self.vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4))
-        X_vectorized = self.vectorizer.fit_transform(X)
-
-        self.classifier = LogisticRegression(C=10.0, max_iter=500, random_state=42)
-        self.classifier.fit(X_vectorized, y)
-        logger.info("[NLU] Модель распознавания успешно обучена.")
+        logger.info("[NLU] Фразы прощания и монетки загружены.")
         return True
 
     def predict(self, text: str):
-        if not self.vectorizer or not self.classifier:
+        cleaned = (text or "").lower().strip()
+        if not cleaned or not self._examples:
             return None, 0.0
 
-        cleaned = text.lower().strip()
-        vec = self.vectorizer.transform([cleaned])
-        probs = self.classifier.predict_proba(vec)
-        max_idx = probs.argmax()
-        confidence = probs[0][max_idx]
-        predicted_intent = self.classifier.classes_[max_idx]
-        if confidence < 0.5:
-            return None, float(confidence)
-
-        return predicted_intent, confidence
+        best_intent = None
+        best = 0.0
+        for example, intent_name in self._examples:
+            if cleaned == example:
+                return intent_name, 1.0
+            ratio = SequenceMatcher(None, cleaned, example).ratio()
+            if ratio > best:
+                best = ratio
+                best_intent = intent_name
+        if best < 0.5:
+            return None, float(best)
+        return best_intent, float(best)

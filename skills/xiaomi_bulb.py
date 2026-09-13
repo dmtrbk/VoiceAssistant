@@ -3,7 +3,6 @@
 import os
 import re
 import logging
-import random
 from skills.base import BaseSkill, RequestContext
 from skills.ai_chat import log_system_action 
 
@@ -140,9 +139,7 @@ class XiaomiBulbSkill(BaseSkill):
         text = context.raw_text.lower().strip()
         
         if not self.bulb_ip:
-            context.speak(
-                "Чтобы я мог управлять лампочкой, пропишите её адрес в настройках окружения."
-            )
+            context.speak("Нет адреса.")
             return
 
         try:
@@ -151,37 +148,24 @@ class XiaomiBulbSkill(BaseSkill):
             else:
                 import yeelight
         except ImportError:
-            context.speak(
-                "Для работы с лампой мне нужны дополнительные библиотеки. "
-                "Установите их в терминале командой: пип инсталл yeelight python-miio"
-            )
+            context.speak("Нет библиотек.")
             return
 
         if not self._init_bulb():
-            context.speak("Не удалось подключиться к лампочке. Проверьте правильность настроек в файле .env.")
+            context.speak("Нет связи.")
             return
 
         try:
             if any(w in text for w in ["выключи", "потуши", "выруби", "погаси"]):
                 self._turn_off()
                 log_system_action("Пользователь выключил умный свет")
-                context.speak(random.choice([
-                    "Выключил свет. Теперь можно и отдохнуть в темноте.",
-                    "Потушил свет. Как скажете.",
-                    "Выключил лампу. Надеюсь, вы не споткнётесь в темноте.",
-                    "Свет выключен."
-                ]))
+                context.speak("Выключил.")
                 return
 
             if any(w in text for w in ["включи", "зажги", "вруби", "гори"]):
                 self._turn_on()
                 log_system_action("Пользователь включил умный свет")
-                context.speak(random.choice([
-                    "Включил свет. Да будет свет!",
-                    "Освещение включено. Так гораздо лучше.",
-                    "Зажёг лампу. Теперь всё видно.",
-                    "Свет горит."
-                ]))
+                context.speak("Включил.")
                 return
 
             val = None
@@ -195,9 +179,9 @@ class XiaomiBulbSkill(BaseSkill):
                 if 1 <= val <= 100:
                     self._set_brightness(val)
                     log_system_action(f"Пользователь установил яркость света на {val} процентов")
-                    context.speak(f"Установил яркость лампочки на {val} процентов.")
+                    context.speak("Готово.")
                 else:
-                    context.speak("Яркость можно установить только в диапазоне от одного до ста процентов.")
+                    context.speak("От одного до ста.")
                 return
 
             if any(w in text for w in ["ярче", "прибавь", "светлее"]):
@@ -205,7 +189,7 @@ class XiaomiBulbSkill(BaseSkill):
                 new_bright = min(current_bright + 25, 100)
                 self._set_brightness(new_bright)
                 log_system_action(f"Пользователь сделал свет ярче, теперь яркость {new_bright} процентов")
-                context.speak(f"Сделал светлее. Сейчас яркость {new_bright} процентов.")
+                context.speak("Готово.")
                 return
 
             if any(w in text for w in ["тусклее", "убавь", "темнее", "потише"]):
@@ -213,17 +197,11 @@ class XiaomiBulbSkill(BaseSkill):
                 new_bright = max(current_bright - 25, 1)
                 self._set_brightness(new_bright)
                 log_system_action(f"Пользователь сделал свет тусклее, теперь яркость {new_bright} процентов")
-                context.speak(f"Сделал свет тусклее. Установил яркость на {new_bright} процентов.")
+                context.speak("Готово.")
                 return
 
-            context.speak(
-                "Я понял, что вы хотите настроить лампочку, но не понял точную команду. "
-                "Попробуйте сказать 'выключи свет' или 'яркость пятьдесят'."
-            )
+            context.speak("Не понял.")
 
         except Exception as e:
             logging.error(f"[XiaomiBulb] Сбой управления лампочкой: {e}")
-            context.speak(
-                "Не могу связаться с лампочкой. "
-                "Проверьте, включена ли она в розетку и подключена ли к вашему вайфаю."
-            )
+            context.speak("Нет связи.")

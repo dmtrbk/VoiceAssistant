@@ -143,7 +143,7 @@ class ActiveTimer:
             logger.info(f"[Таймер] Таймер на {self.label} сработал.")
             if self.speak_callback:
                 try:
-                    self.speak_callback(f"Время вышло! Ваш таймер на {self.label} завершён.")
+                    self.speak_callback("Время.")
                 except Exception as exc:
                     logger.debug("[Таймер] Ошибка в speak_callback: %s", exc)
         if self.on_finished:
@@ -208,8 +208,8 @@ class TimerSkill(BaseSkill):
     @staticmethod
     def _missed_phrase(labels: list[str]) -> str:
         if len(labels) == 1:
-            return f"Таймер на {labels[0]} сработал, пока меня не было."
-        return "Пока меня не было, сработали таймеры: " + ", ".join(labels) + "."
+            return "Сработал."
+        return "Сработали."
 
     def start_background(self, speak_callback) -> None:
         """Поднять сохранённые таймеры при старте службы, не дожидаясь команды."""
@@ -281,14 +281,14 @@ class TimerSkill(BaseSkill):
             self._awaiting_duration = False
             with self._lock:
                 if not self.active_timers:
-                    context.speak("У вас нет активных таймеров.")
+                    context.speak("Нет таймеров.")
                     return
                 count = len(self.active_timers)
                 for t in self.active_timers:
                     t.cancel()
                 self.active_timers.clear()
                 self._save_timers_locked()
-            context.speak("Таймер отменён." if count == 1 else "Все таймеры отменены.")
+            context.speak("Отменил.")
             return
 
         # 2. Проверка статуса / сколько осталось
@@ -297,11 +297,11 @@ class TimerSkill(BaseSkill):
                 self._prune_timers()
                 self._save_timers_locked()
                 if not self.active_timers:
-                    context.speak("Сейчас нет активных таймеров.")
+                    context.speak("Нет таймеров.")
                     return
                 timer = self.active_timers[0]
                 rem_str = format_remaining_time(timer.remaining_seconds)
-                context.speak(f"До конца таймера на {timer.label} осталось {rem_str}.")
+                context.speak(f"Осталось {rem_str}.")
                 return
 
         # 3. Установка нового таймера
@@ -310,7 +310,7 @@ class TimerSkill(BaseSkill):
             duration_sec, label = _parse_bare_minutes(text)
         if duration_sec <= 0:
             self._awaiting_duration = True
-            context.speak("На какое время поставить таймер?")
+            context.speak("На сколько?")
             return
 
         self._awaiting_duration = False
@@ -326,4 +326,4 @@ class TimerSkill(BaseSkill):
             self.active_timers.append(new_timer)
             self._save_timers_locked()
 
-        context.speak(f"Поставил таймер на {label}.")
+        context.speak("Поставил.")

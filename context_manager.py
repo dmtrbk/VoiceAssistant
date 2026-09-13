@@ -153,5 +153,5 @@ def handle_context_input(text: str, speak_callback: Callable[[str], None]) -> tu
         with _ctx_lock:
             if _active_context is ctx:
                 _active_context = None
-        speak_callback("Произошла ошибка при обработке контекста. Возвращаюсь в обычный режим.")
+        speak_callback("Ошибка.")
         return True, False

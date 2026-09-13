@@ -246,11 +246,11 @@ class AudaciousSkill(BaseSkill):
             try:
                 song = subprocess.check_output(["audtool", "--current-song"], text=True).strip()
                 if song:
-                    context.speak(f"Сейчас играет: {song}")
+                    context.speak(song)
                 else:
-                    context.speak("Сейчас ничего не играет.")
+                    context.speak("Ничего.")
             except Exception:
-                context.speak("Плеер Audacious не запущен.")
+                context.speak("Плеер не запущен.")
             return
 
         # 6. Папка, плейлист или библиотека Jarvis — до радио, чтобы «папка дождь» не стала шумом дождя.
@@ -259,22 +259,15 @@ class AudaciousSkill(BaseSkill):
             kind, path = source
             if path is None or not path.exists():
                 if kind == "playlist":
-                    context.speak("Такой плейлист не нашёл.")
+                    context.speak("Не нашёл.")
                 elif kind == "folder":
-                    context.speak("Такую папку не нашёл.")
+                    context.speak("Не нашёл.")
                 elif kind == "all":
-                    context.speak("Я не нашёл папку Музыка в вашей домашней директории.")
+                    context.speak("Нет папки.")
                 else:
-                    context.speak("Библиотека пустая. Скажите: найди песню, и я скачаю трек.")
+                    context.speak("Пусто.")
                 return
-            if kind == "playlist":
-                context.speak(f"Включаю плейлист {path.stem}.")
-            elif kind == "folder":
-                context.speak(f"Включаю папку {path.name}.")
-            elif kind == "all":
-                context.speak("Включаю всю музыку.")
-            else:
-                context.speak("Включаю вашу музыку.")
+            context.speak("Включаю.")
             self._start_playback(str(path))
             log_system_action(f"Пользователь включил музыку ({kind}): {path}")
             return
@@ -291,7 +284,7 @@ class AudaciousSkill(BaseSkill):
 
         if selected_station:
             generate_m3u_playlist(playlist_path)
-            context.speak(f"Включаю {selected_station['name']}.")
+            context.speak("Включаю.")
             self._start_playback(
                 selected_station["url"],
                 loop=bool(selected_station.get("loop")),
@@ -302,7 +295,7 @@ class AudaciousSkill(BaseSkill):
         # 8. Общее включение радио
         if any(w in text for w in ["радио", "радиостанци", "эфир"]):
             generate_m3u_playlist(playlist_path)
-            context.speak("Включаю радио.")
+            context.speak("Включаю.")
             self._start_playback(playlist_path)
             log_system_action("Пользователь включил радио")
             return

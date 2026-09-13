@@ -136,12 +136,9 @@ SELF_ECHO_WINDOW_SEC = ATTENTION_TIMEOUT
 
 ACTIVATION_PHRASES = [
     "Да?",
-    "Слушаю вас",
-    "Я здесь",
-    "Тут я",
-    "На связи!",
-    "Да-да, слушаю",
-    "Готов к работе",
+    "Слушаю.",
+    "Здесь.",
+    "На связи.",
 ]
 
 def clear_audio_queue():
@@ -733,7 +730,7 @@ def main():
         global asked_to_repeat, last_active_time
         if not asked_to_repeat:
             asked_to_repeat = True
-            safe_speak("Не расслышал, повторите, пожалуйста.")
+            safe_speak("Не расслышал.")
         last_active_time = time.time()
 
     def dispatch_phrase(phrase: str) -> None:
@@ -976,22 +973,10 @@ if __name__ == "__main__":
             run_cli_with_gui(mute=args.mute, verbose=args.debug)
         sys.exit(0)
 
-    _shutdown_once = {"done": False}
-
     def hard_shutdown(signum=None, frame=None):
-        # os._exit: sys.exit/app.quit во время exec() часто не завершают процесс.
-        if _shutdown_once["done"]:
-            os._exit(0)
-        _shutdown_once["done"] = True
-        try:
-            stop_speaking(to_idle=True)
-            volume_ctrl.restore()
-        except Exception:
-            pass
-        try:
-            logging.info("Ассистент выключен.")
-        except Exception:
-            pass
+        # Только _exit: stop_speaking / restore / logging в обработчике SIGTERM
+        # легко встают на lock (TTS, громкость, журнал) — systemd ждёт TimeoutStopSec
+        # и добивает SIGKILL. Громкость поднимется при следующем старте из кэша.
         os._exit(0)
 
     # SIGTERM при app.exec() сам по себе не убивает процесс — стоит Python-обработчик.

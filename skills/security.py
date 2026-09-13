@@ -10,11 +10,23 @@ import subprocess
 from skills.base import BaseSkill, RequestContext
 from skills.utils import send_telegram_notification
 
-try:
-    import cv2
-except ImportError:
-    cv2 = None
-    logging.warning("[Система] Библиотека opencv-python не найдена. Видеонаблюдение будет недоступно.")
+_cv2 = None
+_cv2_tried = False
+
+
+def _opencv():
+    """OpenCV нужен только когда охрана реально смотрит камеру."""
+    global _cv2, _cv2_tried
+    if _cv2_tried:
+        return _cv2
+    _cv2_tried = True
+    try:
+        import cv2
+        _cv2 = cv2
+    except ImportError:
+        _cv2 = None
+        logging.warning("[Система] Библиотека opencv-python не найдена. Видеонаблюдение будет недоступно.")
+    return _cv2
 
 
 def _camera_index() -> int:
@@ -47,6 +59,7 @@ class SurveillanceThread(threading.Thread):
         self._stop_event.set()
 
     def run(self):
+        cv2 = _opencv()
         if cv2 is None:
             logging.error("[Охрана] Ошибка: OpenCV не установлен.")
             return
@@ -229,7 +242,7 @@ class SecuritySkill(BaseSkill):
         text = context.raw_text
 
         if self._is_arm_command(text):
-            context.speak("Режим охраны активирован. Включаю заставку.")
+            context.speak("Охрана.")
             send_telegram_notification("🔒 Запущен режим охраны. Наблюдение начнется через 1 минуту.")
             arm_id = self._bump_arm()
 
@@ -248,6 +261,6 @@ class SecuritySkill(BaseSkill):
             self._bump_arm()
             self.control_screens(True)
             self._stop_camera()
-            context.speak("С возвращением! Система видеонаблюдения отключена.")
+            context.speak("Снял.")
             send_telegram_notification("🔓 Режим охраны успешно отключен. Хозяин дома.")
             return

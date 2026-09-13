@@ -9,6 +9,7 @@ import re
 import shutil
 import socket
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from typing import Any, List, Optional
@@ -48,6 +49,15 @@ _CLIP_JUNK = (
 )
 
 _mpv_proc: Optional[subprocess.Popen] = None
+_ALIVE_TTL = 0.8
+_alive_cached = False
+_alive_cached_at = 0.0
+
+
+def _set_alive_cache(value: bool) -> None:
+    global _alive_cached, _alive_cached_at
+    _alive_cached = value
+    _alive_cached_at = time.time()
 
 
 def _send_mpv_ipc(command: List[object]) -> bool:
@@ -83,21 +93,28 @@ def is_movie_control_phrase(text: str) -> bool:
 
 def _player_alive() -> bool:
     """Наш MPV ещё играет. Мёртвый сокет в /tmp не считаем сессией."""
+    now = time.time()
+    if now - _alive_cached_at < _ALIVE_TTL:
+        return _alive_cached
     if _mpv_proc is not None and _mpv_proc.poll() is None:
+        _set_alive_cache(True)
         return True
     if not os.path.exists(MPV_SOCKET):
+        _set_alive_cache(False)
         return False
     try:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.settimeout(0.15)
         client.connect(MPV_SOCKET)
         client.close()
+        _set_alive_cache(True)
         return True
     except Exception:
         try:
             os.remove(MPV_SOCKET)
         except OSError:
             pass
+        _set_alive_cache(False)
         return False
 
 
@@ -139,6 +156,7 @@ def _stop_our_player() -> None:
             os.remove(MPV_SOCKET)
         except OSError:
             pass
+    _set_alive_cache(False)
 
 
 def _item_field(item: Any, index: int) -> Any:
@@ -324,11 +342,13 @@ def play_video(target: Optional[str] = None) -> bool:
         try:
             subprocess.Popen(cmd, stdout=_DEVNULL, stderr=_DEVNULL)
             _mpv_proc = None
+            _set_alive_cache(True)
             return True
         except Exception as exc:
             logger.debug("[MovieSkill] systemd-run не запустил MPV: %s", exc)
 
     _mpv_proc = subprocess.Popen(mpv_cmd, stdout=_DEVNULL, stderr=_DEVNULL)
+    _set_alive_cache(True)
     return True
 
 
@@ -426,7 +446,7 @@ class MovieSkill(BaseSkill):
 
         if _is_close_command(text):
             _stop_our_player()
-            context.speak("Закрываю плеер.")
+            context.speak("Закрываю.")
             log_system_action("Пользователь закрыл видеоплеер MPV")
             return
 
@@ -453,9 +473,9 @@ class MovieSkill(BaseSkill):
             if not _has_any_word(text, _MOVIE_NOUNS):
                 stop_player_session()
                 if play_video(None):
-                    context.speak("Открываю видеоплеер.")
+                    context.speak("Открываю.")
                 else:
-                    context.speak("Плеер MPV не установлен.")
+                    context.speak("Нет плеера.")
                 return
 
         is_search_only = _has_any_word(text, ("найди", "поищи", "ищи")) and not any(
@@ -465,17 +485,17 @@ class MovieSkill(BaseSkill):
 
         if is_search_only:
             if not query:
-                context.speak("Какой фильм или видео вы хотите найти?")
+                context.speak("Какой фильм?")
                 return
             stop_player_session()
             encoded = urllib.parse.quote_plus(query)
-            context.speak(f"Ищу на ВК Видео: {query}.")
+            context.speak("Ищу.")
             open_url(f"https://vkvideo.ru/search?q={encoded}")
             log_system_action(f"Пользователь открыл поиск ВК Видео для: {query}")
             return
 
         if not query:
-            context.speak("Какой фильм или видео вы хотите включить?")
+            context.speak("Какой фильм?")
             return
 
         kind = _query_kind(text)
@@ -493,16 +513,15 @@ class MovieSkill(BaseSkill):
         found = search_vk_video(search_query, kind)
         if found:
             vk_url, title = found
-            spoken_title = title.split("|")[0].strip() or query
-            context.speak(f"Включаю {spoken_title}.")
+            context.speak("Включаю.")
             if not play_video(vk_url):
-                context.speak("Плеер MPV не установлен.")
+                context.speak("Нет плеера.")
                 return
             log_system_action(f"Пользователь запустил «{title}» в MPV")
             return
 
-        context.speak(f"На ВК не нашёл точное совпадение, включаю {query}.")
+        context.speak("Включаю.")
         if not play_video(f"ytdl://ytsearch1:{search_query}"):
-            context.speak("Плеер MPV не установлен.")
+            context.speak("Нет плеера.")
             return
         log_system_action(f"Пользователь запустил видео «{query}» через запасной поиск")

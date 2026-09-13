@@ -193,22 +193,21 @@ def _dispatch_single(
     )
 
     chosen = None
-    blocked = None
+    disabled: list = []
     for skill in ALL_SKILLS:
         if skill is ai_chat_skill or skill is local_nlu_skill:
+            continue
+        if not is_skill_enabled(skill):
+            disabled.append(skill)
             continue
         try:
             accepts = skill.can_handle(context)
         except Exception as e:
             logging.error(f"[Маршрутизатор] Ошибка can_handle у {skill.__class__.__name__}: {e}")
             continue
-        if not accepts:
-            continue
-        if not is_skill_enabled(skill):
-            blocked = skill
-            continue
-        chosen = skill
-        break
+        if accepts:
+            chosen = skill
+            break
 
     if chosen is None:
         follow = _followup_skill(context)
@@ -216,15 +215,22 @@ def _dispatch_single(
             logging.info(f"[Маршрутизатор] Follow-up: {follow.__class__.__name__}")
             chosen = follow
 
-    if chosen is None and blocked is not None:
-        speak_callback("Этот навык сейчас выключен.")
-        return False
+    if chosen is None and disabled:
+        for skill in disabled:
+            try:
+                accepts = skill.can_handle(context)
+            except Exception as e:
+                logging.error(f"[Маршрутизатор] Ошибка can_handle у {skill.__class__.__name__}: {e}")
+                continue
+            if accepts:
+                speak_callback("Этот навык сейчас выключен.")
+                return False
 
     if chosen is None:
         if is_garbled_utterance(text) or (
             channel == "voice" and is_weak_stt_for_chat(text)
         ):
-            speak_callback("Не расслышал, повторите, пожалуйста.")
+            speak_callback("Не расслышал.")
             return False
         try:
             predicted, predicted_conf = local_nlu_skill.nlu_engine.predict(text)

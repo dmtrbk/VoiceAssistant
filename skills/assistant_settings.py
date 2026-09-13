@@ -40,4 +40,4 @@ class AssistantSettingsSkill(BaseSkill):
 
     def execute(self, context: RequestContext) -> None:
         request_open_settings()
-        context.speak("Открываю настройки.")
+        context.speak("Открываю.")

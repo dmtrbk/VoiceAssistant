@@ -139,21 +139,21 @@ class MusicSearchSkill(BaseSkill):
     def execute(self, context: RequestContext) -> None:
         query = extract_music_query(context.raw_text)
         if not query:
-            context.speak("Какую песню найти?")
+            context.speak("Какую песню?")
             return
 
         local = find_local_track(query)
         if local:
-            context.speak(f"Включаю {local.stem}.")
+            context.speak("Включаю.")
             play_file(local)
             log_system_action(f"Пользователь включил локальный трек {local.name}")
             return
 
-        context.speak(f"Ищу {query}.")
+        context.speak("Ищу.")
         found = download_track(query)
         if not found:
-            context.speak("Не удалось скачать трек.")
+            context.speak("Не скачалось.")
             return
-        context.speak(f"Включаю {found.stem}.")
+        context.speak("Включаю.")
         play_file(found)
         log_system_action(f"Пользователь скачал трек {found.name}")

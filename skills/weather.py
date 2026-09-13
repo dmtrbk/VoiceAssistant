@@ -277,9 +277,9 @@ class WeatherSkill(BaseSkill):
 
         if not geo:
             if used_default:
-                context.speak("Не удалось получить погоду для вашей точки. Проверьте координаты в настройках.")
+                context.speak("Нет погоды.")
             else:
-                context.speak(f"Не удалось найти информацию о погоде для города {city_query}.")
+                context.speak("Не нашёл.")
             return
 
         lat, lon, city_display_name = geo
@@ -298,7 +298,7 @@ class WeatherSkill(BaseSkill):
             }
             resp = requests.get(weather_url, params=params, timeout=5)
             if resp.status_code != 200:
-                context.speak("Не удалось получить данные о погоде. Попробуйте позже.")
+                context.speak("Нет погоды.")
                 return
 
             data = resp.json()
@@ -324,44 +324,37 @@ class WeatherSkill(BaseSkill):
 
                     if is_rain_query:
                         if tom_precip > 0.5 or tom_code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95]:
-                            context.speak(f"Завтра {place.lower()} ожидается дождь. Зонт пригодится! Днем {temp_desc}.")
+                            context.speak(f"Завтра {place.lower()} дождь. Днём {temp_desc}.")
                         else:
-                            context.speak(f"Завтра {place.lower()} без осадков, {desc}. Днем около {temp_desc}.")
+                            context.speak(f"Завтра {place.lower()} без осадков. Днём {temp_desc}.")
                         return
 
                     context.speak(
-                        f"Завтра {place.lower()} {desc}, днем до {temp_desc}, ночью около {format_temperature(tom_min)}."
+                        f"Завтра {place.lower()} {desc}, днём {temp_desc}."
                     )
                     return
-                context.speak("Прогноз на завтра пока не пришёл. Спросите текущую погоду или повторите позже.")
+                context.speak("Нет прогноза.")
                 return
 
             # Текущая погода
             current = data.get("current", {})
             cur_temp = current.get("temperature_2m", 0.0)
-            app_temp = current.get("apparent_temperature", cur_temp)
             w_code = current.get("weather_code", 0)
-            wind_speed = current.get("wind_speed_10m", 0.0)
             precipitation = current.get("precipitation", 0.0)
 
             desc = WMO_WEATHER_CODES.get(w_code, "ясно")
             temp_str = format_temperature(cur_temp)
-            app_str = format_temperature(app_temp)
-            wind_str = format_wind(wind_speed)
 
             if is_rain_query:
                 if precipitation > 0.1 or w_code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95]:
-                    context.speak(f"Сейчас {place.lower()} идет дождь. Температура {temp_str}.")
+                    context.speak(f"{place} дождь. {temp_str}.")
                 else:
-                    context.speak(f"Сейчас {place.lower()} дождя нет, {desc}. Температура {temp_str}.")
+                    context.speak(f"{place} без дождя. {temp_str}.")
                 return
 
-            speech = (
-                f"{place} сейчас {temp_str}, {desc}. "
-                f"Ощущается как {app_str}. Ветер {wind_str}."
-            )
+            speech = f"{place} {temp_str}, {desc}."
             context.speak(speech)
 
         except Exception as e:
             logger.error(f"[Погода] Ошибка обработки запроса: {e}")
-            context.speak("Не удалось связаться со службой погоды. Попробуйте еще раз.")
+            context.speak("Нет погоды.")

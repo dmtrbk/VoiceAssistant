@@ -3,10 +3,12 @@ import unittest
 from unittest.mock import patch
 
 from skill_settings import (
+    OPTIONAL_IDS,
     _env_voice_trade_default,
     get_effective_groq_model,
     is_cursor_running,
 )
+from settings_ui import _ordered_skill_ids
 from skills.groq_client import FAST_MODEL, STRONG_MODEL, groq_model_choices, model_chain
 from skills.security import SecuritySkill
 from skills.assistant_settings import AssistantSettingsSkill
@@ -78,6 +80,11 @@ class TestSecurityAndSettings(unittest.TestCase):
         ):
             self.assertEqual(get_effective_groq_model(), STRONG_MODEL)
         self.assertIsInstance(is_cursor_running(), bool)
+
+    def test_settings_groups_cover_all_optional_skills(self):
+        ordered = _ordered_skill_ids()
+        self.assertEqual(set(ordered), OPTIONAL_IDS)
+        self.assertEqual(len(ordered), len(set(ordered)))
 
 
 if __name__ == "__main__":

@@ -22,6 +22,9 @@ from .music_search import MusicSearchSkill
 from .assistant_settings import AssistantSettingsSkill
 from .home_assistant import HomeAssistantSkill
 from .stocks import StocksSkill
+from .image_gen import ImageGenSkill
+from .wikipedia import WikipediaSkill
+from .site_apps import SiteAppsSkill
 
 system_skill = SystemSkill()
 security_skill = SecuritySkill()
@@ -45,6 +48,9 @@ games_skill = GamesAndRandomSkill()
 assistant_settings_skill = AssistantSettingsSkill()
 home_assistant_skill = HomeAssistantSkill()
 stocks_skill = StocksSkill()
+image_gen_skill = ImageGenSkill()
+wikipedia_skill = WikipediaSkill()
+site_apps_skill = SiteAppsSkill()
 
 # Приоритет: узкие навыки, затем NLU (прощание / монетка), затем Groq.
 # Мелкий разговор (привет, как дела) не в NLU — его забирает Groq.
@@ -57,9 +63,11 @@ ALL_SKILLS = [
     calculator_skill,
     weather_skill,
     datetime_skill,
+    wikipedia_skill,  # «что такое» до поиска, системы и Groq
     stocks_skill,  # до поиска и Groq, чтобы котировки не выдумывались
     games_skill,
     jokes_skill,
+    image_gen_skill,  # до Groq и поиска, чтобы «нарисуй» не уходило в чат
     home_assistant_skill,
     xiaomi_bulb_skill,
     movie_skill,
@@ -67,6 +75,7 @@ ALL_SKILLS = [
     audacious_skill,
     web_search_skill,
     maps_search_skill,
+    site_apps_skill,  # YouTube / TikTok и другие PWA до системы
     telegram_skill,
     system_skill,
     local_nlu_skill,

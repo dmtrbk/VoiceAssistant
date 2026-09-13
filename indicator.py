@@ -74,15 +74,19 @@ class OrbWidget(QWidget):
         self.drag_position = None
         self.settings_window = None
         
-        # Таймер для анимации пульсации (~25 кадров в секунду)
+        # Пульс: ~25 fps в диалоге, в простое реже, чтобы не крутить Qt вхолостую.
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_pulse)
-        self.timer.start(40)
+        self.timer.start(200)
 
     def set_status(self, status):
         self.state = status
         hex_color = STATUS_COLORS.get(status, STATUS_COLORS["idle"])
         self.current_color = QColor(hex_color)
+        if status in ("listening", "speaking", "thinking"):
+            self.timer.setInterval(40)
+        else:
+            self.timer.setInterval(200)
         self.update()
 
     def _drain_queues(self) -> None:

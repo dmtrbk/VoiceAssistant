@@ -10,6 +10,7 @@ model/*
 piper
 skills/__pycache__
 surveillance_snaps/
+generated_images/
 *.tmp
 skills/chat_history_cache.json
 skills/user_profile.json

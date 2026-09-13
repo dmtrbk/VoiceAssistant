@@ -21,7 +21,7 @@ class PentagonSkill(BaseSkill):
 
     def execute(self, context: RequestContext) -> None:
         if not shutil.which("gnome-terminal") or not shutil.which("cmatrix"):
-            context.speak("Не нашёл программу для этого протокола.")
+            context.speak("Не нашёл.")
             return
         try:
             subprocess.Popen([
@@ -29,7 +29,7 @@ class PentagonSkill(BaseSkill):
                 "--full-screen",
                 "--", "bash", "-c", "sleep 0.2 && cmatrix -b -s -C green",
             ])
-            context.speak("Взлом Пентагона запущен. Получаю доступ к секретным файлам.")
+            context.speak("Запускаю.")
         except Exception as exc:
             logger.error(f"[PentagonSkill] Ошибка запуска: {exc}")
-            context.speak("Не удалось запустить протокол взлома.")
+            context.speak("Не вышло.")

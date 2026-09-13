@@ -59,7 +59,7 @@ class DateTimeSkill(BaseSkill):
             month = MONTHS[now.month - 1]
             year = now.year
             weekday = DAYS_OF_WEEK[now.weekday()]
-            context.speak(f"Сегодня {weekday}, {day} {month} {year} года.")
+            context.speak(f"Сегодня {weekday}, {day} {month} {year}.")
             return
 
         # 3. Запрос на время
