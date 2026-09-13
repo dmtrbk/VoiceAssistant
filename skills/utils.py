@@ -40,10 +40,7 @@ def _execute_telegram_send(text: str, photo_path: str = None):
         if response.status_code == 200:
             logging.info("[Telegram] Уведомление успешно отправлено.")
         else:
-            logging.error(
-                f"[Telegram] Ошибка сервера ({response.status_code}). "
-                f"Ответ API: {response.text.strip()}"
-            )
+            logging.error("[Telegram] Ошибка сервера (%s).", response.status_code)
             
     except Exception as e:
         logging.error(f"[Telegram] Не удалось связаться с сервером Telegram: {e}")

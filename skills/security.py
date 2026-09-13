@@ -173,10 +173,22 @@ class SecuritySkill(BaseSkill):
         return re.sub(r"\s+", " ", cleaned)
 
     def _is_arm_command(self, text: str) -> bool:
+        """Как снятие: только целая команда, не «когда я ухожу из дома»."""
         cleaned = self._norm_security(text)
-        return any(
-            phrase in cleaned
-            for phrase in ("я ухожу", "включи охрану", "активируй охрану", "режим охраны")
+        return bool(
+            re.search(
+                r"^(?:(?:джарвис|умник|гаврила|гаврюша)\s+)?"
+                r"(?:ну\s+)?"
+                r"(?:"
+                r"включи\s+(?:охрану|режим охраны)"
+                r"|активируй\s+(?:охрану|режим охраны)"
+                r"|поставь\s+на\s+охрану"
+                r"|режим охраны"
+                r"|я\s+ухожу"
+                r")"
+                r"(?:\s+пожалуйста)?$",
+                cleaned,
+            )
         )
 
     def _is_disarm_command(self, text: str) -> bool:

@@ -12,6 +12,13 @@ class TestSecurityAndSettings(unittest.TestCase):
         self.assertTrue(sec._is_arm_command("включи охрану"))
         self.assertTrue(sec._is_arm_command("я ухожу"))
         self.assertTrue(sec._is_arm_command("активируй режим охраны"))
+        self.assertTrue(sec._is_arm_command("джарвис я ухожу"))
+        self.assertTrue(sec._is_arm_command("режим охраны"))
+
+        # Substrings in casual conversation must not trigger arm
+        self.assertFalse(sec._is_arm_command("когда я ухожу из дома"))
+        self.assertFalse(sec._is_arm_command("что такое режим охраны"))
+        self.assertFalse(sec._is_arm_command("я ухожу от этой темы"))
 
         # Disarm
         self.assertTrue(sec._is_disarm_command("я тут"))

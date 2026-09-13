@@ -36,6 +36,23 @@ _LIST_HINTS = (
 )
 _ON = ("включи", "зажги", "открой", "активируй", "вруби")
 _OFF = ("выключи", "потуши", "закрой", "выруби", "погаси")
+_LOCK_HINTS = (
+    "замок", "замкн", "запри", "запер", "отопри", "отопр",
+    "заблокир", "разблокир",
+)
+_COVER_HINTS = ("штор", "жалюз", "рольстав", "ворот", "маркиз")
+
+
+def allows_lock_command(text: str) -> bool:
+    """Замок не трогаем по голому «включи / выключи»."""
+    lowered = _norm(text)
+    return any(hint in lowered for hint in _LOCK_HINTS)
+
+
+def allows_cover_command(text: str) -> bool:
+    """Шторы и ворота — только если их назвали явно."""
+    lowered = _norm(text)
+    return any(hint in lowered for hint in _COVER_HINTS)
 
 
 _BARE_LIGHT = {
@@ -156,6 +173,10 @@ class HomeAssistantSkill(BaseSkill):
             candidates = {ent["name_norm"]}
             object_id = ent["entity_id"].split(".", 1)[-1].replace("_", " ")
             candidates.add(_norm(object_id))
+            if ent["domain"] == "lock" and not allows_lock_command(text):
+                continue
+            if ent["domain"] == "cover" and not allows_cover_command(text):
+                continue
             for cand in candidates:
                 if len(cand) < 3:
                     continue
@@ -268,9 +289,20 @@ class HomeAssistantSkill(BaseSkill):
 
         want_on = any(v in text for v in _ON)
         want_off = any(v in text for v in _OFF)
+        if allows_lock_command(text):
+            if any(hint in text for hint in ("отопр", "разблокир")):
+                want_on = True
+            if any(hint in text for hint in ("запри", "запер", "заблокир", "замкн")):
+                want_off = True
         entity = self._match_entity(text)
         if entity is None and (want_on or want_off) and self._last_entity:
-            entity = self._last_entity
+            last = self._last_entity
+            last_ok = (
+                (last["domain"] != "lock" or allows_lock_command(text))
+                and (last["domain"] != "cover" or allows_cover_command(text))
+            )
+            if last_ok:
+                entity = last
 
         if entity is None:
             if any(marker in text for marker in _HA_MARKERS):

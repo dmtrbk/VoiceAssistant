@@ -4,6 +4,8 @@ from skills.stocks import (
     _extract_lots,
     _wants_market_report,
     _has_max_hint,
+    _is_drop_sell,
+    _trade_kind,
 )
 
 
@@ -53,6 +55,16 @@ class TestStocks(unittest.TestCase):
         # FILL or PARTIAL is filled
         self.assertTrue(self.skill._order_filled({"executionReportStatus": "EXECUTION_REPORT_STATUS_FILL"}))
         self.assertTrue(self.skill._order_filled({"executionReportStatus": "EXECUTION_REPORT_STATUS_PARTIALLYFILL"}))
+
+    def test_drop_sell_needs_market_context(self):
+        self.assertFalse(_is_drop_sell("сбрось таймер"))
+        self.assertFalse(_trade_kind("сбрось таймер"))
+        self.assertTrue(_is_drop_sell("сбрось акции сбер"))
+        self.assertEqual(_trade_kind("сбрось акции сбер"), "sell")
+        self.assertEqual(_trade_kind("продай сбер"), "sell")
+
+    def test_init_does_not_start_desk(self):
+        self.assertFalse(getattr(self.skill, "_desk_thread", None) and self.skill._desk_thread.is_alive())
 
 
 if __name__ == "__main__":

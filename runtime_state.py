@@ -8,6 +8,7 @@ import threading
 
 _lock = threading.Lock()
 _speak_epoch = 0
+_session_epoch = 0
 _extra_tts_stops: list = []
 
 
@@ -21,6 +22,19 @@ def bump_speak_epoch() -> int:
 def speak_epoch() -> int:
     with _lock:
         return _speak_epoch
+
+
+def bump_session_epoch() -> int:
+    """Сон / тайм-аут / авария: фоновые команды после этого не трогают сессию."""
+    global _session_epoch
+    with _lock:
+        _session_epoch += 1
+        return _session_epoch
+
+
+def session_epoch() -> int:
+    with _lock:
+        return _session_epoch
 
 
 def register_extra_tts_stop(callback) -> None:

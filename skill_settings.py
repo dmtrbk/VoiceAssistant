@@ -186,6 +186,12 @@ def set_auto_trade(enabled: bool) -> None:
         _auto_trade = bool(enabled)
     os.environ["TINKOFF_AUTO_TRADE"] = "true" if enabled else "false"
     _persist()
+    if enabled:
+        try:
+            from skills import stocks_skill
+            stocks_skill.start_background()
+        except Exception as exc:
+            logging.debug("[Настройки] Старт автоторговли: %s", exc)
     logging.info("[Настройки] Автоторговля: %s", "вкл" if enabled else "выкл")
 
 

@@ -72,6 +72,20 @@ class TestTimer(unittest.TestCase):
         self.skill.execute(ctx_cancel)
         self.assertEqual(len(self.skill.active_timers), 0)
 
+    def test_expired_timer_is_announced(self):
+        import json
+
+        with open(TIMERS_FILE, "w", encoding="utf-8") as handle:
+            json.dump(
+                [{"end_time": time.time() - 30, "duration_sec": 60, "label": "5 минут"}],
+                handle,
+            )
+        spoken = []
+        self.skill.start_background(spoken.append)
+        self.assertEqual(len(self.skill.active_timers), 0)
+        self.assertTrue(spoken)
+        self.assertIn("пока меня не было", spoken[0].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

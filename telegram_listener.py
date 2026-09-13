@@ -2,6 +2,7 @@
 
 import html
 import os
+import queue
 import re
 import time
 import fcntl
@@ -19,6 +20,9 @@ ALLOWED_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip().strip("\"'")
 _listener_lock = threading.Lock()
 _is_listener_running = False
 _lock_file_handle = None
+_command_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
+_worker_started = False
+_worker_lock = threading.Lock()
 
 
 def _acquire_process_lock() -> bool:
@@ -65,6 +69,39 @@ def send_reply(chat_id: str, text: str):
         logging.error(f"[Telegram] Ошибка отправки сообщения: {e}")
 
 
+def _command_worker() -> None:
+    """Один поток на все входящие: не плодим Thread на каждое сообщение."""
+    while True:
+        item = _command_queue.get()
+        if item is None:
+            return
+        text, chat_id = item
+
+        def telegram_speak(reply_text: str, _chat_id=chat_id) -> None:
+            logging.info("[Telegram] Ответ отправлен (%s симв.).", len(reply_text or ""))
+            send_reply(_chat_id, reply_text)
+
+        try:
+            execute_command(text, speak_callback=telegram_speak, channel="telegram")
+        except Exception as exc:
+            logging.error("[Telegram] Ошибка выполнения: %s", exc)
+
+
+def _ensure_command_worker() -> None:
+    global _worker_started
+    with _worker_lock:
+        if _worker_started:
+            return
+        _worker_started = True
+    threading.Thread(target=_command_worker, daemon=True, name="TelegramCommandWorker").start()
+
+
+def enqueue_telegram_command(text: str, chat_id: str) -> None:
+    """Кладёт команду в очередь единственного worker (удобно тестировать)."""
+    _ensure_command_worker()
+    _command_queue.put((text, chat_id))
+
+
 def run_telegram_listener():
     global _is_listener_running
     with _listener_lock:
@@ -81,6 +118,7 @@ def run_telegram_listener():
             _is_listener_running = False
         return
 
+    _ensure_command_worker()
     offset = 0
     logging.info("[Telegram] Модуль приёма команд запущен.")
 
@@ -105,22 +143,9 @@ def run_telegram_listener():
                 chat_id = str(message.get("chat", {}).get("id", ""))
                 text = message.get("text", "").strip()
 
-                # Проверка авторизации отправителя
                 if chat_id == str(ALLOWED_CHAT_ID) and text:
-                    logging.info(f"[Telegram Command]: {text}")
-
-                    # Callback перехватывает фразы, которые ассистент произносит в reply.
-                    # chat_id фиксируем аргументом по умолчанию, иначе замыкание увидит следующее значение из цикла.
-                    def telegram_speak(reply_text: str, _chat_id=chat_id):
-                        logging.info(f"[Telegram Reply]: {reply_text}")
-                        send_reply(_chat_id, reply_text)
-
-                    threading.Thread(
-                        target=execute_command,
-                        args=(text,),
-                        kwargs={"speak_callback": telegram_speak, "channel": "telegram"},
-                        daemon=True,
-                    ).start()
+                    logging.info("[Telegram] Команда принята (%s симв.).", len(text))
+                    enqueue_telegram_command(text, chat_id)
 
         except Exception as e:
             logging.error(f"[Telegram Error]: {e}")

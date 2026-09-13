@@ -17,8 +17,6 @@ class PentagonSkill(BaseSkill):
         matrix_triggers = ["взлом матрицы", "взломай матрицу", "эффект матрицы", "режим матрицы", "запусти матрицу", "включи матрицу", "код матрицы"]
         if any(w in lowered for w in matrix_triggers):
             return True
-        if lowered in ["матрица", "матрицу"]:
-            return True
         return False
 
     def execute(self, context: RequestContext) -> None:

@@ -751,26 +751,18 @@ class AIChatSkill(BaseSkill):
             try:
                 from skill_settings import is_skill_enabled
                 from skills import stocks_skill
-                from skills.base import RequestContext
 
                 if is_skill_enabled(stocks_skill):
-                    captured_reports: list[str] = []
-                    temp_context = RequestContext(
-                        raw_text=text,
-                        speak=lambda r: captured_reports.append(str(r)),
-                        channel=channel,
-                    )
-                    stocks_skill.execute(temp_context)
-                    broker_report = " ".join(captured_reports).strip()
-
-                    if not broker_report:
-                        ticker = stocks_skill._ticker_from_text(text_lower)
-                        if ticker:
-                            broker_report = stocks_skill._speak_one(ticker)
-                        elif stocks_skill._token:
-                            broker_report = stocks_skill._speak_portfolio(emphasize_yield=True)
-                        else:
-                            broker_report = stocks_skill._speak_watch(emphasize_yield=True)
+                    stocks_skill._token = (
+                        os.getenv("TINKOFF_INVEST_TOKEN") or os.getenv("TINKOFF_TOKEN") or ""
+                    ).strip()
+                    ticker = stocks_skill._ticker_from_text(text_lower)
+                    if ticker:
+                        broker_report = stocks_skill._speak_one(ticker)
+                    elif stocks_skill._token:
+                        broker_report = stocks_skill._speak_portfolio(emphasize_yield=True)
+                    else:
+                        broker_report = stocks_skill._speak_watch(emphasize_yield=True)
 
                     if broker_report:
                         extra += f"\n[Реальное состояние твоего фонда на этот момент]: {broker_report}"

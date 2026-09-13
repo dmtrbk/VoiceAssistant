@@ -53,7 +53,7 @@ from tts_cache import (
     release_temp_wav,
     SYSTEM_CACHE_PHRASES,
 )
-from runtime_state import bump_speak_epoch, speak_epoch
+from runtime_state import bump_session_epoch, bump_speak_epoch, session_epoch, speak_epoch
 from context_manager import clear_active_context, is_in_context
 from triggers import (
     is_quick_command,
@@ -65,8 +65,6 @@ from triggers import (
     is_garbled_utterance,
     is_self_echo,
 )
-
-start_telegram_listener_thread()
 
 WAKE_WORDS = ["джарвис", "умник", "гаврила", "гаврюша"]
 SAMPLERATE = 16000
@@ -295,17 +293,23 @@ def _tts_worker() -> None:
     """Долгоживущий воркер: один Piper, один paplay. Следующий кусок синтезируется во время игры."""
     global _tts_worker_running
     prepared: tuple[str, bool, int] | None = None
+    leftover: tuple[str, int] | None = None
     mute_waited = False
     try:
         while True:
             if prepared is None:
-                try:
-                    text, gen = _tts_queue.get(timeout=0.2)
-                except queue.Empty:
-                    if not is_thinking:
-                        _mark_tts_idle()
-                    continue
+                if leftover is not None:
+                    text, gen = leftover
+                    leftover = None
+                else:
+                    try:
+                        text, gen = _tts_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        if not is_thinking:
+                            _mark_tts_idle()
+                        continue
                 if gen != _tts_generation or playback_interrupted:
+                    leftover = None
                     continue
                 if MUTE_SPEECH:
                     if not mute_waited:
@@ -319,21 +323,24 @@ def _tts_worker() -> None:
             path, was_cached, gen = prepared
             prepared = None
             if gen != _tts_generation or playback_interrupted:
+                leftover = None
                 release_temp_wav(path, was_cached)
                 continue
 
-            prefetch = None
-            try:
-                prefetch = _tts_queue.get_nowait()
-            except queue.Empty:
-                pass
-
             proc = _play_prepared(path, was_cached, gen)
+            prefetch = None
+            if proc is not None:
+                try:
+                    prefetch = _tts_queue.get_nowait()
+                except queue.Empty:
+                    pass
             if prefetch is not None:
                 ptext, pgen = prefetch
                 if pgen == _tts_generation and not playback_interrupted and not MUTE_SPEECH:
                     # paplay уже играет — Piper следующего куска параллельно.
                     prepared = _synth_item(ptext, pgen)
+                elif pgen == _tts_generation:
+                    leftover = prefetch
             _wait_play(proc, path, was_cached)
     finally:
         with _tts_lock:
@@ -370,9 +377,12 @@ def speak(text, recognizer=None):
         threading.Thread(target=_tts_worker, daemon=True, name="tts-worker").start()
 
 
-def go_idle():
+def go_idle(*, stop_tts: bool = False):
     """Полный сон сессии: idle, сброс переспроса, музыка обратно."""
     global is_active, asked_to_repeat, awaiting_followup
+    bump_session_epoch()
+    if stop_tts:
+        stop_speaking(to_idle=True)
     is_active = False
     asked_to_repeat = False
     awaiting_followup = False
@@ -590,6 +600,7 @@ def execute_command_async(cmd_text, safe_speak_func):
         was_active = is_active
         is_quick = is_quick_command(cmd_text)
         epoch = speak_epoch()
+        cmd_session = session_epoch()
 
         def gated_speak(text):
             if epoch != speak_epoch():
@@ -609,6 +620,8 @@ def execute_command_async(cmd_text, safe_speak_func):
             )
         finally:
             _end_thinking()
+        if cmd_session != session_epoch():
+            return
         last_active_time = time.time()
 
         if should_sleep:
@@ -669,8 +682,19 @@ def timeout_monitor():
             media_on = volume_ctrl.is_ducked_or_playing() or is_movie_playing()
             current_timeout = ATTENTION_TIMEOUT_MUSIC if media_on else ATTENTION_TIMEOUT
             if time.time() - last_active_time > current_timeout:
-                go_idle()
+                go_idle(stop_tts=True)
                 logging.info(f"[Система] Время ожидания истекло ({current_timeout:g} с). Возврат в спящий режим.")
+
+
+def _start_runtime_services() -> None:
+    """Telegram, автоторговля и восстановление таймеров — только после старта, не с импорта."""
+    start_telegram_listener_thread()
+    try:
+        from skills import stocks_skill, timer_skill
+        stocks_skill.start_background()
+        timer_skill.start_background(speak)
+    except Exception as exc:
+        logging.warning("[Система] Фоновые сервисы: %s", exc)
 
 
 def main():
@@ -687,6 +711,8 @@ def main():
     if not os.path.exists(PIPER_MODEL):
         logging.critical(f"Модель Piper не найдена по пути: {PIPER_MODEL}.")
         return
+
+    _start_runtime_services()
 
     vosk_model = Model(MODEL_PATH)
     recognizer = KaldiRecognizer(vosk_model, SAMPLERATE)
@@ -796,7 +822,15 @@ def main():
                 current_phrase_max_rms = 0.0
 
                 with recognizer_lock:
-                    res = json.loads(recognizer.Result())
+                    raw_result = recognizer.Result()
+                try:
+                    res = json.loads(raw_result)
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    logging.warning("[Vosk] Повреждённый результат: %s", exc)
+                    _reset_recognizer(recognizer)
+                    continue
+                if not isinstance(res, dict):
+                    continue
                 text = res.get("text", "").lower().strip()
                 if not text:
                     continue
@@ -869,7 +903,14 @@ def main():
             # 2. Обработка промежуточных результатов для мгновенного прерывания с блокировкой
             else:
                 with recognizer_lock:
-                    partial_res = json.loads(recognizer.PartialResult())
+                    raw_partial = recognizer.PartialResult()
+                try:
+                    partial_res = json.loads(raw_partial)
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    logging.warning("[Vosk] Повреждённый partial: %s", exc)
+                    continue
+                if not isinstance(partial_res, dict):
+                    continue
                 partial_text = partial_res.get("partial", "").lower().strip()
                 
                 if partial_text:
@@ -945,8 +986,9 @@ if __name__ == "__main__":
         logging.info("Ассистент выключен.")
         sys.exit(0)
 
-    # Регистрируем обработчик системного сигнала прерывания (SIGINT / Ctrl+C)
+    # Ctrl+C и systemctl stop: гасим TTS и возвращаем громкость.
     signal.signal(signal.SIGINT, sigint_handler)
+    signal.signal(signal.SIGTERM, sigint_handler)
 
     try:
         # Фоновый прогрев кэша частых фраз

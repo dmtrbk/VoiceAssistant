@@ -205,17 +205,36 @@ class TimerSkill(BaseSkill):
         except Exception as e:
             logger.debug("[Таймер] Не удалось сохранить %s: %s", TIMERS_FILE, e)
 
-    def _ensure_restored_locked(self, default_speak) -> None:
+    @staticmethod
+    def _missed_phrase(labels: list[str]) -> str:
+        if len(labels) == 1:
+            return f"Таймер на {labels[0]} сработал, пока меня не было."
+        return "Пока меня не было, сработали таймеры: " + ", ".join(labels) + "."
+
+    def start_background(self, speak_callback) -> None:
+        """Поднять сохранённые таймеры при старте службы, не дожидаясь команды."""
+        with self._lock:
+            missed = self._ensure_restored_locked(speak_callback)
+            self._prune_timers()
+            self._save_timers_locked()
+        if missed:
+            try:
+                speak_callback(self._missed_phrase(missed))
+            except Exception as exc:
+                logger.debug("[Таймер] Не удалось озвучить просроченные: %s", exc)
+
+    def _ensure_restored_locked(self, default_speak) -> list[str]:
         if self._restored:
-            return
+            return []
         self._restored = True
         if not os.path.exists(TIMERS_FILE):
-            return
+            return []
+        missed: list[str] = []
         try:
             with open(TIMERS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, list):
-                return
+                return []
             now = time.time()
             for item in data:
                 if not isinstance(item, dict):
@@ -233,8 +252,12 @@ class TimerSkill(BaseSkill):
                     )
                     self.active_timers.append(new_timer)
                     logger.info("[Таймер] Восстановлен активный таймер на %s (осталось %d с).", label, int(end_time - now))
+                else:
+                    missed.append(label)
+                    logger.info("[Таймер] Просрочен, пока ассистент был выключен: %s.", label)
         except Exception as e:
             logger.debug("[Таймер] Не удалось восстановить таймеры: %s", e)
+        return missed
 
     def _prune_timers(self) -> None:
         self.active_timers = [
@@ -247,9 +270,11 @@ class TimerSkill(BaseSkill):
         alert = context.alert_speak or context.speak
 
         with self._lock:
-            self._ensure_restored_locked(alert)
+            missed = self._ensure_restored_locked(alert)
             self._prune_timers()
             self._save_timers_locked()
+        if missed:
+            alert(self._missed_phrase(missed))
 
         # 1. Отмена / сброс таймера
         if any(w in text for w in ["отмени", "сбрось", "выключи", "удали", "стоп", "останови", "закрой"]):

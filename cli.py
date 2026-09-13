@@ -71,14 +71,15 @@ def _cli_tts_worker() -> None:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                _cli_play_proc = proc
+                with _cli_tts_lock:
+                    _cli_play_proc = proc
                 proc.wait()
                 release_temp_wav(wav_path, cached)
         except Exception as exc:
             logging.warning("[CLI] Ошибка озвучки: %s", exc)
         finally:
-            _cli_play_proc = None
             with _cli_tts_lock:
+                _cli_play_proc = None
                 _cli_tts_pending = max(0, _cli_tts_pending - 1)
                 if _cli_tts_pending == 0:
                     _cli_tts_idle.set()
@@ -95,7 +96,8 @@ def stop_cli_tts() -> None:
         if item is not None:
             with _cli_tts_lock:
                 _cli_tts_pending = max(0, _cli_tts_pending - 1)
-    proc = _cli_play_proc
+    with _cli_tts_lock:
+        proc = _cli_play_proc
     if proc is not None:
         try:
             proc.terminate()
@@ -185,6 +187,12 @@ def execute_cli_command(user_text: str, mute: bool = False, verbose: bool = Fals
 def run_interactive_loop(mute: bool = False, verbose: bool = False):
     """Запускает интерактивную командную строку."""
     start_telegram_listener_thread()
+    try:
+        from skills import stocks_skill, timer_skill
+        stocks_skill.start_background()
+        timer_skill.start_background(lambda text: play_audio_feedback(text, mute=mute))
+    except Exception as exc:
+        logging.warning("[CLI] Фоновые сервисы: %s", exc)
     print(f"\n{COLOR_MAGENTA}{COLOR_BOLD}======================================================{COLOR_RESET}")
     print(f"{COLOR_MAGENTA}{COLOR_BOLD}         🤖 ГОЛОСОВОЙ АССИСТЕНТ ДЖАРВИС — CLI         {COLOR_RESET}")
     print(f"{COLOR_MAGENTA}{COLOR_BOLD}======================================================{COLOR_RESET}")

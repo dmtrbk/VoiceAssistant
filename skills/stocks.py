@@ -78,7 +78,7 @@ _YIELD_HINTS = (
 )
 
 _BUY_HINTS = ("купи", "докупи", "возьми")
-_SELL_HINTS = ("продай", "сбрось")
+_SELL_HINTS = ("продай",)
 _AUTO_HINTS = (
     "поторгуй", "поторгуйся", "сыграй на бирже",
     "поработай счетом", "поработай счётом",
@@ -204,12 +204,22 @@ def _has_max_hint(text: str) -> bool:
     )
 
 
+def _is_drop_sell(text: str) -> bool:
+    """«Сбрось» = продажа только вместе с бумагой / рынком, не «сбрось таймер»."""
+    if not re.search(r"(?<![а-яёa-z])сбрось(?![а-яёa-z])", text):
+        return False
+    return any(
+        word in text
+        for word in (*_MARKET_WORDS, "сбер", "газпром", "втб", "лот", "бумаг", "позици", "тмос")
+    )
+
+
 def _trade_kind(text: str) -> str | None:
     if any(hint in text for hint in _AUTO_HINTS):
         return "auto"
     if any(hint in text for hint in _ALLIN_HINTS):
         return "allin"
-    if any(hint in text for hint in _SELL_HINTS):
+    if any(hint in text for hint in _SELL_HINTS) or _is_drop_sell(text):
         return "sell"
     if any(hint in text for hint in _BUY_HINTS):
         return "buy"
@@ -334,7 +344,7 @@ class StocksSkill(BaseSkill):
         self._desk_stop = threading.Event()
         self._desk_enabled = threading.Event()
         self._desk_enabled.set()
-        self._ensure_desk_loop()
+        self._desk_thread: threading.Thread | None = None
 
     def _ensure_desk_loop(self) -> None:
         global _desk_loop_started
@@ -354,6 +364,10 @@ class StocksSkill(BaseSkill):
 
     def on_enabled(self) -> None:
         self._desk_enabled.set()
+        self.start_background()
+
+    def start_background(self) -> None:
+        """Фоновый стол — после старта ассистента, не при импорте навыка."""
         self._ensure_desk_loop()
 
     def can_handle(self, context: RequestContext) -> bool:
