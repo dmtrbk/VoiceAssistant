@@ -328,6 +328,17 @@ def _auto_trade_enabled() -> bool:
     return _sandbox()
 
 
+def _voice_trade_enabled() -> bool:
+    """Заявки по команде («купи», «продай», «поторгуй»): тумблер, иначе .env."""
+    try:
+        from skill_settings import is_voice_trade_enabled
+        return is_voice_trade_enabled()
+    except Exception:
+        pass
+    raw = (os.getenv("TINKOFF_VOICE_TRADE") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 class StocksSkill(BaseSkill):
     """Брокерский счёт Т-Инвест: котировки, портфель, сделки и авто-ребалансировка."""
 
@@ -1002,6 +1013,8 @@ class StocksSkill(BaseSkill):
             return self._execute_trade_locked(text, kind, ticker)
 
     def _execute_trade_locked(self, text: str, kind: str, ticker: str | None) -> str:
+        if not _voice_trade_enabled():
+            return "Голосовые сделки выключены. Если нужно — зайди в приложение брокера."
         requested = _extract_lots(text)
         if kind == "auto":
             return self._trade_auto()

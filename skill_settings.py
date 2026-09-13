@@ -19,7 +19,7 @@ OPTIONAL_SKILLS = (
     ("movie", "Фильмы и видео", "ВК Видео и плеер MPV"),
     ("audacious", "Музыка и радио", "Audacious, папки, плейлисты и поиск песен"),
     ("weather", "Погода", "Прогноз Open-Meteo"),
-    ("stocks", "Биржа и портфель", "Котировки Мосбиржи, брокерский счёт Т-Инвест, сделки и авто-ребалансировка"),
+    ("stocks", "Биржа и портфель", "Котировки Мосбиржи и сводка счёта Т-Инвест. Сделки — тумблеры ниже"),
     ("timer", "Таймеры", "Отсчёт и оповещение"),
     ("calculator", "Калькулятор", "Счёт без облака"),
     ("games", "Игры и рандомайзер", "Больше-Меньше, кубики d6/d20, случайные числа"),
@@ -33,6 +33,7 @@ OPTIONAL_SKILLS = (
 
 OPTIONAL_IDS = {item[0] for item in OPTIONAL_SKILLS}
 AUTO_TRADE_KEY = "stocks_auto_trade"
+VOICE_TRADE_KEY = "stocks_voice_trade"
 
 # GUI-поток читает очередь и открывает окно. Голос только кладёт «open».
 settings_events: queue.Queue[str] = queue.Queue()
@@ -40,6 +41,7 @@ settings_events: queue.Queue[str] = queue.Queue()
 _lock = threading.Lock()
 _enabled: dict[str, bool] = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
 _auto_trade = False
+_voice_trade = False
 _loaded = False
 _SKILL_MAP: dict[str, Any] | None = None
 
@@ -52,6 +54,12 @@ def _env_auto_trade_default() -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return (os.getenv("TINKOFF_SANDBOX") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_voice_trade_default() -> bool:
+    """Сделки из Джарвиса выключены, пока явно не включат."""
+    raw = (os.getenv("TINKOFF_VOICE_TRADE") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _write_json_atomic(path: str, data: Any) -> None:
@@ -116,6 +124,7 @@ def _persist() -> None:
     with _lock:
         snapshot = dict(_enabled)
         snapshot[AUTO_TRADE_KEY] = bool(_auto_trade)
+        snapshot[VOICE_TRADE_KEY] = bool(_voice_trade)
     try:
         _write_json_atomic(CONFIG_PATH, snapshot)
     except Exception as exc:
@@ -124,10 +133,11 @@ def _persist() -> None:
 
 def reload_from_disk() -> dict[str, bool]:
     """Читает skills_enabled.json. Нет ключа — навык включён."""
-    global _enabled, _auto_trade
+    global _enabled, _auto_trade, _voice_trade
     flags = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
     auto_trade = _env_auto_trade_default()
-    # Ключ stocks_auto_trade в JSON важнее пустого TINKOFF_AUTO_TRADE.
+    voice_trade = _env_voice_trade_default()
+    # Ключи в JSON важнее пустых TINKOFF_AUTO_TRADE / TINKOFF_VOICE_TRADE.
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
@@ -138,11 +148,14 @@ def reload_from_disk() -> dict[str, bool]:
                         flags[sid] = bool(raw[sid])
                 if AUTO_TRADE_KEY in raw:
                     auto_trade = bool(raw[AUTO_TRADE_KEY])
+                if VOICE_TRADE_KEY in raw:
+                    voice_trade = bool(raw[VOICE_TRADE_KEY])
         except Exception as exc:
             logging.error("[Настройки] Не удалось прочитать %s: %s", CONFIG_PATH, exc)
     with _lock:
         _enabled = flags
         _auto_trade = auto_trade
+        _voice_trade = voice_trade
     return dict(flags)
 
 
@@ -193,6 +206,24 @@ def set_auto_trade(enabled: bool) -> None:
         except Exception as exc:
             logging.debug("[Настройки] Старт автоторговли: %s", exc)
     logging.info("[Настройки] Автоторговля: %s", "вкл" if enabled else "выкл")
+
+
+def is_voice_trade_enabled() -> bool:
+    """Заявки по команде Джарвиса («купи», «продай», «поторгуй»)."""
+    _ensure_loaded()
+    with _lock:
+        return bool(_voice_trade)
+
+
+def set_voice_trade(enabled: bool) -> None:
+    """Тумблер сделок голосом: сразу на диск и в окружение процесса."""
+    global _voice_trade
+    _ensure_loaded()
+    with _lock:
+        _voice_trade = bool(enabled)
+    os.environ["TINKOFF_VOICE_TRADE"] = "true" if enabled else "false"
+    _persist()
+    logging.info("[Настройки] Сделки голосом: %s", "вкл" if enabled else "выкл")
 
 
 def request_open_settings() -> None:

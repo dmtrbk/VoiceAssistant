@@ -12,6 +12,7 @@ from triggers import (
     is_emergency_stop,
     is_filler,
     is_garbled_utterance,
+    is_weak_stt_for_chat,
     is_hold_interrupt,
     is_sleep_command,
     split_quick_compound,
@@ -220,7 +221,9 @@ def _dispatch_single(
         return False
 
     if chosen is None:
-        if is_garbled_utterance(text):
+        if is_garbled_utterance(text) or (
+            channel == "voice" and is_weak_stt_for_chat(text)
+        ):
             speak_callback("Не расслышал, повторите, пожалуйста.")
             return False
         try:

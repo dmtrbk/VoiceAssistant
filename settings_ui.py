@@ -15,8 +15,10 @@ from skill_settings import (
     OPTIONAL_SKILLS,
     get_flags,
     is_auto_trade_enabled,
+    is_voice_trade_enabled,
     set_auto_trade,
     set_flag,
+    set_voice_trade,
 )
 
 
@@ -66,8 +68,9 @@ class SettingsWindow(QWidget):
         root.addWidget(scroll)
 
         self._boxes: dict[str, QCheckBox] = {}
+        self._voice_trade_box: QCheckBox | None = None
         self._auto_trade_box: QCheckBox | None = None
-        self._auto_trade_menu: QFrame | None = None
+        self._stocks_menu: QFrame | None = None
         self._rebuild()
 
     def showEvent(self, event):
@@ -77,12 +80,17 @@ class SettingsWindow(QWidget):
     def _rebuild(self) -> None:
         flags = get_flags()
         expected = [item[0] for item in OPTIONAL_SKILLS]
-        if self._boxes and list(self._boxes.keys()) == expected and self._auto_trade_box is not None:
+        if (
+            self._boxes
+            and list(self._boxes.keys()) == expected
+            and self._voice_trade_box is not None
+            and self._auto_trade_box is not None
+        ):
             for skill_id, box in self._boxes.items():
                 box.blockSignals(True)
                 box.setChecked(flags.get(skill_id, True))
                 box.blockSignals(False)
-            self._sync_auto_trade_menu(flags.get("stocks", True))
+            self._sync_stocks_menu(flags.get("stocks", True))
             return
 
         while self._list.count():
@@ -91,8 +99,9 @@ class SettingsWindow(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._boxes.clear()
+        self._voice_trade_box = None
         self._auto_trade_box = None
-        self._auto_trade_menu = None
+        self._stocks_menu = None
 
         for skill_id, title, hint in OPTIONAL_SKILLS:
             row = QFrame()
@@ -114,43 +123,65 @@ class SettingsWindow(QWidget):
             caption.setWordWrap(True)
             col.addWidget(caption)
             if skill_id == "stocks":
-                self._add_auto_trade_menu(col, flags.get("stocks", True))
+                self._add_stocks_menu(col, flags.get("stocks", True))
             self._list.addWidget(row)
 
         self._list.addStretch(1)
 
-    def _add_auto_trade_menu(self, parent: QVBoxLayout, stocks_on: bool) -> None:
+    def _add_stocks_menu(self, parent: QVBoxLayout, stocks_on: bool) -> None:
         menu = QFrame()
         menu.setObjectName("submenu")
         col = QVBoxLayout(menu)
         col.setContentsMargins(0, 4, 0, 0)
-        col.setSpacing(2)
+        col.setSpacing(8)
 
-        box = QCheckBox("Автоторговля")
-        box.setChecked(is_auto_trade_enabled())
-        box.toggled.connect(set_auto_trade)
-        col.addWidget(box)
+        voice_box = QCheckBox("Сделки голосом")
+        voice_box.setChecked(is_voice_trade_enabled())
+        voice_box.toggled.connect(set_voice_trade)
+        col.addWidget(voice_box)
 
-        caption = QLabel(
+        voice_hint = QLabel(
+            "«Купи», «продай», «поторгуй» выставляют заявки. "
+            "Выключено — только сводка, сделки в приложении брокера."
+        )
+        voice_hint.setObjectName("hint")
+        voice_hint.setWordWrap(True)
+        col.addWidget(voice_hint)
+
+        auto_box = QCheckBox("Автоторговля")
+        auto_box.setChecked(is_auto_trade_enabled())
+        auto_box.toggled.connect(set_auto_trade)
+        col.addWidget(auto_box)
+
+        auto_hint = QLabel(
             "Фон сам ставит заявки примерно раз в 45 минут. На живом счёте — реальные сделки."
         )
-        caption.setObjectName("hint")
-        caption.setWordWrap(True)
-        col.addWidget(caption)
+        auto_hint.setObjectName("hint")
+        auto_hint.setWordWrap(True)
+        col.addWidget(auto_hint)
 
-        self._auto_trade_box = box
-        self._auto_trade_menu = menu
+        self._voice_trade_box = voice_box
+        self._auto_trade_box = auto_box
+        self._stocks_menu = menu
         parent.addWidget(menu)
-        self._sync_auto_trade_menu(stocks_on)
+        self._sync_stocks_menu(stocks_on)
 
-    def _sync_auto_trade_menu(self, stocks_on: bool) -> None:
-        if self._auto_trade_box is None or self._auto_trade_menu is None:
+    def _sync_stocks_menu(self, stocks_on: bool) -> None:
+        if (
+            self._voice_trade_box is None
+            or self._auto_trade_box is None
+            or self._stocks_menu is None
+        ):
             return
+        self._voice_trade_box.blockSignals(True)
+        self._voice_trade_box.setChecked(is_voice_trade_enabled())
+        self._voice_trade_box.setEnabled(stocks_on)
+        self._voice_trade_box.blockSignals(False)
         self._auto_trade_box.blockSignals(True)
         self._auto_trade_box.setChecked(is_auto_trade_enabled())
         self._auto_trade_box.setEnabled(stocks_on)
         self._auto_trade_box.blockSignals(False)
-        self._auto_trade_menu.setVisible(stocks_on)
+        self._stocks_menu.setVisible(stocks_on)
 
     def _on_stocks_toggled(self, checked: bool) -> None:
-        self._sync_auto_trade_menu(checked)
+        self._sync_stocks_menu(checked)

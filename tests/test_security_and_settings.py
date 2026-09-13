@@ -1,4 +1,8 @@
+import os
 import unittest
+from unittest.mock import patch
+
+from skill_settings import _env_voice_trade_default
 from skills.security import SecuritySkill
 from skills.assistant_settings import AssistantSettingsSkill
 from skills.base import RequestContext
@@ -42,6 +46,12 @@ class TestSecurityAndSettings(unittest.TestCase):
         self.assertFalse(asst.can_handle(RequestContext(raw_text="открой системные настройки")))
         self.assertFalse(asst.can_handle(RequestContext(raw_text="открой настройки сети")))
         self.assertFalse(asst.can_handle(RequestContext(raw_text="настройки экрана")))
+
+    def test_voice_trade_env_default_off(self):
+        with patch.dict(os.environ, {"TINKOFF_VOICE_TRADE": ""}, clear=False):
+            self.assertFalse(_env_voice_trade_default())
+        with patch.dict(os.environ, {"TINKOFF_VOICE_TRADE": "true"}, clear=False):
+            self.assertTrue(_env_voice_trade_default())
 
 
 if __name__ == "__main__":

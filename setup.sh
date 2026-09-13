@@ -58,11 +58,13 @@ GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-20b
 
 # T-Invest — навык «Биржа и портфель»
-# Голосовые сделки — сразу. Фон сам торгует только при TINKOFF_AUTO_TRADE=true.
+# Сделки голосом по умолчанию выкл (тумблер или TINKOFF_VOICE_TRADE=true).
+# Фон сам торгует только при TINKOFF_AUTO_TRADE=true.
 # Пустой флаг — автоторговля лишь в песочнице (TINKOFF_SANDBOX=true).
 TINKOFF_TOKEN=
 TINKOFF_ACCOUNT_ID=
 TINKOFF_SANDBOX=false
+TINKOFF_VOICE_TRADE=
 TINKOFF_AUTO_TRADE=
 TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
 
@@ -241,7 +243,7 @@ echo "    ✅ Установка завершена успешно!             
 echo "=================================================================="
 echo "1. Ключи в $PROJECT_DIR/.env:"
 echo "   GROQ_API_KEY — облачный диалог"
-echo "   TINKOFF_TOKEN — биржа (сводка и сделки голосом)"
+echo "   TINKOFF_TOKEN — биржа (сводка; сделки — тумблер «Сделки голосом»)"
 echo "   TINKOFF_AUTO_TRADE=true — фоновые заявки на живом счёте"
 echo "   TINKOFF_SANDBOX=true — песочница без реальных денег"
 echo "   CAMERA_INDEX — камера охраны (по умолчанию 0)"

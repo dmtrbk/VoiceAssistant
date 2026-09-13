@@ -7,6 +7,7 @@ from triggers import (
     is_sleep_command,
     is_filler,
     is_garbled_utterance,
+    is_weak_stt_for_chat,
     is_self_echo,
     split_quick_compound,
 )
@@ -55,6 +56,11 @@ class TestTriggers(unittest.TestCase):
         self.assertTrue(is_garbled_utterance("крпт"))
         self.assertTrue(is_garbled_utterance("аааааааа"))
         self.assertFalse(is_garbled_utterance("включи свет"))
+        self.assertFalse(is_garbled_utterance("хорошооо"))
+
+        self.assertFalse(is_weak_stt_for_chat("как дела"))
+        self.assertFalse(is_weak_stt_for_chat("расскажи про погоду"))
+        self.assertTrue(is_weak_stt_for_chat("крпт шкв брн ткв"))
 
     def test_self_echo(self):
         spoken = "Сейчас в Москве плюс двадцать градусов, ясно."

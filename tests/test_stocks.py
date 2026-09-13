@@ -1,4 +1,7 @@
 import unittest
+from unittest.mock import patch
+
+from skills.base import RequestContext
 from skills.stocks import (
     StocksSkill,
     _extract_lots,
@@ -65,6 +68,28 @@ class TestStocks(unittest.TestCase):
 
     def test_init_does_not_start_desk(self):
         self.assertFalse(getattr(self.skill, "_desk_thread", None) and self.skill._desk_thread.is_alive())
+
+    def test_voice_trade_off_blocks_orders(self):
+        spoken: list[str] = []
+        with (
+            patch("skills.stocks._voice_trade_enabled", return_value=False),
+            patch.object(self.skill, "_place_order") as place,
+        ):
+            self.skill.execute(RequestContext(raw_text="купи сбер", speak=spoken.append))
+            place.assert_not_called()
+        self.assertEqual(
+            spoken,
+            ["Голосовые сделки выключены. Если нужно — зайди в приложение брокера."],
+        )
+
+    def test_quote_works_when_voice_trade_off(self):
+        spoken: list[str] = []
+        with (
+            patch("skills.stocks._voice_trade_enabled", return_value=False),
+            patch.object(self.skill, "_speak_one", return_value="Сбер 300 рублей."),
+        ):
+            self.skill.execute(RequestContext(raw_text="сколько стоит сбер", speak=spoken.append))
+        self.assertEqual(spoken, ["Сбер 300 рублей."])
 
 
 if __name__ == "__main__":

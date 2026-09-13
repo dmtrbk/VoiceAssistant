@@ -97,8 +97,8 @@ def _read_audio_input_device() -> int | str | None:
         return raw
 
 
-ATTENTION_TIMEOUT = _read_positive_float("ATTENTION_TIMEOUT", 6.0)
-ATTENTION_TIMEOUT_MUSIC = _read_positive_float("ATTENTION_TIMEOUT_MUSIC", 3.0)
+ATTENTION_TIMEOUT = _read_positive_float("ATTENTION_TIMEOUT", 12.0)
+ATTENTION_TIMEOUT_MUSIC = _read_positive_float("ATTENTION_TIMEOUT_MUSIC", 5.0)
 MIN_SPEECH_RMS = _read_min_speech_rms()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "model")

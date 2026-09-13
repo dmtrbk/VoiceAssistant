@@ -157,16 +157,38 @@ _VOWELS = set("аеёиоуыэюяaeiouy")
 
 
 def is_garbled_utterance(text: str) -> bool:
-    """Обрывок распознавания без гласных или растянутый шум — лучше переспросить, чем отдать в Groq."""
+    """Обрывок без гласных или сильно растянутый шум — переспросить, не в навыки."""
     lowered = normalize_utterance(text)
     if not lowered or is_filler(lowered):
         return False
     letters = [c for c in lowered if c.isalpha()]
     if letters and not any(c in _VOWELS for c in letters):
         return True
-    if re.search(r"(.)\1{3,}", lowered):
+    if re.search(r"(.)\1{4,}", lowered):
         return True
     return False
+
+
+def is_weak_stt_for_chat(text: str) -> bool:
+    """Каша Vosk, на которой Groq начинает выдумывать смысл. Короткие живые фразы пропускаем."""
+    lowered = normalize_utterance(text)
+    if not lowered or is_filler(lowered) or is_garbled_utterance(lowered):
+        return is_garbled_utterance(lowered)
+    words = [w for w in lowered.split() if any(c.isalpha() for c in w)]
+    letters = [c for c in lowered if c.isalpha()]
+    if len(words) <= 3:
+        return False
+    if letters and (sum(1 for c in letters if c in _VOWELS) / len(letters)) < 0.28:
+        return True
+    weak = 0
+    for word in words:
+        w_letters = [c for c in word if c.isalpha()]
+        if len(w_letters) < 3:
+            continue
+        vowels = sum(1 for c in w_letters if c in _VOWELS)
+        if vowels == 0 or (len(w_letters) >= 4 and vowels / len(w_letters) < 0.2):
+            weak += 1
+    return weak >= 2 and weak * 2 >= len(words)
 
 
 def _last_sentence_raw(text: str) -> str:

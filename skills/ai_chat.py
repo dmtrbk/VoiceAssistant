@@ -722,10 +722,12 @@ class AIChatSkill(BaseSkill):
         if channel == "voice":
             extra += (
                 "\n[Канал: Голосовой ассистент]. Ответ будет озвучен синтезатором речи. "
-                "Отвечай кратко (1–3 предложения), простым языком, без списков, без Markdown, "
-                "без смайликов, без ссылок и без спецсимволов. Только связный произносимый текст."
+                "Отвечай 2–5 короткими предложениями, простым языком, без списков, без Markdown, "
+                "без смайликов, без ссылок и без спецсимволов. Только связный произносимый текст. "
+                "Если фраза хозяина похожа на обрывок распознавания речи и смысл неясен — "
+                "одним предложением переспроси, не выдумывай историю из каши слов."
             )
-            max_tokens = 300
+            max_tokens = 450
         else:
             extra += (
                 f"\n[Канал: {channel.upper()} чат]. Пользователь читает ответ текстом на экране. "
@@ -795,12 +797,12 @@ class AIChatSkill(BaseSkill):
             cleaned_reply = ""
 
             if channel == "voice":
-                sentences, chars = (3, 320)
-                if trading_clip_limit is not None:
+                sentences, chars = 5, 560
+                if (wants_report or mentions_market) and trading_clip_limit is not None:
                     try:
                         sentences, chars = trading_clip_limit()
                     except Exception:
-                        sentences, chars = 3, 320
+                        sentences, chars = 5, 560
 
                 streamed = False
                 for model_name in unique_models:
