@@ -122,6 +122,26 @@ QComboBox QAbstractItemView {{
     padding: 4px;
 }}
 QCheckBox#toggle {{ background: transparent; }}
+QFrame#nav {{
+    background: {p.card};
+    border: none;
+    border-radius: 10px;
+}}
+QPushButton#navBtn {{
+    background: transparent;
+    color: {p.muted};
+    border: none;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+}}
+QPushButton#navBtn:hover {{ color: {p.fg}; }}
+QPushButton#navBtn:checked {{
+    background: {p.window};
+    color: {p.fg};
+}}
+QStackedWidget {{ background: transparent; }}
 QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QScrollBar:vertical {{

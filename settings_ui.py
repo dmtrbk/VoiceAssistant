@@ -1,16 +1,19 @@
 # settings_ui.py
-# Окно Qt: модель диалога и необязательные навыки. Каркас скрыт.
+# Окно Qt: вкладки «Основные» (речь, модель, характер) и «Навыки». Каркас скрыт.
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -85,15 +88,11 @@ class SettingsWindow(QWidget):
         self.setObjectName("root")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowTitle("Настройки Джарвиса")
-        self.setMinimumWidth(420)
-        self.setMinimumHeight(520)
-        self.resize(440, 680)
+        self.setMinimumWidth(440)
+        self.setMinimumHeight(480)
+        self.resize(480, 620)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self._apply_theme()
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 16, 20, 16)
-        root.setSpacing(8)
 
         self._model_combo: QComboBox | None = None
         self._model_hint: QLabel | None = None
@@ -101,40 +100,102 @@ class SettingsWindow(QWidget):
         self._stt_hint: QLabel | None = None
         self._persona_combo: QComboBox | None = None
         self._persona_hint: QLabel | None = None
-        root.addWidget(self._section_label("Распознавание речи"))
-        root.addWidget(self._build_stt_card())
-        root.addWidget(self._section_label("Модель диалога"))
-        root.addWidget(self._build_model_card())
-        root.addWidget(self._section_label("Характер ассистента"))
-        root.addWidget(self._build_persona_card())
+        self._boxes: dict[str, QCheckBox] = {}
+        self._voice_trade_box: QCheckBox | None = None
+        self._auto_trade_box: QCheckBox | None = None
+        self._stocks_menu: QFrame | None = None
+        self._list: QVBoxLayout | None = None
+
+        self._stack = QStackedWidget()
+        self._stack.setObjectName("root")
+        self._stack.addWidget(self._wrap_scroll(self._build_main_page()))
+        self._stack.addWidget(self._build_skills_page())
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(12)
+        root.addWidget(self._build_nav())
+        root.addWidget(self._stack, 1)
+        self._rebuild()
+
+    def _build_nav(self) -> QFrame:
+        nav = QFrame()
+        nav.setObjectName("nav")
+        nav.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        row = QHBoxLayout(nav)
+        row.setContentsMargins(4, 4, 4, 4)
+        row.setSpacing(4)
+
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        for index, title in enumerate(("Основные", "Навыки")):
+            button = QPushButton(title)
+            button.setObjectName("navBtn")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            group.addButton(button, index)
+            row.addWidget(button, 1)
+        group.button(0).setChecked(True)
+        group.idClicked.connect(self._stack.setCurrentIndex)
+        self._nav_group = group
+        return nav
+
+    def _wrap_scroll(self, body: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(body)
+        return scroll
+
+    def _build_main_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("root")
+        col = QVBoxLayout(page)
+        col.setContentsMargins(0, 4, 0, 0)
+        col.setSpacing(10)
+        col.addWidget(self._build_stt_card())
+        col.addWidget(self._build_model_card())
+        col.addWidget(self._build_persona_card())
+        col.addStretch(1)
+        return page
+
+    def _build_skills_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("root")
+        col = QVBoxLayout(page)
+        col.setContentsMargins(0, 4, 0, 0)
+        col.setSpacing(8)
 
         subtitle = QLabel("Выключенный навык молчит и в голосе, и в Telegram.")
         subtitle.setObjectName("lead")
         subtitle.setWordWrap(True)
-        root.addWidget(subtitle)
+        col.addWidget(subtitle)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         body = QWidget()
         body.setObjectName("root")
         self._list = QVBoxLayout(body)
         self._list.setContentsMargins(0, 0, 6, 8)
         self._list.setSpacing(16)
         scroll.setWidget(body)
-        root.addWidget(scroll)
-
-        self._boxes: dict[str, QCheckBox] = {}
-        self._voice_trade_box: QCheckBox | None = None
-        self._auto_trade_box: QCheckBox | None = None
-        self._stocks_menu: QFrame | None = None
-        self._rebuild()
+        col.addWidget(scroll, 1)
+        return page
 
     def _section_label(self, text: str) -> QLabel:
         heading = QLabel(text)
         heading.setObjectName("section")
         heading.setContentsMargins(4, 8, 0, 0)
+        return heading
+
+    def _card_title(self, text: str) -> QLabel:
+        heading = QLabel(text)
+        heading.setObjectName("section")
         return heading
 
     def _build_stt_card(self) -> QFrame:
@@ -144,6 +205,7 @@ class SettingsWindow(QWidget):
         col = QVBoxLayout(card)
         col.setContentsMargins(16, 12, 16, 12)
         col.setSpacing(8)
+        col.addWidget(self._card_title("Распознавание речи"))
 
         combo = QComboBox()
         for mode_id, title in stt_mode_choices():
@@ -167,6 +229,7 @@ class SettingsWindow(QWidget):
         col = QVBoxLayout(card)
         col.setContentsMargins(16, 12, 16, 12)
         col.setSpacing(8)
+        col.addWidget(self._card_title("Модель диалога"))
 
         combo = QComboBox()
         for model_id, title in groq_model_choices():
@@ -190,6 +253,7 @@ class SettingsWindow(QWidget):
         col = QVBoxLayout(card)
         col.setContentsMargins(16, 12, 16, 12)
         col.setSpacing(8)
+        col.addWidget(self._card_title("Характер ассистента"))
 
         combo = QComboBox()
         for preset_id, title in persona_preset_choices():
@@ -346,6 +410,8 @@ class SettingsWindow(QWidget):
         parent.addWidget(line)
 
     def _rebuild(self) -> None:
+        if self._list is None:
+            return
         flags = get_flags()
         expected = ordered_skill_ids()
         if (
