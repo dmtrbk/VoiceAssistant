@@ -128,6 +128,50 @@ class TestDialogueRepair(unittest.TestCase):
         self.assertIn("тёплое", clothing_hint(-3))
         self.assertIn("кофта", clothing_hint(7))
 
+    def test_extended_thinking_pauses(self):
+        for pause in ("секунду", "секундочку", "минутку", "так-так", "дай подумать", "сейчас"):
+            self.assertTrue(is_thinking_pause(pause), f"Expected {pause} to be thinking pause")
+            self.assertEqual(early_dialogue_turn(pause), ("silent", None))
+
+    def test_interrupted_speech_and_resumption(self):
+        from dialogue_repair import remember_interrupted, current_interrupted, is_resume_phrase
+        self.assertTrue(is_resume_phrase("продолжай"))
+        self.assertTrue(is_resume_phrase("договори"))
+        self.assertTrue(is_resume_phrase("на чем мы остановились"))
+
+        remember_interrupted("Вот продолжение мысли, которую прервали.")
+        self.assertEqual(current_interrupted(), "Вот продолжение мысли, которую прервали.")
+
+        spoken = []
+        slept = execute("продолжай", spoken.append, channel="cli")
+        self.assertFalse(slept)
+        self.assertEqual(spoken, ["Вот продолжение мысли, которую прервали."])
+        self.assertEqual(current_interrupted(), "")
+
+    def test_pending_choice_disambiguation(self):
+        from dialogue_repair import set_pending_choice
+        prompt = set_pending_choice(
+            "Включить фильм или песню?",
+            {
+                "фильм": "включи фильм интерстеллар",
+                "кино": "включи фильм интерстеллар",
+                "песню": "включи песню интерстеллар",
+                "музыку": "включи песню интерстеллар",
+            },
+        )
+        self.assertEqual(prompt, "Включить фильм или песню?")
+        self.assertTrue(has_pending())
+
+        # Select choice
+        rewritten = take_pending_rewrite("давай фильм")
+        self.assertEqual(rewritten, "включи фильм интерстеллар")
+        self.assertFalse(has_pending())
+
+        # Test cancel on "нет"
+        set_pending_choice("Включить фильм или песню?", {"фильм": "включи фильм", "песню": "включи песню"})
+        self.assertEqual(take_pending_rewrite("нет"), "")
+        self.assertFalse(has_pending())
+
     def test_ai_chat_gender_fix(self):
         from skills.ai_chat import _fix_self_gender
         self.assertEqual(

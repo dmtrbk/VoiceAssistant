@@ -59,6 +59,7 @@ from context_manager import clear_active_context, is_in_context
 from dialogue_repair import (
     early_dialogue_turn,
     has_pending,
+    remember_interrupted,
     remember_spoken,
     reset as reset_dialogue_repair,
     take_no_match,
@@ -182,15 +183,20 @@ def stop_speaking(to_idle=True):
     global _tts_generation
 
     proc = None
+    remaining_items = []
+    spoken_now = ""
     with _tts_lock:
         _tts_generation += 1
         bump_speak_epoch()
         playback_interrupted = True
         is_speaking = False
         last_speak_end_time = time.time()
+        spoken_now = last_spoken_text
         while True:
             try:
-                _tts_queue.get_nowait()
+                item = _tts_queue.get_nowait()
+                if item and item[0]:
+                    remaining_items.append(str(item[0]).strip())
             except queue.Empty:
                 break
         proc = play_process
@@ -202,6 +208,12 @@ def stop_speaking(to_idle=True):
             proc.wait(timeout=1.0)
         except Exception:
             pass
+
+    if not to_idle:
+        if remaining_items:
+            remember_interrupted(" ".join(remaining_items))
+        elif spoken_now:
+            remember_interrupted(spoken_now)
 
     clear_audio_queue()
     if to_idle:

@@ -37,6 +37,27 @@ THINKING_EXACT = frozenset({
     "ээ",
     "м-м",
     "э-э",
+    "так",
+    "так-так",
+    "секунду",
+    "секундочку",
+    "минутку",
+    "дай подумать",
+    "погоди",
+    "сейчас",
+    "щас",
+})
+
+# Фразы возобновления речи после паузы / перебивания (Full-Duplex Resumption).
+RESUME_EXACT = frozenset({
+    "продолжай",
+    "продолжи",
+    "договори",
+    "дальше",
+    "продолжай говорить",
+    "на чем мы остановились",
+    "на чем остановились",
+    "что дальше",
 })
 
 LISTEN_ACKS = (
@@ -111,21 +132,29 @@ _NON_REPLAYABLE = frozenset(
 _lock = threading.Lock()
 _repair_count = 0
 _last_replayable = ""
+_last_interrupted = ""
 _close_spoken = False
 _pending_prefix = ""
 _pending_confirm = ""
+_pending_choice_prompt = ""
+_pending_choices: dict[str, str] = {}
 
 
-def reset(*, keep_replayable: bool = False, keep_pending: bool = False) -> None:
+def reset(*, keep_replayable: bool = False, keep_pending: bool = False, keep_interrupted: bool = False) -> None:
     global _repair_count, _last_replayable, _close_spoken, _pending_prefix, _pending_confirm
+    global _pending_choice_prompt, _pending_choices, _last_interrupted
     with _lock:
         _repair_count = 0
         _close_spoken = False
         if not keep_pending:
             _pending_prefix = ""
             _pending_confirm = ""
+            _pending_choice_prompt = ""
+            _pending_choices = {}
         if not keep_replayable:
             _last_replayable = ""
+        if not keep_interrupted:
+            _last_interrupted = ""
 
 
 def repair_count() -> int:
@@ -139,6 +168,10 @@ def is_thinking_pause(text: str) -> bool:
 
 def is_oir_phrase(text: str) -> bool:
     return normalize_utterance(text) in OIR_EXACT
+
+
+def is_resume_phrase(text: str) -> bool:
+    return normalize_utterance(text) in RESUME_EXACT
 
 
 def is_replayable(text: str) -> bool:
@@ -157,6 +190,27 @@ def remember_spoken(text: str) -> None:
             _last_replayable = stripped
         _repair_count = 0
         _close_spoken = False
+
+
+def remember_interrupted(text: str) -> None:
+    """Запоминает недочитанный фрагмент речи при перебивании ('замолчи' / barge-in)."""
+    global _last_interrupted
+    stripped = (text or "").strip()
+    if not stripped or not is_replayable(stripped):
+        return
+    with _lock:
+        _last_interrupted = stripped
+
+
+def current_interrupted() -> str:
+    with _lock:
+        return _last_interrupted
+
+
+def clear_interrupted() -> None:
+    global _last_interrupted
+    with _lock:
+        _last_interrupted = ""
 
 
 def current_replayable() -> str:
@@ -193,14 +247,16 @@ def should_release_session() -> bool:
 
 def has_pending() -> bool:
     with _lock:
-        return bool(_pending_prefix or _pending_confirm)
+        return bool(_pending_prefix or _pending_confirm or _pending_choices)
 
 
 def drop_pending() -> None:
-    global _pending_prefix, _pending_confirm
+    global _pending_prefix, _pending_confirm, _pending_choice_prompt, _pending_choices
     with _lock:
         _pending_prefix = ""
         _pending_confirm = ""
+        _pending_choice_prompt = ""
+        _pending_choices = {}
 
 
 def is_bare_action(text: str) -> bool:
@@ -213,23 +269,38 @@ def ask_bare_action(text: str) -> str:
 
 
 def set_pending_prefix(prefix: str) -> None:
-    global _pending_prefix, _pending_confirm
+    global _pending_prefix, _pending_confirm, _pending_choice_prompt, _pending_choices
     with _lock:
         _pending_prefix = normalize_utterance(prefix)
         _pending_confirm = ""
+        _pending_choice_prompt = ""
+        _pending_choices = {}
 
 
 def set_pending_confirm(candidate: str) -> str:
     """«You mean X?» — повторяем только спорный кусок."""
-    global _pending_confirm, _pending_prefix
+    global _pending_confirm, _pending_prefix, _pending_choice_prompt, _pending_choices
     clean = (candidate or "").strip()
     with _lock:
         _pending_confirm = clean
         _pending_prefix = ""
+        _pending_choice_prompt = ""
+        _pending_choices = {}
     short = clean
     if len(short) > 40:
         short = short[:37].rsplit(" ", 1)[0] + "…"
     return f"Ты про {short}?"
+
+
+def set_pending_choice(prompt: str, choices: dict[str, str]) -> str:
+    """Уточнение с выбором варианта («Включить фильм или песню?»)."""
+    global _pending_choice_prompt, _pending_choices, _pending_prefix, _pending_confirm
+    with _lock:
+        _pending_choice_prompt = prompt
+        _pending_choices = {normalize_utterance(k): v for k, v in choices.items()}
+        _pending_prefix = ""
+        _pending_confirm = ""
+    return prompt
 
 
 def is_yes(text: str) -> bool:
@@ -242,14 +313,31 @@ def is_no(text: str) -> bool:
 
 def take_pending_rewrite(text: str) -> str | None:
     """
-    Если ждём объект после «включи» — склеить. Если ждём да/нет на «ты про X?» — вернуть кандидата.
+    Если ждём объект после «включи» — склеить.
+    Если ждём выбор («фильм или песню») — вернуть выбранный вариант.
+    Если ждём да/нет на «ты про X?» — вернуть кандидата.
     None — pending нет или его надо бросить (новая полная команда разберёт маршрутизатор).
     """
-    global _pending_prefix, _pending_confirm
+    global _pending_prefix, _pending_confirm, _pending_choice_prompt, _pending_choices
     lowered = normalize_utterance(text)
     if not lowered:
         return None
     with _lock:
+        if _pending_choices:
+            if lowered in _NO_EXACT:
+                _pending_choices = {}
+                _pending_choice_prompt = ""
+                return ""
+            words = lowered.split()
+            for key, target_cmd in _pending_choices.items():
+                if key == lowered or key in words or (len(key) >= 4 and key in lowered):
+                    _pending_choices = {}
+                    _pending_choice_prompt = ""
+                    return target_cmd
+            _pending_choices = {}
+            _pending_choice_prompt = ""
+            return None
+
         prefix = _pending_prefix
         confirm = _pending_confirm
         if confirm:
@@ -284,20 +372,29 @@ def slot_clarify(kind: str) -> str:
 def early_dialogue_turn(text: str) -> tuple[str, str | None] | None:
     """
     Ход до навыков.
-    ('silent', None) — слушать дальше.
-    ('speak', фраза) — сказать и не маршрутизировать.
+    ('silent', None) — слушать дальше (пауза обдумывания).
+    ('speak', фраза) — сказать и не маршрутизировать (повтор, продолжение, подтверждение).
     None — обычный разбор.
     """
     lowered = normalize_utterance(text)
     if not lowered:
         return ("silent", None)
     if lowered in THINKING_EXACT:
-        # «угу» — и пауза, и «да». Если ждём подтверждение, не глушить.
+        # «угу» — и пауза, и «да». Если ждём подтверждение или выбор, не глушить.
         if lowered in _YES_EXACT:
             with _lock:
-                if _pending_confirm:
+                if _pending_confirm or _pending_choices:
                     return None
         return ("silent", None)
+    if lowered in RESUME_EXACT:
+        interrupted = current_interrupted()
+        if interrupted:
+            clear_interrupted()
+            return ("speak", interrupted)
+        replay = current_replayable()
+        if replay:
+            return ("speak", f"Мы говорили: {replay}")
+        return ("speak", "Слушаю, о чём продолжить?")
     if lowered in OIR_EXACT:
         replay = current_replayable()
         if replay:
