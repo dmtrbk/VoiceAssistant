@@ -125,7 +125,11 @@ def run_telegram_listener():
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-            response = requests.get(url, params={"offset": offset, "timeout": 20}, timeout=25)
+            response = requests.get(
+                url,
+                params={"offset": offset, "timeout": 20},
+                timeout=(5, 30),
+            )
             try:
                 payload = response.json()
             except ValueError:
@@ -147,6 +151,8 @@ def run_telegram_listener():
                     logging.info("[Telegram] Команда принята (%s симв.).", len(text))
                     enqueue_telegram_command(text, chat_id)
 
+        except requests.Timeout:
+            logging.debug("[Telegram] long poll без обновлений, жду дальше.")
         except Exception as e:
             logging.error(f"[Telegram Error]: {e}")
             time.sleep(5)

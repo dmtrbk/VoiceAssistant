@@ -976,19 +976,27 @@ if __name__ == "__main__":
             run_cli_with_gui(mute=args.mute, verbose=args.debug)
         sys.exit(0)
 
-    # Создаем обработчик, который перехватит Ctrl+C и закроет программу чисто
-    def sigint_handler(sig, frame):
+    _shutdown_once = {"done": False}
+
+    def hard_shutdown(signum=None, frame=None):
+        # os._exit: sys.exit/app.quit во время exec() часто не завершают процесс.
+        if _shutdown_once["done"]:
+            os._exit(0)
+        _shutdown_once["done"] = True
         try:
             stop_speaking(to_idle=True)
             volume_ctrl.restore()
         except Exception:
             pass
-        logging.info("Ассистент выключен.")
-        sys.exit(0)
+        try:
+            logging.info("Ассистент выключен.")
+        except Exception:
+            pass
+        os._exit(0)
 
-    # Ctrl+C и systemctl stop: гасим TTS и возвращаем громкость.
-    signal.signal(signal.SIGINT, sigint_handler)
-    signal.signal(signal.SIGTERM, sigint_handler)
+    # SIGTERM при app.exec() сам по себе не убивает процесс — стоит Python-обработчик.
+    signal.signal(signal.SIGINT, hard_shutdown)
+    signal.signal(signal.SIGTERM, hard_shutdown)
 
     try:
         # Фоновый прогрев кэша частых фраз
@@ -1008,7 +1016,7 @@ if __name__ == "__main__":
             assistant_thread.start()
             
             # 2. На основном потоке запускаем Qt6 GUI
-            run_gui()
+            run_gui(on_signal=hard_shutdown)
     except KeyboardInterrupt:
         try:
             stop_speaking(to_idle=True)

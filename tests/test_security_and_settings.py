@@ -2,7 +2,12 @@ import os
 import unittest
 from unittest.mock import patch
 
-from skill_settings import _env_voice_trade_default
+from skill_settings import (
+    _env_voice_trade_default,
+    get_effective_groq_model,
+    is_cursor_running,
+)
+from skills.groq_client import FAST_MODEL, STRONG_MODEL, groq_model_choices, model_chain
 from skills.security import SecuritySkill
 from skills.assistant_settings import AssistantSettingsSkill
 from skills.base import RequestContext
@@ -52,6 +57,27 @@ class TestSecurityAndSettings(unittest.TestCase):
             self.assertFalse(_env_voice_trade_default())
         with patch.dict(os.environ, {"TINKOFF_VOICE_TRADE": "true"}, clear=False):
             self.assertTrue(_env_voice_trade_default())
+
+    def test_groq_model_chain_puts_strong_first(self):
+        chain = model_chain(STRONG_MODEL)
+        self.assertEqual(chain[0], STRONG_MODEL)
+        self.assertIn(FAST_MODEL, chain)
+        labels = [title for _mid, title in groq_model_choices()]
+        self.assertTrue(any("Быстрая" in title for title in labels))
+        self.assertTrue(any("Сильная" in title for title in labels))
+
+    def test_effective_model_stays_fast_while_cursor_open(self):
+        with (
+            patch("skill_settings.get_groq_model", return_value=STRONG_MODEL),
+            patch("skill_settings.is_cursor_running", return_value=True),
+        ):
+            self.assertEqual(get_effective_groq_model(), FAST_MODEL)
+        with (
+            patch("skill_settings.get_groq_model", return_value=STRONG_MODEL),
+            patch("skill_settings.is_cursor_running", return_value=False),
+        ):
+            self.assertEqual(get_effective_groq_model(), STRONG_MODEL)
+        self.assertIsInstance(is_cursor_running(), bool)
 
 
 if __name__ == "__main__":

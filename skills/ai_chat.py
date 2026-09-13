@@ -188,7 +188,7 @@ class AIChatSkill(BaseSkill):
     def __init__(self):
         self.groq_api_key = (os.getenv("GROQ_API_KEY") or "").strip().strip("\"'")
         # Чат, не агент: groq/compound* делают лишний круг и в логе Retrying + второй HTTP.
-        self.groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+        self.groq_model = self._preferred_model()
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.history_cache_path = os.path.join(base_dir, "chat_history_cache.json")
@@ -208,11 +208,19 @@ class AIChatSkill(BaseSkill):
 
         try:
             self.client = get_client()
-            logging.info(f"[Groq] Модель: {self.groq_model}")
+            logging.info(f"[Groq] Модель: {self._preferred_model()}")
             self._load_history()
         except Exception as e:
             logging.error(f"[Groq] Ошибка инициализации Groq: {e}")
             self.client = None
+
+    def _preferred_model(self) -> str:
+        try:
+            from skill_settings import get_effective_groq_model
+
+            return get_effective_groq_model()
+        except Exception:
+            return (os.getenv("GROQ_MODEL") or "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
 
     def _load_persona(self) -> None:
         # Живой промпт — skills/persona_config.json; default ниже только если файла нет.
@@ -793,7 +801,8 @@ class AIChatSkill(BaseSkill):
             return epoch is not None and speak_epoch() != epoch
 
         try:
-            unique_models = model_chain(self.groq_model)
+            preferred = self._preferred_model()
+            unique_models = model_chain(preferred)
             cleaned_reply = ""
 
             if channel == "voice":
@@ -848,7 +857,7 @@ class AIChatSkill(BaseSkill):
                 if not streamed and not aborted():
                     raw_reply = groq_complete(
                         messages_for_api,
-                        preferred=self.groq_model,
+                        preferred=preferred,
                         temperature=temperature,
                         max_tokens=max_tokens,
                     )
@@ -860,7 +869,7 @@ class AIChatSkill(BaseSkill):
             else:
                 raw_reply = groq_complete(
                     messages_for_api,
-                    preferred=self.groq_model,
+                    preferred=preferred,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )

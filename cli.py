@@ -258,14 +258,16 @@ def run_cli_with_gui(mute: bool = False, verbose: bool = False):
         from PySide6.QtCore import QTimer
         import signal
 
-        app, widget, worker, settings_worker = create_orb_gui()
+        from indicator import install_qt_signal_wakeup
 
-        # При Ctrl+C выходим из Qt-цикла
+        app, widget = create_orb_gui()
+
         def sigint_handler(sig, frame):
             print(f"\n{COLOR_CYAN}[Джарвис]:{COLOR_RESET} Завершение работы. До свидания!")
             QTimer.singleShot(0, app.quit)
 
         signal.signal(signal.SIGINT, sigint_handler)
+        install_qt_signal_wakeup(app, sigint_handler)
 
         def cli_worker():
             try:

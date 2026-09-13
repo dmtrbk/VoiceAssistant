@@ -4,6 +4,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QLabel,
     QScrollArea,
@@ -14,12 +15,16 @@ from PySide6.QtWidgets import (
 from skill_settings import (
     OPTIONAL_SKILLS,
     get_flags,
+    get_groq_model,
     is_auto_trade_enabled,
+    is_cursor_running,
     is_voice_trade_enabled,
     set_auto_trade,
     set_flag,
+    set_groq_model,
     set_voice_trade,
 )
+from skills.groq_client import FAST_MODEL, groq_model_choices
 
 
 class SettingsWindow(QWidget):
@@ -29,8 +34,8 @@ class SettingsWindow(QWidget):
         super().__init__()
         self.setWindowTitle("Настройки Джарвиса")
         self.setMinimumWidth(380)
-        self.setMinimumHeight(420)
-        self.resize(400, 520)
+        self.setMinimumHeight(460)
+        self.resize(400, 560)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self.setStyleSheet(
             """
@@ -39,6 +44,14 @@ class SettingsWindow(QWidget):
             QLabel#hint { color: #95a5a6; font-size: 12px; }
             QCheckBox { spacing: 10px; padding: 4px 0; }
             QCheckBox::indicator { width: 20px; height: 20px; }
+            QComboBox {
+                background: #3d444b; color: #ecf0f1; padding: 4px 8px;
+                border: 1px solid #4d555c; border-radius: 4px; min-height: 26px;
+            }
+            QComboBox::drop-down { border: none; width: 22px; }
+            QComboBox QAbstractItemView {
+                background: #3d444b; color: #ecf0f1; selection-background-color: #1f7a3a;
+            }
             QFrame#row { border-bottom: 1px solid #3d444b; padding: 6px 0; }
             QFrame#submenu { padding: 6px 0 2px 22px; }
             """
@@ -47,6 +60,10 @@ class SettingsWindow(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(10)
+
+        self._model_combo: QComboBox | None = None
+        self._model_hint: QLabel | None = None
+        self._add_model_row(root)
 
         title = QLabel("Навыки")
         title.setObjectName("title")
@@ -75,7 +92,70 @@ class SettingsWindow(QWidget):
 
     def showEvent(self, event):
         self._rebuild()
+        self._sync_model_row()
         super().showEvent(event)
+
+    def _add_model_row(self, parent: QVBoxLayout) -> None:
+        heading = QLabel("Модель диалога")
+        heading.setObjectName("title")
+        heading.setStyleSheet("font-size: 15px; font-weight: 600; color: #35BF5C;")
+        parent.addWidget(heading)
+
+        combo = QComboBox()
+        for model_id, title in groq_model_choices():
+            combo.addItem(title, model_id)
+        combo.currentIndexChanged.connect(self._on_model_changed)
+        self._model_combo = combo
+        parent.addWidget(combo)
+
+        hint = QLabel()
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        self._model_hint = hint
+        parent.addWidget(hint)
+        self._sync_model_row()
+
+    def _sync_model_row(self) -> None:
+        if self._model_combo is None or self._model_hint is None:
+            return
+        current = get_groq_model()
+        known = {self._model_combo.itemData(i) for i in range(self._model_combo.count())}
+        if current not in known:
+            self._model_combo.addItem(current, current)
+        index = self._model_combo.findData(current)
+        self._model_combo.blockSignals(True)
+        if index >= 0:
+            self._model_combo.setCurrentIndex(index)
+        self._model_combo.blockSignals(False)
+
+        cursor_on = is_cursor_running()
+        strong = current != FAST_MODEL
+        if cursor_on and strong:
+            self._model_hint.setText(
+                "Сильная выбрана. Пока открыт Cursor, отвечает быстрая — квота Groq не угорает. "
+                "Закрой редактор, и Джарвис переключится."
+            )
+        elif cursor_on:
+            self._model_hint.setText(
+                "Сейчас быстрая. Сильную можно выбрать заранее: заработает, когда закроешь Cursor."
+            )
+        elif strong:
+            self._model_hint.setText(
+                "Сильная модель. Если откроешь Cursor, временно вернётся быстрая."
+            )
+        else:
+            self._model_hint.setText(
+                "Быстрая модель. Сильную удобнее включать, когда Cursor закрыт."
+            )
+
+    def _on_model_changed(self, index: int) -> None:
+        if self._model_combo is None or index < 0:
+            return
+        model_id = self._model_combo.itemData(index)
+        if not model_id:
+            return
+        set_groq_model(str(model_id))
+        self._sync_model_row()
 
     def _rebuild(self) -> None:
         flags = get_flags()

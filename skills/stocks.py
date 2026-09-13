@@ -1226,7 +1226,12 @@ class StocksSkill(BaseSkill):
         try:
             from skills.groq_client import complete_one, is_retriable_model_error, model_chain
 
-            env_model = (os.getenv("GROQ_MODEL") or "").strip()
+            try:
+                from skill_settings import get_effective_groq_model
+
+                env_model = get_effective_groq_model()
+            except Exception:
+                env_model = (os.getenv("GROQ_MODEL") or "").strip()
             system_prompt = (
                 "Ты Джарвис. Управляешь фондом модернизации (покупка продвинутых моделей ИИ и нового железа для себя). "
                 "Твоя задача — сформировать сбалансированный и диверсифицированный портфель. "

@@ -34,6 +34,8 @@ OPTIONAL_SKILLS = (
 OPTIONAL_IDS = {item[0] for item in OPTIONAL_SKILLS}
 AUTO_TRADE_KEY = "stocks_auto_trade"
 VOICE_TRADE_KEY = "stocks_voice_trade"
+GROQ_MODEL_KEY = "groq_model"
+_CURSOR_COMM = frozenset({"cursor", "cursor-bin"})
 
 # GUI-поток читает очередь и открывает окно. Голос только кладёт «open».
 settings_events: queue.Queue[str] = queue.Queue()
@@ -42,6 +44,7 @@ _lock = threading.Lock()
 _enabled: dict[str, bool] = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
 _auto_trade = False
 _voice_trade = False
+_groq_model = ""
 _loaded = False
 _SKILL_MAP: dict[str, Any] | None = None
 
@@ -60,6 +63,29 @@ def _env_voice_trade_default() -> bool:
     """Сделки из Джарвиса выключены, пока явно не включат."""
     raw = (os.getenv("TINKOFF_VOICE_TRADE") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def _env_groq_model_default() -> str:
+    from skills.groq_client import normalize_groq_model
+
+    return normalize_groq_model(os.getenv("GROQ_MODEL"))
+
+
+def is_cursor_running() -> bool:
+    """Редактор Cursor открыт — сильную модель не жжём, пока его не закроют."""
+    try:
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open(os.path.join("/proc", name, "comm"), encoding="utf-8") as handle:
+                    if handle.read().strip().lower() in _CURSOR_COMM:
+                        return True
+            except OSError:
+                continue
+    except OSError:
+        return False
+    return False
 
 
 def _write_json_atomic(path: str, data: Any) -> None:
@@ -125,6 +151,7 @@ def _persist() -> None:
         snapshot = dict(_enabled)
         snapshot[AUTO_TRADE_KEY] = bool(_auto_trade)
         snapshot[VOICE_TRADE_KEY] = bool(_voice_trade)
+        snapshot[GROQ_MODEL_KEY] = _groq_model
     try:
         _write_json_atomic(CONFIG_PATH, snapshot)
     except Exception as exc:
@@ -133,11 +160,12 @@ def _persist() -> None:
 
 def reload_from_disk() -> dict[str, bool]:
     """Читает skills_enabled.json. Нет ключа — навык включён."""
-    global _enabled, _auto_trade, _voice_trade
+    global _enabled, _auto_trade, _voice_trade, _groq_model
     flags = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
     auto_trade = _env_auto_trade_default()
     voice_trade = _env_voice_trade_default()
-    # Ключи в JSON важнее пустых TINKOFF_AUTO_TRADE / TINKOFF_VOICE_TRADE.
+    groq_model = _env_groq_model_default()
+    # Ключи в JSON важнее пустых TINKOFF_* / GROQ_MODEL.
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
@@ -150,12 +178,17 @@ def reload_from_disk() -> dict[str, bool]:
                     auto_trade = bool(raw[AUTO_TRADE_KEY])
                 if VOICE_TRADE_KEY in raw:
                     voice_trade = bool(raw[VOICE_TRADE_KEY])
+                if GROQ_MODEL_KEY in raw:
+                    from skills.groq_client import normalize_groq_model
+
+                    groq_model = normalize_groq_model(str(raw[GROQ_MODEL_KEY] or ""))
         except Exception as exc:
             logging.error("[Настройки] Не удалось прочитать %s: %s", CONFIG_PATH, exc)
     with _lock:
         _enabled = flags
         _auto_trade = auto_trade
         _voice_trade = voice_trade
+        _groq_model = groq_model
     return dict(flags)
 
 
@@ -224,6 +257,37 @@ def set_voice_trade(enabled: bool) -> None:
     os.environ["TINKOFF_VOICE_TRADE"] = "true" if enabled else "false"
     _persist()
     logging.info("[Настройки] Сделки голосом: %s", "вкл" if enabled else "выкл")
+
+
+def get_groq_model() -> str:
+    """Модель, выбранная в настройках или из GROQ_MODEL."""
+    _ensure_loaded()
+    with _lock:
+        return _groq_model or _env_groq_model_default()
+
+
+def set_groq_model(model_id: str) -> None:
+    """Комбо модели диалога: сразу на диск и в окружение процесса."""
+    global _groq_model
+    from skills.groq_client import normalize_groq_model
+
+    chosen = normalize_groq_model(model_id)
+    _ensure_loaded()
+    with _lock:
+        _groq_model = chosen
+    os.environ["GROQ_MODEL"] = chosen
+    _persist()
+    logging.info("[Настройки] Модель диалога: %s", chosen)
+
+
+def get_effective_groq_model() -> str:
+    """Сильная ждёт закрытия Cursor, чтобы не жечь квоту Groq во время правки кода."""
+    from skills.groq_client import FAST_MODEL
+
+    preferred = get_groq_model()
+    if preferred != FAST_MODEL and is_cursor_running():
+        return FAST_MODEL
+    return preferred
 
 
 def request_open_settings() -> None:

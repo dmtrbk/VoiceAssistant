@@ -5,7 +5,7 @@ os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 import queue
 import sys
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
+from PySide6.QtCore import QSocketNotifier, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QRadialGradient, QGuiApplication
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -39,34 +39,6 @@ STATUS_COLORS = {
     "thinking": "#E67E22",   # Оранжевый (обработка)
     "speaking": "#35BF5C"    # Ярко-зеленый Manjaro (озвучка)
 }
-
-class StatusWorker(QThread):
-    """Фоновый поток для безопасного чтения очереди и передачи сигналов в GUI"""
-    status_changed = Signal(str)
-
-    def run(self):
-        while True:
-            try:
-                status = status_queue.get()
-                self.status_changed.emit(status)
-                status_queue.task_done()
-            except Exception:
-                break
-
-
-class SettingsOpenWorker(QThread):
-    """Голос кладёт «open» в очередь, окно открывает GUI-поток."""
-    open_requested = Signal()
-
-    def run(self):
-        while True:
-            try:
-                event = settings_events.get()
-                if event == "open":
-                    self.open_requested.emit()
-                settings_events.task_done()
-            except Exception:
-                break
 
 class OrbWidget(QWidget):
     """Интерактивный виджет сферы на рабочем столе"""
@@ -113,8 +85,25 @@ class OrbWidget(QWidget):
         self.current_color = QColor(hex_color)
         self.update()
 
+    def _drain_queues(self) -> None:
+        """Статус и «открой настройки» — в GUI-потоке, без QThread на вечном get()."""
+        while True:
+            try:
+                status = status_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.set_status(status)
+        while True:
+            try:
+                event = settings_events.get_nowait()
+            except queue.Empty:
+                break
+            if event == "open":
+                self.open_settings()
+
     def update_pulse(self):
         """Логика изменения радиуса свечения в зависимости от статуса"""
+        self._drain_queues()
         if self.state in ["listening", "speaking"]:
             # Плавная размеренная пульсация
             self.glow_radius += self.pulse_direction * 0.4
@@ -191,27 +180,53 @@ class OrbWidget(QWidget):
             event.accept()
 
 def create_orb_gui():
-    """Создает и настраивает QApplication и OrbWidget с воркерами."""
+    """Создает QApplication и сферу. Очереди читает таймер виджета."""
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
     widget = OrbWidget()
     widget.show()
-    
-    # Запуск фонового отслеживания статусов из очереди
-    worker = StatusWorker()
-    worker.status_changed.connect(widget.set_status)
-    worker.start()
-
-    settings_worker = SettingsOpenWorker()
-    settings_worker.open_requested.connect(widget.open_settings)
-    settings_worker.start()
-
-    return app, widget, worker, settings_worker
+    return app, widget
 
 
-def run_gui():
+def request_gui_quit() -> bool:
+    """Просит Qt выйти из exec(). Для CLI; служба выходит через os._exit."""
+    app = QApplication.instance()
+    if app is None:
+        return False
+    QTimer.singleShot(0, app.quit)
+    return True
+
+
+def install_qt_signal_wakeup(app, on_signal) -> None:
+    """SIGTERM во время app.exec() иначе не доходит до Python: Qt сидит в poll."""
+    import signal as signal_mod
+    import socket
+
+    reader, writer = socket.socketpair()
+    reader.setblocking(False)
+    writer.setblocking(False)
+    signal_mod.set_wakeup_fd(writer.fileno())
+    notifier = QSocketNotifier(reader.fileno(), QSocketNotifier.Type.Read, app)
+
+    def _woke(*_args) -> None:
+        try:
+            while True:
+                chunk = reader.recv(256)
+                if not chunk:
+                    break
+        except BlockingIOError:
+            pass
+        on_signal()
+
+    notifier.activated.connect(_woke)
+    app._va_wakeup = (reader, writer, notifier)
+
+
+def run_gui(on_signal=None):
     """Точка входа для графического интерфейса Qt6"""
-    app, widget, worker, settings_worker = create_orb_gui()
+    app, _widget = create_orb_gui()
+    if on_signal is not None:
+        install_qt_signal_wakeup(app, on_signal)
     sys.exit(app.exec())
 

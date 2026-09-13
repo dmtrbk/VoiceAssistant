@@ -11,13 +11,34 @@ from typing import Any, Callable, Iterator
 _LOCK = threading.Lock()
 _client = None
 
-# qwen/qwen3.8-27b — несуществующий id (таймаут на каждый fallback).
-# llama-3.3-70b-versatile — снят с free/developer 16.08.2026.
+# qwen/qwen3.8-27b ловил таймаут на fallback; llama-3.3-70b снят с free 16.08.2026.
+FAST_MODEL = "openai/gpt-oss-20b"
+STRONG_MODEL = "openai/gpt-oss-120b"
 FALLBACK_MODELS = (
-    "openai/gpt-oss-20b",
+    FAST_MODEL,
     "qwen/qwen3.6-27b",
-    "openai/gpt-oss-120b",
+    STRONG_MODEL,
 )
+
+# id, подпись в окне настроек. Старт — быстрая; сильная — когда Cursor закрыт.
+GROQ_MODEL_CHOICES = (
+    (FAST_MODEL, "Быстрая — GPT-OSS 20B"),
+    (STRONG_MODEL, "Сильная — GPT-OSS 120B"),
+)
+
+
+def normalize_groq_model(raw: str | None) -> str:
+    clean = (raw or "").strip()
+    return clean or FAST_MODEL
+
+
+def groq_model_choices(current: str | None = None) -> list[tuple[str, str]]:
+    rows = list(GROQ_MODEL_CHOICES)
+    seen = {item[0] for item in rows}
+    extra = (current or "").strip()
+    if extra and extra not in seen:
+        rows.append((extra, extra))
+    return rows
 
 _MODEL_MISS = ("model", "not found", "unknown", "404", "400")
 _RETRY_TRANSIENT = ("timeout", "timed out", "temporarily", "429", "rate limit", "overloaded")

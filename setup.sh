@@ -54,6 +54,7 @@ ENV_EXAMPLE="$PROJECT_DIR/.env.example"
 if [ ! -f "$ENV_EXAMPLE" ]; then
     cat << 'EOF' > "$ENV_EXAMPLE"
 # Groq — облачный диалог и аналитика ИИ
+# Старт — быстрая 20B. Сильную 120B выбери в настройках (когда Cursor закрыт).
 GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-20b
 
@@ -208,6 +209,7 @@ WorkingDirectory=$PROJECT_DIR
 ExecStart=$VENV_DIR/bin/python assistant.py
 Restart=always
 RestartSec=3
+TimeoutStopSec=15
 # === НАСТРОЙКИ ОКРУЖЕНИЯ ===
 Environment=PYTHONUNBUFFERED=1
 Environment=LANG=ru_RU.UTF-8
