@@ -8,15 +8,20 @@ from dialogue_repair import (
     REPAIR_SECOND,
     current_replayable,
     early_dialogue_turn,
+    has_pending,
+    is_bare_action,
     is_oir_phrase,
     is_thinking_pause,
     next_no_match_line,
     remember_spoken,
     repair_count,
     reset,
+    set_pending_confirm,
     should_release_session,
     slot_clarify,
+    take_pending_rewrite,
 )
+from skills.weather import clothing_hint
 
 
 class TestDialogueRepair(unittest.TestCase):
@@ -94,6 +99,34 @@ class TestDialogueRepair(unittest.TestCase):
         slept = execute("мм", spoken.append, channel="voice")
         self.assertFalse(slept)
         self.assertEqual(spoken, [])
+
+    def test_bare_action_asks_slot(self):
+        self.assertTrue(is_bare_action("включи"))
+        self.assertFalse(is_bare_action("включи музыку"))
+        spoken = []
+        slept = execute("включи", spoken.append, channel="cli")
+        self.assertFalse(slept)
+        self.assertTrue(has_pending())
+        self.assertIn(spoken[0], ("Что включить?", "Включить что?"))
+
+    def test_pending_prefix_completes_command(self):
+        spoken = []
+        execute("включи", spoken.append, channel="cli")
+        rewritten = take_pending_rewrite("музыку")
+        self.assertEqual(rewritten, "включи музыку")
+        self.assertFalse(has_pending())
+
+    def test_pending_confirm_yes_no(self):
+        prompt = set_pending_confirm("включить радио рекорд")
+        self.assertIn("рекорд", prompt.lower())
+        self.assertEqual(take_pending_rewrite("да"), "включить радио рекорд")
+        set_pending_confirm("включить радио рекорд")
+        self.assertEqual(take_pending_rewrite("нет"), "")
+
+    def test_clothing_hint(self):
+        self.assertIn("лёгкое", clothing_hint(25))
+        self.assertIn("тёплое", clothing_hint(-3))
+        self.assertIn("кофта", clothing_hint(7))
 
 
 if __name__ == "__main__":

@@ -76,8 +76,31 @@ _CITY_FILLERS = (
 )
 
 # Только явное уточнение прогноза. «там зайцев полно» сюда не входит.
+_PACK_HINTS = (
+    "одежд", "надеть", "надева", "чемодан", "что взять",
+    "что надеть", "взять с собой", "упаков",
+)
+
+
+def clothing_hint(temp_c: float) -> str:
+    if temp_c >= 22:
+        return "Лучше что-то лёгкое."
+    if temp_c <= 2:
+        return "Возьми тёплое."
+    if temp_c <= 10:
+        return "Пригодится кофта."
+    return "Что-то среднее."
+
+
+def _with_pack(text: str, speech: str, temp_c: float) -> str:
+    if any(hint in text for hint in _PACK_HINTS):
+        return f"{speech} {clothing_hint(temp_c)}"
+    return speech
+
+
 _FOLLOWUP_WEATHER = (
     "дождь", "зонт", "осадки", "давление", "ветер",
+    "одежд", "надеть", "чемодан", "что взять", "что надеть",
     "градус", "температур", "прогноз",
 )
 
@@ -324,13 +347,18 @@ class WeatherSkill(BaseSkill):
 
                     if is_rain_query:
                         if tom_precip > 0.5 or tom_code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95]:
-                            context.speak(f"Завтра {place.lower()} дождь. Днём {temp_desc}.")
+                            line = f"Завтра {place.lower()} дождь. Днём {temp_desc}."
                         else:
-                            context.speak(f"Завтра {place.lower()} без осадков. Днём {temp_desc}.")
+                            line = f"Завтра {place.lower()} без осадков. Днём {temp_desc}."
+                        context.speak(_with_pack(text, line, tom_max))
                         return
 
                     context.speak(
-                        f"Завтра {place.lower()} {desc}, днём {temp_desc}."
+                        _with_pack(
+                            text,
+                            f"Завтра {place.lower()} {desc}, днём {temp_desc}.",
+                            tom_max,
+                        )
                     )
                     return
                 context.speak("Нет прогноза.")
@@ -347,13 +375,14 @@ class WeatherSkill(BaseSkill):
 
             if is_rain_query:
                 if precipitation > 0.1 or w_code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95]:
-                    context.speak(f"{place} дождь. {temp_str}.")
+                    line = f"{place} дождь. {temp_str}."
                 else:
-                    context.speak(f"{place} без дождя. {temp_str}.")
+                    line = f"{place} без дождя. {temp_str}."
+                context.speak(_with_pack(text, line, cur_temp))
                 return
 
             speech = f"{place} {temp_str}, {desc}."
-            context.speak(speech)
+            context.speak(_with_pack(text, speech, cur_temp))
 
         except Exception as e:
             logger.error(f"[Погода] Ошибка обработки запроса: {e}")

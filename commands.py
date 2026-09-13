@@ -19,8 +19,23 @@ from triggers import (
     split_quick_compound,
 )
 from context_manager import clear_active_context, handle_context_input, is_in_context
-from dialogue_repair import early_dialogue_turn, next_no_match_line, remember_spoken
+from dialogue_repair import (
+    ask_bare_action,
+    drop_pending,
+    early_dialogue_turn,
+    has_pending,
+    is_bare_action,
+    next_no_match_line,
+    remember_spoken,
+    set_pending_prefix,
+    slot_clarify,
+    take_pending_rewrite,
+)
 from runtime_state import bump_speak_epoch, stop_extra_tts
+
+
+def _noop_speak(_text: str) -> None:
+    return None
 
 _ROUTER_LOCK = threading.Lock()
 _EXEC_LOCK = threading.Lock()
@@ -29,6 +44,25 @@ _EXEC_LOCK = threading.Lock()
 _FOLLOWUP_TTL_SEC = 90.0
 _last_skill = None
 _last_skill_time = 0.0
+
+
+def _match_narrow_skill(context: RequestContext):
+    """Первый узкий навык (не чат/NLU) и выключенные, уже просмотренные."""
+    disabled: list = []
+    for skill in ALL_SKILLS:
+        if skill is ai_chat_skill or skill is local_nlu_skill:
+            continue
+        if not is_skill_enabled(skill):
+            disabled.append(skill)
+            continue
+        try:
+            accepts = skill.can_handle(context)
+        except Exception as e:
+            logging.error(f"[Маршрутизатор] Ошибка can_handle у {skill.__class__.__name__}: {e}")
+            continue
+        if accepts:
+            return skill, disabled
+    return None, disabled
 
 
 def _channel_session_command(text: str, speak_callback, channel: str) -> bool | None:
@@ -61,19 +95,49 @@ def execute(
     speak_callback,
     channel: str = "voice",
     alert_speak=None,
+    *,
+    skip_early: bool = False,
 ) -> bool:
     """
     Маршрутизатор: Контекст → NLU → узкие навыки → follow-up → Groq.
     Возвращает True, если сессию нужно усыпить (прощание).
+    skip_early: голос уже разобрал паузу / «что?» / кашу в цикле Vosk.
     """
     text = text.lower().strip()
-    early = early_dialogue_turn(text)
-    if early is not None:
-        kind, reply = early
-        if kind == "speak" and reply:
-            speak_callback(reply)
+    if not skip_early:
+        early = early_dialogue_turn(text)
+        if early is not None:
+            kind, reply = early
+            if kind == "speak" and reply:
+                speak_callback(reply)
+            return False
+        if not text or is_filler(text):
+            return False
+
+    pending = has_pending()
+    bare = is_bare_action(text)
+    if pending and not bare:
+        probe = RequestContext(raw_text=text, speak=_noop_speak)
+        chosen, _disabled = _match_narrow_skill(probe)
+        if chosen is not None or _followup_skill(probe) is not None:
+            drop_pending()
+        else:
+            rewritten = take_pending_rewrite(text)
+            if rewritten == "":
+                speak_callback(slot_clarify("object"))
+                return False
+            if rewritten:
+                logging.info("[Диалог] Дособрал команду: '%s' → '%s'", text, rewritten)
+                text = rewritten
+                bare = is_bare_action(text)
+    elif pending and bare:
+        take_pending_rewrite(text)
+        speak_callback(ask_bare_action(text))
         return False
-    if not text or is_filler(text):
+
+    if bare:
+        set_pending_prefix(text)
+        speak_callback(ask_bare_action(text))
         return False
 
     with _EXEC_LOCK:
@@ -191,7 +255,8 @@ def _dispatch_single(
     def capturing_speak(reply_text: str) -> None:
         if reply_text:
             spoken.append(str(reply_text))
-            remember_spoken(str(reply_text))
+            if channel != "voice":
+                remember_spoken(str(reply_text))
         speak_callback(reply_text)
 
     context = RequestContext(
@@ -201,22 +266,7 @@ def _dispatch_single(
         channel=channel,
     )
 
-    chosen = None
-    disabled: list = []
-    for skill in ALL_SKILLS:
-        if skill is ai_chat_skill or skill is local_nlu_skill:
-            continue
-        if not is_skill_enabled(skill):
-            disabled.append(skill)
-            continue
-        try:
-            accepts = skill.can_handle(context)
-        except Exception as e:
-            logging.error(f"[Маршрутизатор] Ошибка can_handle у {skill.__class__.__name__}: {e}")
-            continue
-        if accepts:
-            chosen = skill
-            break
+    chosen, disabled = _match_narrow_skill(context)
 
     if chosen is None:
         follow = _followup_skill(context)

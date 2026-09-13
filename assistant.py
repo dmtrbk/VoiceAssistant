@@ -58,10 +58,10 @@ from runtime_state import bump_session_epoch, bump_speak_epoch, session_epoch, s
 from context_manager import clear_active_context, is_in_context
 from dialogue_repair import (
     early_dialogue_turn,
-    next_no_match_line,
+    has_pending,
     remember_spoken,
     reset as reset_dialogue_repair,
-    should_release_session,
+    take_no_match,
 )
 from triggers import (
     is_quick_command,
@@ -358,6 +358,7 @@ def speak(text, recognizer=None):
 
     logging.info(f"Ассистент: {text}")
     if MUTE_SPEECH:
+        remember_spoken(text)
         return
 
     put_status("speaking")
@@ -622,6 +623,7 @@ def execute_command_async(cmd_text, safe_speak_func):
                 cmd_text,
                 active_speak,
                 alert_speak=safe_speak_func,
+                skip_early=True,
             )
         finally:
             _end_thinking()
@@ -686,6 +688,8 @@ def timeout_monitor():
                 continue
             media_on = volume_ctrl.is_ducked_or_playing() or is_movie_playing()
             current_timeout = ATTENTION_TIMEOUT_MUSIC if media_on else ATTENTION_TIMEOUT
+            if has_pending():
+                current_timeout = max(current_timeout, ATTENTION_TIMEOUT)
             if time.time() - last_active_time > current_timeout:
                 go_idle(stop_tts=True)
                 logging.info(f"[Система] Время ожидания истекло ({current_timeout:g} с). Возврат в спящий режим.")
@@ -734,9 +738,10 @@ def main():
 
     def prompt_repair():
         global last_active_time
-        safe_speak(next_no_match_line())
+        line, release = take_no_match()
+        safe_speak(line)
         last_active_time = time.time()
-        if should_release_session():
+        if release:
             go_idle()
 
     def dispatch_phrase(phrase: str) -> None:
@@ -766,7 +771,7 @@ def main():
     def wake_session() -> None:
         global is_active
         is_active = True
-        reset_dialogue_repair(keep_replayable=True)
+        reset_dialogue_repair(keep_replayable=True, keep_pending=True)
         put_status("listening")
         volume_ctrl.duck()
 

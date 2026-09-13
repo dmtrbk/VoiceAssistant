@@ -147,34 +147,37 @@ def split_quick_compound(text: str) -> list[str]:
 def is_filler(text: str) -> bool:
     """Пусто или короткое междометие. Паузу «думаю» и «что?» разбирает dialogue_repair."""
     lowered = normalize_utterance(text)
-    if not lowered:
-        return True
-    if len(lowered) < 2:
-        return True
-    return lowered in FILLER_PHRASES
+    return _is_filler_normalized(lowered)
+
+
+def _is_filler_normalized(lowered: str) -> bool:
+    return (not lowered) or len(lowered) < 2 or lowered in FILLER_PHRASES
 
 
 _VOWELS = set("аеёиоуыэюяaeiouy")
 
 
-def is_garbled_utterance(text: str) -> bool:
-    """Обрывок без гласных или сильно растянутый шум — переспросить, не в навыки."""
-    lowered = normalize_utterance(text)
-    if not lowered or is_filler(lowered):
+def _is_garbled_normalized(lowered: str) -> bool:
+    if _is_filler_normalized(lowered):
         return False
     letters = [c for c in lowered if c.isalpha()]
     if letters and not any(c in _VOWELS for c in letters):
         return True
-    if re.search(r"(.)\1{4,}", lowered):
-        return True
-    return False
+    return bool(re.search(r"(.)\1{4,}", lowered))
+
+
+def is_garbled_utterance(text: str) -> bool:
+    """Обрывок без гласных или сильно растянутый шум — переспросить, не в навыки."""
+    return _is_garbled_normalized(normalize_utterance(text))
 
 
 def is_weak_stt_for_chat(text: str) -> bool:
     """Каша Vosk, на которой Groq начинает выдумывать смысл. Короткие живые фразы пропускаем."""
     lowered = normalize_utterance(text)
-    if not lowered or is_filler(lowered) or is_garbled_utterance(lowered):
-        return is_garbled_utterance(lowered)
+    if _is_filler_normalized(lowered):
+        return False
+    if _is_garbled_normalized(lowered):
+        return True
     words = [w for w in lowered.split() if any(c.isalpha() for c in w)]
     letters = [c for c in lowered if c.isalpha()]
     if len(words) <= 3:

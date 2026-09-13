@@ -284,7 +284,7 @@ class AudaciousSkill(BaseSkill):
 
         if selected_station:
             generate_m3u_playlist(playlist_path)
-            context.speak("Включаю.")
+            context.speak(f"Включаю {selected_station['name']}.")
             self._start_playback(
                 selected_station["url"],
                 loop=bool(selected_station.get("loop")),

@@ -326,4 +326,4 @@ class TimerSkill(BaseSkill):
             self.active_timers.append(new_timer)
             self._save_timers_locked()
 
-        context.speak("Поставил.")
+        context.speak(f"Поставил на {label}.")
