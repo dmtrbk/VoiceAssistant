@@ -16,12 +16,13 @@ from PySide6.QtWidgets import (
 )
 
 from skill_settings import (
-    OPTIONAL_SKILLS,
     get_flags,
     get_groq_model,
+    grouped_skills,
     is_auto_trade_enabled,
     is_cursor_running,
     is_voice_trade_enabled,
+    ordered_skill_ids,
     set_auto_trade,
     set_flag,
     set_groq_model,
@@ -30,13 +31,6 @@ from skill_settings import (
 from skills.groq_client import FAST_MODEL, groq_model_choices
 from theme_colors import current_palette, load_palette
 
-SKILL_GROUPS = (
-    ("Дом", ("home_assistant", "xiaomi_bulb", "security")),
-    ("Медиа", ("audacious", "movie", "image_gen", "site_apps")),
-    ("Сеть", ("web_search", "wikipedia", "maps", "telegram")),
-    ("Сервисы", ("weather", "stocks", "timer", "calculator")),
-    ("Разное", ("games", "jokes", "pentagon")),
-)
 
 class ToggleSwitch(QCheckBox):
     """Короткий тумблер без стандартного квадрата Qt."""
@@ -74,30 +68,6 @@ class ToggleSwitch(QCheckBox):
         painter.setBrush(knob_color)
         painter.drawEllipse(QRectF(x, y, knob, knob))
         painter.end()
-
-
-def _grouped_skills() -> list[tuple[str, list[tuple[str, str, str]]]]:
-    catalog = {sid: (title, hint) for sid, title, hint in OPTIONAL_SKILLS}
-    seen: set[str] = set()
-    groups: list[tuple[str, list[tuple[str, str, str]]]] = []
-    for name, ids in SKILL_GROUPS:
-        rows = []
-        for sid in ids:
-            item = catalog.get(sid)
-            if item is None:
-                continue
-            rows.append((sid, item[0], item[1]))
-            seen.add(sid)
-        if rows:
-            groups.append((name, rows))
-    leftover = [(sid, title, hint) for sid, title, hint in OPTIONAL_SKILLS if sid not in seen]
-    if leftover:
-        groups.append(("Другое", leftover))
-    return groups
-
-
-def _ordered_skill_ids() -> list[str]:
-    return [sid for _name, rows in _grouped_skills() for sid, _title, _hint in rows]
 
 
 class SettingsWindow(QWidget):
@@ -267,7 +237,7 @@ class SettingsWindow(QWidget):
 
     def _rebuild(self) -> None:
         flags = get_flags()
-        expected = _ordered_skill_ids()
+        expected = ordered_skill_ids()
         if (
             self._boxes
             and list(self._boxes.keys()) == expected
@@ -291,7 +261,7 @@ class SettingsWindow(QWidget):
         self._auto_trade_box = None
         self._stocks_menu = None
 
-        for group_name, rows in _grouped_skills():
+        for group_name, rows in grouped_skills():
             self._list.addWidget(self._section_label(group_name))
             card = QFrame()
             card.setObjectName("card")

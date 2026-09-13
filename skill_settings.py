@@ -35,6 +35,41 @@ OPTIONAL_SKILLS = (
 )
 
 OPTIONAL_IDS = {item[0] for item in OPTIONAL_SKILLS}
+
+# Группы окна настроек. Навык без группы попадёт в «Другое».
+SKILL_GROUPS = (
+    ("Дом", ("home_assistant", "xiaomi_bulb", "security")),
+    ("Медиа", ("audacious", "movie", "image_gen", "site_apps")),
+    ("Сеть", ("web_search", "wikipedia", "maps", "telegram")),
+    ("Сервисы", ("weather", "stocks", "timer", "calculator")),
+    ("Разное", ("games", "jokes", "pentagon")),
+)
+
+
+def grouped_skills() -> list[tuple[str, list[tuple[str, str, str]]]]:
+    catalog = {sid: (title, hint) for sid, title, hint in OPTIONAL_SKILLS}
+    seen: set[str] = set()
+    groups: list[tuple[str, list[tuple[str, str, str]]]] = []
+    for name, ids in SKILL_GROUPS:
+        rows = []
+        for sid in ids:
+            item = catalog.get(sid)
+            if item is None:
+                continue
+            rows.append((sid, item[0], item[1]))
+            seen.add(sid)
+        if rows:
+            groups.append((name, rows))
+    leftover = [(sid, title, hint) for sid, title, hint in OPTIONAL_SKILLS if sid not in seen]
+    if leftover:
+        groups.append(("Другое", leftover))
+    return groups
+
+
+def ordered_skill_ids() -> list[str]:
+    return [sid for _name, rows in grouped_skills() for sid, _title, _hint in rows]
+
+
 AUTO_TRADE_KEY = "stocks_auto_trade"
 VOICE_TRADE_KEY = "stocks_voice_trade"
 GROQ_MODEL_KEY = "groq_model"
