@@ -239,3 +239,34 @@ journalctl --user -u voice-assistant.service -f
 ```
 
 Перезапуск голосом: фразы *«перезагрузись»*, *«перезапустись»*, *«рестарт»* автоматически перезапускают службу `systemd`.
+
+---
+
+## 🔍 Проверки кода на GitHub
+
+После пуша в `experimental` или `main` GitHub сам прогоняет тесты и смотрит код. Ничего ставить на компьютер не нужно.
+
+**Куда смотреть**
+
+1. Репозиторий на GitHub → вкладка **Actions**. Там два сценария:
+   - **Tests** — те же unit-тесты, что локально (`python -m unittest discover -s tests`). Красный крест = что-то сломалось, открыть job и читать лог.
+   - **CodeQL** — поиск типичных дыр (секреты в коде, опасные вызовы). Находки: вкладка **Security** → **Code scanning**.
+2. В **Pull Request** те же проверки висят внизу как галочки. Пока Tests красный — лучше не сливать.
+3. **Dependabot** раз в неделю сам откроет PR вида `Bump requests from …`, если вышла уязвимая библиотека. Открыть PR → посмотреть diff → **Merge**, если тесты зелёные.
+
+**Один раз руками в настройках репозитория**
+
+GitHub → **Settings** → **Code security and analysis** (или **Advanced Security**):
+
+- **Secret scanning** — включить. GitHub будет писать, если в коммит попал токен (`GROQ_API_KEY`, `TINKOFF_*`, Telegram).
+- **Dependabot alerts** и **Dependabot security updates** — включить, если ещё не горят.
+- Если репозиторий **приватный** и CodeQL в Actions падает с ошибкой про Advanced Security — включить **GitHub Advanced Security** / **Code scanning** на той же странице. Для публичного репо это бесплатно.
+
+**ИИ-ревью пул-реквестов (по желанию)**
+
+Это не файл в репозитории, а приложение к GitHub:
+
+1. Открыть [CodeRabbit](https://github.com/apps/coderabbitai) → **Install** → выбрать этот репозиторий.
+2. Дальше в каждом PR появится комментарий-ревью. Отвечать боту можно в треде, как обычному ревьюеру.
+
+То же для [Cursor Bugbot](https://github.com/apps/cursor-bugbot), если пользуетесь Cursor. Можно поставить позже, когда освоитесь с Actions.
