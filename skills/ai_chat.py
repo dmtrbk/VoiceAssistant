@@ -144,11 +144,14 @@ def _fix_self_gender(text: str) -> str:
     ya_map = {fem: masc for fem, masc in _SELF_FEM_AFTER_YA}
     ya_alt = "|".join(re.escape(fem) for fem, _ in sorted(_SELF_FEM_AFTER_YA, key=lambda p: len(p[0]), reverse=True))
 
-    def repl_ya(match: re.Match) -> str:
-        word = match.group(1)
-        return match.group(0)[: -len(word)] + _match_case(word, ya_map[word.lower()])
+    def repl_clause(m: re.Match) -> str:
+        clause = m.group(0)
+        def repl_w(wm: re.Match) -> str:
+            w = wm.group(0)
+            return _match_case(w, ya_map[w.lower()])
+        return re.sub(rf"(?i)\b(?:{ya_alt})\b", repl_w, clause)
 
-    text = re.sub(rf"(?i)\bя\b(?:\s+[А-Яа-яЁё]+){{0,3}}\s+({ya_alt})\b", repl_ya, text)
+    text = re.sub(rf"(?i)\bя\b(?:\s+[А-Яа-яЁё]+){{1,4}}", repl_clause, text)
     text = re.sub(
         rf"(?i)^({ya_alt})([.!?…]*)$",
         lambda m: _match_case(m.group(1), ya_map[m.group(1).lower()]) + m.group(2),

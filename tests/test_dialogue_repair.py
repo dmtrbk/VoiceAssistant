@@ -128,6 +128,25 @@ class TestDialogueRepair(unittest.TestCase):
         self.assertIn("тёплое", clothing_hint(-3))
         self.assertIn("кофта", clothing_hint(7))
 
+    def test_ai_chat_gender_fix(self):
+        from skills.ai_chat import _fix_self_gender
+        self.assertEqual(
+            _fix_self_gender("Я была рада вам помочь и всё сделала."),
+            "Я был рад вам помочь и всё сделал.",
+        )
+        self.assertEqual(
+            _fix_self_gender("Она была рада встрече."),
+            "Она была рада встрече.",
+        )
+        self.assertEqual(
+            _fix_self_gender("Я готова к работе."),
+            "Я готов к работе.",
+        )
+        self.assertEqual(
+            _fix_self_gender("Рада помочь!"),
+            "Рад помочь!",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
