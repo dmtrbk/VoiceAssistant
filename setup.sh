@@ -9,6 +9,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
 SERVICE_DIR="$HOME/.config/systemd/user"
+# Пользовательский юнит: ~/.config/systemd/user/voice-assistant.service
 SERVICE_FILE="$SERVICE_DIR/voice-assistant.service"
 UID_NUM="$(id -u)"
 
@@ -95,9 +96,9 @@ XIAOMI_BULB_TOKEN=
 HA_URL=http://127.0.0.1:8123
 HA_TOKEN=
 
-# Сессия внимания (в секундах)
-ATTENTION_TIMEOUT=6
-ATTENTION_TIMEOUT_MUSIC=3
+# Сессия внимания (в секундах) — как в assistant.py
+ATTENTION_TIMEOUT=12
+ATTENTION_TIMEOUT_MUSIC=5
 
 # Настройки приглушения звука (Ducking)
 DUCKING_VOLUME=8
@@ -199,10 +200,12 @@ fi
 
 # 7. Настройка службы systemd и расширения GNOME
 echo "[+] Шаг 7/7: Настройка службы systemd..."
+echo "    Юнит: $SERVICE_FILE"
 cat << EOF > "$SERVICE_FILE"
 [Unit]
 Description=Voice Assistant Service (Jarvis)
 After=network.target sound.target pipewire.service graphical-session.target
+
 [Service]
 Type=simple
 WorkingDirectory=$PROJECT_DIR
@@ -210,19 +213,23 @@ ExecStart=$VENV_DIR/bin/python assistant.py
 Restart=always
 RestartSec=3
 TimeoutStopSec=15
-# === НАСТРОЙКИ ОКРУЖЕНИЯ ===
+
+# === НАСТРОЙКИ ===
 Environment=PYTHONUNBUFFERED=1
 Environment=LANG=ru_RU.UTF-8
 Environment=LC_ALL=ru_RU.UTF-8
-# Графика GNOME
+
+# Графика и рабочий стол
 Environment=DISPLAY=:0
 Environment=WAYLAND_DISPLAY=wayland-0
 Environment=XDG_CURRENT_DESKTOP=GNOME
 Environment=DESKTOP_SESSION=gnome
 Environment=XDG_SESSION_TYPE=wayland
-# Звук и DBus
+
+# Звук и сервисы
 Environment=XDG_RUNTIME_DIR=/run/user/$UID_NUM
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_NUM/bus
+
 [Install]
 WantedBy=default.target
 EOF
@@ -244,18 +251,22 @@ echo "=================================================================="
 echo "    ✅ Установка завершена успешно!                              "
 echo "=================================================================="
 echo "1. Ключи в $PROJECT_DIR/.env:"
-echo "   GROQ_API_KEY — облачный диалог"
+echo "   GROQ_API_KEY — облачный диалог (модель — комбо в настройках, старт 20B)"
 echo "   TINKOFF_TOKEN — биржа (сводка; сделки — тумблер «Сделки голосом»)"
+echo "   TINKOFF_VOICE_TRADE=true — заявки голосом (по умолчанию выкл)"
 echo "   TINKOFF_AUTO_TRADE=true — фоновые заявки на живом счёте"
 echo "   TINKOFF_SANDBOX=true — песочница без реальных денег"
 echo "   CAMERA_INDEX — камера охраны (по умолчанию 0)"
-echo "   Тумблер «Биржа и портфель»: настройки Джарвиса (правый клик по сфере)"
+echo "   Тумблеры: правый клик по сфере или «открой настройки»"
 echo ""
-echo "2. Управление службой ассистента:"
+echo "2. Служба systemd --user:"
+echo "   Юнит: $SERVICE_FILE"
+echo "   TimeoutStopSec=15 (SIGTERM будит Qt, процесс выходит сразу)"
 echo "   systemctl --user start voice-assistant.service    # Запуск"
 echo "   systemctl --user restart voice-assistant.service  # Перезапуск"
 echo "   systemctl --user status voice-assistant.service   # Статус"
 echo "   journalctl --user -u voice-assistant.service -f   # Логи"
+echo "   После ручной правки юнита: systemctl --user daemon-reload"
 echo ""
 echo "3. Консольный текстовый режим:"
 echo "   $VENV_DIR/bin/python cli.py          # Интерактивный диалог в терминале"

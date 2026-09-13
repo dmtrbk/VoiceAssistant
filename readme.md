@@ -16,7 +16,7 @@
 - **TTS-кэширование и очередь речи:** системные отклики прогреваются в `.tts_cache/`; ответ Groq озвучивается по предложениям, следующий кусок синтезируется, пока играет текущий.
 - **Интерактивный диалоговый контекст:** многошаговые сценарии (игра «Больше — Меньше»). Пока партия идёт, «стоп» / «сдаюсь» / «хватит» выходят из игры и не глушат плеер. Сон сессии сбрасывает контекст.
 - **Консольный режим (CLI):** `cli.py` — текстовый диалог в терминале (с озвучкой или `--mute`). Озвучка идёт очередью и не блокирует ответ модели.
-- **Сессия внимания (Attention Timeout):** После обращения ассистент слушает последующие команды без повторения имени (тайм-аут из `.env`, по умолчанию 6 с).
+- **Сессия внимания (Attention Timeout):** После обращения ассистент слушает последующие команды без повторения имени (тайм-аут из `.env`, по умолчанию 12 с, при музыке 5 с).
 - **Barge-in (Мгновенное перебивание):** имя «Джарвис» или «стоп» / «замолчи» / «спать» гасит колонку и обрывает недочитанный ответ Groq.
 - **Погода (Open-Meteo):** прогноз на сегодня и завтра. Без города — точка `DEFAULT_LAT`/`DEFAULT_LON` (озвучка «здесь», если `DEFAULT_CITY` пуст) либо геокодинг `DEFAULT_CITY`.
 - **Биржа и портфель (Т-Инвест):** котировки Мосбиржи, сводка счёта. Сделки голосом («купи», «продай», «поторгуй») — тумблер «Сделки голосом» в настройках (по умолчанию выкл, пишет `stocks_voice_trade`) или `TINKOFF_VOICE_TRADE=true`; без числа — один лот, «все / целиком» — максимум. Фоновая авто-ребалансировка — тумблер «Автоторговля» (пишет `skills_enabled.json`) или `TINKOFF_AUTO_TRADE=true`; пустой флаг и нет ключа в JSON — только песочница. Без токена — публичные котировки ISS и ручная книжка `quiet_book.json`. **При включённых сделках живой токен с правом торговли выставляет реальные заявки**; для тестов `TINKOFF_SANDBOX=true`. Сертификат Минцифры: `certs/russian_trusted_root_ca.pem` или `TINKOFF_CA_BUNDLE`.
@@ -113,7 +113,7 @@ chmod +x setup.sh setup_echo_cancel.sh
 3. Скачает модель распознавания речи **Vosk** (`vosk-model-small-ru-0.22`).
 4. Скачает движок **Piper TTS** и русскую голосовую модель Дмитрия (`ru_RU-dmitri-medium.onnx`).
 5. Создаст файл конфигурации `.env` из `.env.example` (Groq, Т-Инвест, Home Assistant, камера).
-6. Настроит и активирует пользовательскую службу `systemd` (`voice-assistant.service`).
+6. Запишет и включит пользовательскую службу `systemd`: юнит `~/.config/systemd/user/voice-assistant.service` (`voice-assistant.service`, `TimeoutStopSec=15`).
 
 После установки впишите `GROQ_API_KEY`. Для биржи — `TINKOFF_TOKEN`. Сделки голосом по умолчанию выключены (тумблер «Сделки голосом» или `TINKOFF_VOICE_TRADE=true`). Фоновые сделки на живом счёте — отдельно: `TINKOFF_AUTO_TRADE=true`.
 
@@ -227,20 +227,33 @@ python assistant.py --no-gui
 
 ## 🚦 Управление фоновой службой `systemd`
 
-Служба: `voice-assistant.service`
+Пользовательский юнит (не system-wide) пишет `setup.sh`:
+
+`~/.config/systemd/user/voice-assistant.service`
+
+Имя службы: `voice-assistant.service`. После ручной правки файла: `systemctl --user daemon-reload`.
+
+Что внутри юнита (пути подставляет установщик):
+
+- `ExecStart` — `.venv/bin/python assistant.py` из каталога проекта
+- `Restart=always`, `RestartSec=3`
+- `TimeoutStopSec=15` — SIGTERM будит Qt (`wakeup_fd`) и процесс выходит через `os._exit`; иначе systemd шлёт SIGKILL
+- `After=` сеть, PipeWire, `graphical-session`
+- `WantedBy=default.target`
 
 ```bash
 # Запуск / Перезапуск / Остановка
 systemctl --user start voice-assistant.service
 systemctl --user restart voice-assistant.service
 systemctl --user stop voice-assistant.service
+systemctl --user enable voice-assistant.service
 
 # Проверка статуса и просмотр логов в реальном времени
 systemctl --user status voice-assistant.service
 journalctl --user -u voice-assistant.service -f
 ```
 
-Перезапуск голосом: фразы *«перезагрузись»*, *«перезапустись»*, *«рестарт»* автоматически перезапускают службу `systemd`.
+Перезапуск голосом: *«перезагрузись»*, *«перезапустись»*, *«рестарт»*, *«перезагрузи ассистента»*, *«перезапусти ассистента»*.
 
 ---
 
