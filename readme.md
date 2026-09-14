@@ -70,6 +70,7 @@ VoiceAssistant/
 ├── skill_settings.py         # Вкл/выкл навыков без перезапуска службы
 ├── nlu.py                    # Прощание и монетка: точное и нечёткое совпадение фраз
 ├── intents.json              # Базовые интенты (прощания, монетка)
+├── signal_advisor.py         # Советник: сигналы Т-Инвест + моментум 10д → Telegram
 ├── setup.sh                  # Скрипт полной автоустановки окружения и systemd
 ├── setup_echo_cancel.sh      # Настройка PipeWire WebRTC AEC (эхоподавление)
 ├── commands.txt              # Подробная документация всех поддерживаемых команд
@@ -111,23 +112,41 @@ VoiceAssistant/
 
 ## 🛠️ Установка и первый запуск
 
-### Быстрая автоустановка:
+На новой машине **не копируют `.venv`**. С GitHub — исходник, виртуалка собирается заново.
 
 ```bash
-cd ~/VoiceAssistant
+git clone https://github.com/dmtrbk/VoiceAssistant.git
+cd VoiceAssistant
+git checkout experimental
 chmod +x setup.sh setup_echo_cancel.sh
 ./setup.sh
 ```
 
-Скрипт автоматически:
-1. Установит необходимые системные пакеты через `pacman`.
-2. Создаст виртуальное окружение `.venv` и установит все Python-зависимости.
-3. Скачает модель распознавания речи **Vosk** (`vosk-model-small-ru-0.22`).
-4. Скачает движок **Piper TTS** и русскую голосовую модель Дмитрия (`ru_RU-dmitri-medium.onnx`).
-5. Создаст файл конфигурации `.env` из `.env.example` (Groq, Т-Инвест, Home Assistant, камера).
-6. Запишет и включит пользовательскую службу `systemd`: юнит `~/.config/systemd/user/voice-assistant.service` (`voice-assistant.service`, `TimeoutStopSec=5`).
+Скрипт:
+1. Поставит пакеты через `pacman` (Manjaro / GNOME).
+2. Создаст `.venv` и поставит Python-зависимости из `requirements.txt`.
+3. Скачает **Vosk** (`vosk-model-small-ru-0.22`) в `model/`.
+4. Скачает **Piper TTS** и голос Дмитрия в `piper/`.
+5. Создаст `.env` из `.env.example`, если файла ещё нет.
+6. Включит пользовательскую службу `voice-assistant.service`.
 
-После установки впишите `GROQ_API_KEY`. Для биржи — `TINKOFF_TOKEN`. Сделки голосом по умолчанию выключены (тумблер «Сделки голосом» или `TINKOFF_VOICE_TRADE=true`). Фоновые сделки на живом счёте — отдельно: `TINKOFF_AUTO_TRADE=true`.
+Дальше впиши ключи в `.env` (`GROQ_API_KEY`, для биржи `TINKOFF_TOKEN`, Telegram). Сделки голосом по умолчанию выключены. Живой фон — `TINKOFF_AUTO_TRADE=true` или тумблер «Автоторговля».
+
+### Переезд на новое железо
+
+Со старой машины перенести **только секреты и память**, не `.venv`:
+
+```bash
+# на новой машине, после clone + ./setup.sh
+scp старый-хост:~/VoiceAssistant/.env ~/VoiceAssistant/.env
+scp старый-хост:~/VoiceAssistant/skills_enabled.json ~/VoiceAssistant/skills_enabled.json
+scp старый-хост:~/VoiceAssistant/jarvis_holds.json \
+    старый-хост:~/VoiceAssistant/jarvis_bought.json \
+    старый-хост:~/VoiceAssistant/jarvis_trades.json \
+    ~/VoiceAssistant/
+```
+
+`jarvis_*.json` — какие бумаги ты купил сам, что купил стол, дневник сделок. Без них Джарвис на новом ПК не вспомнит Норникель. `skills_enabled.json` — тумблеры навыков. `.env` — ключи. После копирования: `systemctl --user restart voice-assistant.service`.
 
 ---
 
