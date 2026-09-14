@@ -43,6 +43,8 @@ _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _BOOK_PATH = os.path.join(_PROJECT_DIR, "quiet_book.json")
 _HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_holds.json")
 _BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_bought.json")
+_TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_trades.json")
+_MOEX_HISTORY = "https://iss.moex.com/iss/history/engines/stock/markets/shares"
 _RU_CA = os.path.join(_PROJECT_DIR, "certs", "russian_trusted_root_ca.pem")
 _DESK_PERIOD_SEC = 45 * 60
 _MOMENTUM_SPREAD = 0.8
@@ -118,6 +120,7 @@ _ADVICE_HINTS = (
     "пришли совет",
     "советник",
 )
+_JOURNAL_HINTS = ("дневник", "журнал сделок")
 _ALLIN_HINTS = ("переложи", "вложи все", "вложи всё", "все в ", "всё в ")
 _MAX_HINTS = ("все", "всё", "весь", "всю", "целиком", "максимум", "полностью")
 
@@ -221,6 +224,58 @@ def _write_ticker_set(path: str, tickers: set[str]) -> None:
             pass
 
 
+def _read_trades(path: str | None = None) -> list[dict[str, Any]]:
+    path = path or _TRADE_PATH
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return []
+    if isinstance(raw, dict):
+        raw = raw.get("trades") or []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _write_trades(trades: list[dict[str, Any]], path: str | None = None) -> None:
+    path = path or _TRADE_PATH
+    payload = {"trades": trades[-200:]}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Биржа] не записал дневник: %s", exc)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def format_trade_line(entry: dict[str, Any]) -> str:
+    ts = str(entry.get("ts") or "").strip()
+    side = "купил" if str(entry.get("side") or "") == "buy" else "продал"
+    name = str(entry.get("name") or entry.get("ticker") or "")
+    ticker = str(entry.get("ticker") or "")
+    lots = entry.get("lots") or 0
+    price = entry.get("price") or 0
+    price_bit = f" по {price:g} ₽" if price else ""
+    when = f"{ts} " if ts else ""
+    return f"{when}{side} {_lots_phrase(int(lots))}: {name} ({ticker}){price_bit}"
+
+
+def format_journal(trades: list[dict[str, Any]] | None = None, limit: int = 8) -> str:
+    rows = trades if trades is not None else _read_trades()
+    if not rows:
+        return ""
+    lines = [format_trade_line(item) for item in rows[-limit:]]
+    return "Дневник сделок:\n" + "\n".join(lines)
+
+
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
     start = raw.find("{")
     if start < 0:
@@ -252,6 +307,10 @@ def _tinkoff_verify() -> str | bool:
     if os.path.isfile(_RU_CA):
         return _RU_CA
     return True
+
+
+def _wants_journal(text: str) -> bool:
+    return any(hint in text for hint in _JOURNAL_HINTS)
 
 
 def _wants_advice(text: str) -> bool:
@@ -502,7 +561,7 @@ class StocksSkill(BaseSkill):
         text = _norm(context.raw_text)
         if not text:
             return False
-        if _wants_advice(text):
+        if _wants_journal(text) or _wants_advice(text):
             return True
         kind = _trade_kind(text)
         if kind == "auto":
@@ -544,7 +603,9 @@ class StocksSkill(BaseSkill):
         kind = _trade_kind(text)
 
         try:
-            if _wants_advice(text):
+            if _wants_journal(text):
+                reply = self._run_journal(context.channel)
+            elif _wants_advice(text):
                 reply = self._run_advisor(context.channel)
             elif kind:
                 reply = self._execute_trade(text, kind, ticker)
@@ -602,6 +663,15 @@ class StocksSkill(BaseSkill):
             return text
         if telegram_configured():
             return "Отправил рекомендацию в телеграм."
+        return text
+
+    def _run_journal(self, channel: str = "voice") -> str:
+        text = format_journal() or "Дневник пуст: сделок ещё не было."
+        if channel == "telegram":
+            return text
+        if telegram_configured():
+            send_telegram_notification(text, background=False)
+            return "Отправил дневник в телеграм."
         return text
 
     def _headers(self) -> dict[str, str]:
@@ -791,6 +861,54 @@ class StocksSkill(BaseSkill):
         if last_error:
             raise last_error
         raise RuntimeError(f"no moex quote {ticker}")
+
+    def _closes_history(self, ticker: str, limit: int = 16) -> list[float]:
+        ticker = ticker.upper()
+        for board in _MOEX_BOARDS:
+            try:
+                data = self._get(
+                    f"{_MOEX_HISTORY}/boards/{board}/securities/{ticker}.json",
+                    {
+                        "iss.meta": "off",
+                        "iss.only": "history",
+                        "sort_order": "desc",
+                        "limit": str(limit),
+                    },
+                    f"hist:{board}:{ticker}",
+                )
+            except Exception as exc:
+                logger.debug("[Биржа] история %s %s: %s", board, ticker, exc)
+                continue
+            rows = self._iss_rows(data.get("history"))
+            rows.sort(key=lambda row: str(row.get("TRADEDATE") or ""), reverse=True)
+            closes: list[float] = []
+            for row in rows:
+                close = row.get("CLOSE") or row.get("LEGALCLOSEPRICE")
+                if close in (None, "", 0, 0.0):
+                    continue
+                closes.append(float(close))
+            if len(closes) >= 11:
+                return closes
+            if closes:
+                return closes
+        return []
+
+    def _momentum_10d(self, ticker: str) -> dict[str, Any]:
+        closes = self._closes_history(ticker)
+        if len(closes) < 11:
+            now = closes[0] if closes else 0.0
+            return {"close": now, "close_10": 0.0, "chg_10": None, "trend": "нет данных"}
+        now, then = closes[0], closes[10]
+        if then <= 0:
+            return {"close": now, "close_10": then, "chg_10": None, "trend": "нет данных"}
+        chg = round((now / then - 1.0) * 100.0, 1)
+        if now > then:
+            trend = "выше"
+        elif now < then:
+            trend = "ниже"
+        else:
+            trend = "как 10д назад"
+        return {"close": now, "close_10": then, "chg_10": chg, "trend": trend}
 
     def _quote(self, ticker: str) -> tuple[str, float, float]:
         if self._token:
@@ -1183,7 +1301,9 @@ class StocksSkill(BaseSkill):
         if direction == "ORDER_DIRECTION_BUY":
             self._mark_desk_bought(ticker)
         verb = "купил" if direction == "ORDER_DIRECTION_BUY" else "продал"
-        return f"{verb.capitalize()} {_lots_phrase(lots)}: {spoken}."
+        phrase = f"{verb.capitalize()} {_lots_phrase(lots)}: {spoken}."
+        self._journal_trade(ticker, direction, lots, spoken)
+        return phrase
 
     def _resolve_trade_ticker(self, ticker: str | None) -> str | None:
         if ticker:
@@ -1441,6 +1561,29 @@ class StocksSkill(BaseSkill):
         if ticker in self._manual_holds:
             return True
         return self._desk_bought_ready and ticker not in self._desk_bought
+
+    def _journal_trade(self, ticker: str, direction: str, lots: int, spoken: str) -> None:
+        ticker = ticker.upper()
+        price = 0.0
+        try:
+            _name, price, _pct = self._quote(ticker)
+        except Exception:
+            price = 0.0
+        entry = {
+            "ts": datetime.now(ZoneInfo("Europe/Moscow")).strftime("%d.%m %H:%M"),
+            "ticker": ticker,
+            "name": spoken,
+            "side": "buy" if direction == "ORDER_DIRECTION_BUY" else "sell",
+            "lots": int(lots),
+            "price": round(float(price or 0), 4),
+        }
+        trades = _read_trades()
+        trades.append(entry)
+        _write_trades(trades)
+        line = "Дневник: " + format_trade_line(entry)
+        logger.info("[Биржа] %s", line)
+        if telegram_configured():
+            send_telegram_notification(line, background=True)
 
     def _filter_buy_alloc(
         self,

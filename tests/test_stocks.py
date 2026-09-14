@@ -9,12 +9,15 @@ from skills.stocks import (
     _extract_lots,
     _wants_market_report,
     _wants_advice,
+    _wants_journal,
     _has_max_hint,
     _is_api_buy_forbidden_text,
     _is_drop_sell,
     _min_trade_rub,
     _signal_is_buy,
     _trade_kind,
+    format_journal,
+    format_trade_line,
 )
 
 
@@ -24,12 +27,16 @@ class TestStocks(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         hold_path = os.path.join(self.tmp.name, "holds.json")
         bought_path = os.path.join(self.tmp.name, "bought.json")
+        trade_path = os.path.join(self.tmp.name, "trades.json")
         patcher_hold = patch("skills.stocks._HOLD_PATH", hold_path)
         patcher_bought = patch("skills.stocks._BOUGHT_PATH", bought_path)
+        patcher_trade = patch("skills.stocks._TRADE_PATH", trade_path)
         patcher_hold.start()
         patcher_bought.start()
+        patcher_trade.start()
         self.addCleanup(patcher_hold.stop)
         self.addCleanup(patcher_bought.stop)
+        self.addCleanup(patcher_trade.stop)
         self.skill = StocksSkill()
 
     def test_extract_lots(self):
@@ -72,6 +79,9 @@ class TestStocks(unittest.TestCase):
         self.assertTrue(_wants_advice("совет по портфелю"))
         self.assertFalse(_wants_advice("как там портфель"))
         self.assertIsNone(_trade_kind("посоветуй"))
+        self.assertTrue(_wants_journal("дневник"))
+        self.assertTrue(_wants_journal("журнал сделок"))
+        self.assertFalse(_wants_journal("посоветуй"))
 
     def test_order_filled(self):
         # NEW is not filled yet
@@ -452,6 +462,31 @@ class TestStocks(unittest.TestCase):
             result = self.skill._rebalance_portfolio({"VTBR": 100.0})
         place.assert_called_with("EUTR", "ORDER_DIRECTION_SELL", 10)
         self.assertIn("Продал", result)
+
+    def test_momentum_10d_from_history(self):
+        closes = [{"TRADEDATE": f"2026-09-{day:02d}", "CLOSE": 100 + day} for day in range(1, 16)]
+        with patch.object(self.skill, "_get", return_value={"history": {"columns": ["TRADEDATE", "CLOSE"], "data": [[row["TRADEDATE"], row["CLOSE"]] for row in closes]}}):
+            with patch.object(self.skill, "_iss_rows", return_value=closes):
+                mom = self.skill._momentum_10d("SBER")
+        self.assertEqual(mom["trend"], "выше")
+        self.assertGreater(mom["chg_10"], 0)
+
+    def test_journal_formats_and_command(self):
+        spoken: list[str] = []
+        line = format_trade_line(
+            {"ts": "14.09 18:00", "side": "buy", "lots": 1, "name": "Новатэк", "ticker": "NVTK", "price": 1180}
+        )
+        self.assertIn("купил", line)
+        self.assertIn("NVTK", line)
+        self.assertIn("дневник сделок", format_journal([{"ts": "14.09 18:00", "side": "buy", "lots": 1, "name": "Новатэк", "ticker": "NVTK", "price": 1180}]).lower())
+        with (
+            patch("skills.stocks.telegram_configured", return_value=True),
+            patch("skills.stocks.send_telegram_notification") as send,
+            patch("skills.stocks.format_journal", return_value="Дневник сделок:\nкупил 1 лот"),
+        ):
+            self.skill.execute(RequestContext(raw_text="дневник", speak=spoken.append))
+        send.assert_called_once()
+        self.assertEqual(spoken, ["Отправил дневник в телеграм."])
 
 
 if __name__ == "__main__":

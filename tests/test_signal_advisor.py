@@ -44,6 +44,11 @@ class TestSignalAdvisor(unittest.TestCase):
         with (
             patch.object(self.skill, "_fetch_buy_signals", return_value=signals),
             patch.object(self.skill, "_instrument", side_effect=fake_instrument),
+            patch.object(
+                self.skill,
+                "_momentum_10d",
+                return_value={"close": 100.0, "close_10": 90.0, "chg_10": 11.1, "trend": "выше"},
+            ),
         ):
             rows = signal_advisor.collect_signal_rows(self.skill)
         tickers = [row["ticker"] for row in rows]
@@ -61,12 +66,18 @@ class TestSignalAdvisor(unittest.TestCase):
                 "info": "",
                 "blocked": False,
                 "reason": "",
+                "trend": "выше",
+                "chg_10": 5.5,
             }
         ]
         facts = signal_advisor.build_facts(rows, "кэш 5000 ₽")
         self.assertIn("NVTK", facts)
         self.assertIn("5000", facts)
+        self.assertIn("выше закрытия 10д", facts)
         self.assertIn("сырые сигналы", signal_advisor._fallback_advice(facts).lower())
+        composed = signal_advisor.compose_message("Бери Новатэк.", rows)
+        self.assertIn("Бери Новатэк.", composed)
+        self.assertIn("Моментум 10 дней", composed)
 
     def test_run_does_not_place_orders(self):
         self.skill._token = "test-token"
@@ -87,9 +98,10 @@ class TestSignalAdvisor(unittest.TestCase):
             patch.object(signal_advisor, "advise", return_value="Бери Новатэк."),
             patch.object(self.skill, "_place_order") as place,
             patch.object(signal_advisor, "deliver") as deliver,
+            patch("signal_advisor.format_journal", return_value=""),
         ):
             text = signal_advisor.run(skill=self.skill, to_telegram=False)
-        self.assertEqual(text, "Бери Новатэк.")
+        self.assertIn("Бери Новатэк.", text)
         place.assert_not_called()
         deliver.assert_called_once()
 

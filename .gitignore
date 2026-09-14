@@ -18,6 +18,7 @@ skills/shared_events.json
 quiet_book.json
 jarvis_holds.json
 jarvis_bought.json
+jarvis_trades.json
 quiet_vitality.json
 volume_cache.json
 timers_cache.json

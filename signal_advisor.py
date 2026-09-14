@@ -24,6 +24,7 @@ from skills.stocks import (  # noqa: E402
     _MOEX_BOARDS,
     _buy_block_reason,
     _signal_weight,
+    format_journal,
 )
 from skills.utils import send_telegram_notification, telegram_configured  # noqa: E402
 
@@ -35,6 +36,8 @@ _SYSTEM = (
     "Хозяин читает текст в Telegram. Заявки сам не ставишь — только совет. "
     "Бумаги бери строго из списка официальных сигналов Т-Инвест, ничего не выдумывай. "
     "Выбери до четырёх имён. Если у бумаги пометка «купи сам» — так и скажи, через API её нет. "
+    "Если цена ниже закрытия 10 торговых дней назад — не советуй докупать без оговорки. "
+    "Если выше — это в пользу сигнала. "
     "Не обещай прибыль и не зови в плечо. Коротко, по делу, до 900 знаков. "
     "О себе только в мужском роде. Можно короткий список, без markdown-заголовков."
 )
@@ -68,6 +71,10 @@ def collect_signal_rows(skill: StocksSkill, limit: int = _SIGNAL_LIMIT) -> list[
         name = skill._spoken_name(ticker, inst)
         skill._remember_name(ticker, name)
         blocked = skill._is_buy_blocked(ticker) or inst.get("apiTradeAvailableFlag") is False
+        try:
+            mom = skill._momentum_10d(ticker)
+        except Exception:
+            mom = {"close": 0.0, "close_10": 0.0, "chg_10": None, "trend": "нет данных"}
         rows.append(
             {
                 "ticker": ticker,
@@ -77,6 +84,8 @@ def collect_signal_rows(skill: StocksSkill, limit: int = _SIGNAL_LIMIT) -> list[
                 "info": str(sig.get("info") or sig.get("name") or "").strip(),
                 "blocked": blocked,
                 "reason": _buy_block_reason(ticker) if blocked else "",
+                "trend": mom.get("trend") or "нет данных",
+                "chg_10": mom.get("chg_10"),
             }
         )
     return rows
@@ -109,10 +118,24 @@ def build_facts(rows: list[dict[str, Any]], book: str) -> str:
         mark = f" — купи сам ({row['reason']})" if row.get("blocked") else ""
         extra = row.get("strategy") or row.get("info") or ""
         tail = f", {extra}" if extra else ""
+        trend = str(row.get("trend") or "")
+        chg = row.get("chg_10")
+        if trend == "выше" and chg is not None:
+            mom = f", выше закрытия 10д ({chg:+.1f}%)"
+        elif trend == "ниже" and chg is not None:
+            mom = f", ниже закрытия 10д ({chg:+.1f}%)"
+        elif trend and trend != "нет данных":
+            mom = f", {trend} закрытия 10д"
+        else:
+            mom = ""
         lines.append(
-            f"{index}. {row['name']} ({row['ticker']}) вероятность {row['probability']:.0f}{tail}{mark}"
+            f"{index}. {row['name']} ({row['ticker']}) вероятность {row['probability']:.0f}{tail}{mom}{mark}"
         )
     return "\n".join(lines)
+
+
+def _fallback_advice(facts: str) -> str:
+    return "ИИ сейчас молчит. Сырые сигналы:\n" + facts
 
 
 def advise(facts: str) -> str:
@@ -137,8 +160,31 @@ def advise(facts: str) -> str:
     return _fallback_advice(facts)
 
 
-def _fallback_advice(facts: str) -> str:
-    return "ИИ сейчас молчит. Сырые сигналы:\n" + facts
+def format_momentum(rows: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for row in rows:
+        trend = str(row.get("trend") or "нет данных")
+        chg = row.get("chg_10")
+        name = row.get("name") or row.get("ticker")
+        ticker = row.get("ticker")
+        if trend == "нет данных" or chg is None:
+            continue
+        flag = "осторожно" if trend == "ниже" else "в плюсе"
+        lines.append(f"{name} ({ticker}): {trend} закрытия 10д ({chg:+.1f}%) — {flag}")
+    if not lines:
+        return ""
+    return "Моментум 10 дней:\n" + "\n".join(lines)
+
+
+def compose_message(advice: str, rows: list[dict[str, Any]]) -> str:
+    parts = [advice.strip()]
+    mom = format_momentum(rows)
+    if mom:
+        parts.append(mom)
+    journal = format_journal()
+    if journal:
+        parts.append(journal)
+    return "\n\n".join(part for part in parts if part)
 
 
 def deliver(text: str, to_telegram: bool, to_stdout: bool = True) -> None:
@@ -158,7 +204,7 @@ def run(
         raise RuntimeError("нет токена Т-Инвест")
     rows = collect_signal_rows(skill)
     facts = build_facts(rows, collect_book(skill))
-    text = advise(facts)
+    text = compose_message(advise(facts), rows)
     if to_telegram is None:
         to_telegram = telegram_configured()
     deliver(text, to_telegram=bool(to_telegram), to_stdout=to_stdout)
