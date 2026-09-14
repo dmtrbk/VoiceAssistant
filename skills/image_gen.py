@@ -1,5 +1,7 @@
 # skills/image_gen.py
 # «нарисуй …» → Pollinations → Telegram sendPhoto. Ключ не нужен.
+# Groq не рисует: в API нет images.generations, в каталоге нет Flux/SD.
+# Groq только разворачивает короткий русский запрос в английский промпт.
 
 from __future__ import annotations
 
@@ -182,7 +184,7 @@ def _clean_expanded(raw: str) -> str:
 
 
 def expand_prompt(user_text: str, complete: Callable[..., str] | None = None) -> str:
-    """Короткий русский запрос → детальный английский промпт. Без Groq — шаблон."""
+    """Короткий русский запрос → детальный английский промпт. Пиксели не из Groq."""
     fallback = fallback_prompt(user_text)
     try:
         if complete is None:

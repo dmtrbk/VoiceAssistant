@@ -1,5 +1,6 @@
 # skills/groq_client.py
 # Один клиент Groq на процесс. Цепочка моделей общая для чата и биржи.
+# Каталог Groq — чат, речь и зрение (понимание фото). Рисовать картинки API не умеет.
 
 from __future__ import annotations
 
@@ -39,6 +40,109 @@ def groq_model_choices(current: str | None = None) -> list[tuple[str, str]]:
     if extra and extra not in seen:
         rows.append((extra, extra))
     return rows
+
+
+# Снимок публичного каталога console.groq.com/docs/models (сентябрь 2026).
+# Нужен тестам list_models: в списке нет генерации картинок.
+GROQ_CATALOG_IDS = (
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "whisper-large-v3",
+    "whisper-large-v3-turbo",
+    "groq/compound",
+    "groq/compound-mini",
+    "canopylabs/orpheus-arabic-saudi",
+    "canopylabs/orpheus-v1-english",
+    "meta-llama/llama-prompt-guard-2-22m",
+    "meta-llama/llama-prompt-guard-2-86m",
+    "minimaxai/minimax-m2.7",
+    "openai/gpt-oss-safeguard-20b",
+    "qwen/qwen3.6-27b",
+    "qwen/qwen3.8-27b",
+)
+
+CAP_CHAT = "chat"
+CAP_SPEECH = "speech"
+CAP_TTS = "tts"
+CAP_VISION = "vision"
+CAP_IMAGE_GEN = "image_gen"
+CAP_GUARD = "guard"
+
+_CAP_LABELS = {
+    CAP_CHAT: "чат",
+    CAP_SPEECH: "речь → текст",
+    CAP_TTS: "текст → речь",
+    CAP_VISION: "зрение (понимает картинку, не рисует)",
+    CAP_IMAGE_GEN: "генерация картинок",
+    CAP_GUARD: "фильтр",
+}
+_CAP_ORDER = (CAP_CHAT, CAP_SPEECH, CAP_TTS, CAP_VISION, CAP_GUARD, CAP_IMAGE_GEN)
+_VISION_MARKERS = (
+    "qwen3.6",
+    "qwen3.8",
+    "llama-4-scout",
+    "llama-4-maverick",
+    "llava",
+    "vision",
+)
+_IMAGE_GEN_MARKERS = (
+    "flux",
+    "stable-diffusion",
+    "dall-e",
+    "dalle",
+    "imagen",
+    "sdxl",
+    "image-gen",
+    "image_gen",
+)
+
+
+def groq_model_caps(model_id: str) -> frozenset[str]:
+    """Возможности модели по id. Groq рисует только если id явно генеративный."""
+    mid = (model_id or "").strip().lower()
+    if not mid:
+        return frozenset()
+    caps: set[str] = set()
+    if "whisper" in mid:
+        caps.add(CAP_SPEECH)
+    elif "orpheus" in mid:
+        caps.add(CAP_TTS)
+    elif "guard" in mid or "safeguard" in mid:
+        caps.add(CAP_GUARD)
+    else:
+        caps.add(CAP_CHAT)
+    if any(marker in mid for marker in _VISION_MARKERS):
+        caps.add(CAP_VISION)
+        caps.add(CAP_CHAT)
+    if any(marker in mid for marker in _IMAGE_GEN_MARKERS):
+        caps.add(CAP_IMAGE_GEN)
+    return frozenset(caps)
+
+
+def groq_draws_images(model_ids: list[str] | tuple[str, ...] | None = None) -> bool:
+    ids = GROQ_CATALOG_IDS if model_ids is None else model_ids
+    return any(CAP_IMAGE_GEN in groq_model_caps(mid) for mid in ids)
+
+
+def format_groq_models_report(model_ids: list[str] | tuple[str, ...]) -> str:
+    lines = ["=== Доступные модели Groq ==="]
+    for mid in model_ids:
+        caps = groq_model_caps(mid)
+        labels = ", ".join(_CAP_LABELS[cap] for cap in _CAP_ORDER if cap in caps) or "неизвестно"
+        lines.append(f"- {mid}  [{labels}]")
+    lines.append("")
+    if groq_draws_images(model_ids):
+        lines.append("Картинки: в каталоге есть модель генерации — можно рисовать через Groq.")
+    else:
+        lines.append(
+            "Картинки: в каталоге Groq нет моделей рисования. "
+            "Зрение (Qwen) только описывает фото. "
+            "Навык «нарисуй» идёт в Pollinations; Groq лишь разворачивает промпт."
+        )
+    return "\n".join(lines)
+
 
 _MODEL_MISS = ("model", "not found", "unknown", "404", "400")
 _RETRY_TRANSIENT = ("timeout", "timed out", "temporarily", "429", "rate limit", "overloaded")
