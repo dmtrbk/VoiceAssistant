@@ -103,9 +103,17 @@ class TestStocks(unittest.TestCase):
     def test_fallback_uses_available_ticker(self):
         self.assertEqual(self.skill._fallback_allocation([{"ticker": "VTBR"}]), {"VTBR": 100.0})
         self.assertEqual(
-            self.skill._fallback_allocation([{"ticker": "VTBR"}, {"ticker": "TMOS"}]),
-            {"TMOS": 100.0},
+            self.skill._fallback_allocation([{"ticker": "TMOS"}, {"ticker": "VTBR"}]),
+            {"VTBR": 100.0},
         )
+        self.assertEqual(self.skill._fallback_allocation([{"ticker": "TMOS"}]), {})
+
+    def test_filter_buy_alloc_drops_tmos_and_renormalizes(self):
+        cleaned = self.skill._filter_buy_alloc(
+            {"TMOS": 70.0, "VTBR": 30.0},
+            [{"ticker": "VTBR"}, {"ticker": "TMOS"}],
+        )
+        self.assertEqual(cleaned, {"VTBR": 100.0})
 
     def test_small_desk_skips_tape_movers(self):
         self.skill._watchlist = ["SBER", "VTBR"]
@@ -132,9 +140,16 @@ class TestStocks(unittest.TestCase):
             chosen = self.skill._desk_candidates()
         tickers = {row["ticker"] for row in chosen}
         self.assertIn("VTBR", tickers)
-        self.assertIn("TMOS", tickers)
+        self.assertNotIn("TMOS", tickers)
         self.assertNotIn("EUTR", tickers)
         self.assertNotIn("SBER", tickers)
+
+    def test_place_order_blocks_tmos_buy(self):
+        with patch.object(self.skill, "_post") as post:
+            with self.assertRaises(RuntimeError) as ctx:
+                self.skill._place_order("TMOS", "ORDER_DIRECTION_BUY", 1)
+            self.assertIn("api forbidden", str(ctx.exception))
+            post.assert_not_called()
 
     def test_rebalance_small_account_buys_target(self):
         self.skill._token = "test-token"
@@ -149,6 +164,22 @@ class TestStocks(unittest.TestCase):
         ):
             result = self.skill._rebalance_portfolio({"VTBR": 100.0})
         place.assert_called_with("VTBR", "ORDER_DIRECTION_BUY", 3)
+        self.assertIn("Купил", result)
+
+    def test_rebalance_drops_tmos_and_buys_the_rest(self):
+        self.skill._token = "test-token"
+        with (
+            patch.object(self.skill, "_safe_positions", return_value=([], 0.0, 0.0)),
+            patch.object(self.skill, "_broker_cash", return_value=300.0),
+            patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=(3, 0)),
+            patch.object(self.skill, "_place_order", return_value="Купил 3 лота: ВТБ.") as place,
+            patch("skills.stocks.time.sleep"),
+        ):
+            result = self.skill._rebalance_portfolio({"TMOS": 70.0, "VTBR": 30.0})
+        place.assert_called_with("VTBR", "ORDER_DIRECTION_BUY", 3)
+        self.assertNotIn("TMOS", str(place.call_args_list))
         self.assertIn("Купил", result)
 
 

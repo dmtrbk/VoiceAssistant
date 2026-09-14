@@ -18,7 +18,13 @@ from triggers import (
     is_sleep_command,
     split_quick_compound,
 )
-from context_manager import clear_active_context, handle_context_input, is_in_context
+from context_manager import (
+    clear_active_context,
+    get_context_state,
+    get_session_data,
+    handle_context_input,
+    is_in_context,
+)
 from dialogue_repair import (
     ask_bare_action,
     drop_pending,
@@ -264,6 +270,8 @@ def _dispatch_single(
         speak=capturing_speak,
         alert_speak=alert_speak or speak_callback,
         channel=channel,
+        session_data=get_session_data(),
+        context_state=get_context_state(),
     )
 
     chosen, disabled = _match_narrow_skill(context)

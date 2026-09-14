@@ -50,6 +50,9 @@ _MIN_TRADE_SMALL_PCT = 0.05
 _MIN_TRADE_HARD_RUB = 1000.0
 _MIN_TRADE_HARD_CAP_PCT = 0.25
 _SMALL_EQUITY_RUB = 5000.0
+# TMOS через T-Invest API не покупается (30052 Instrument forbidden).
+# Котировки с ISS остаются, заявки на покупку — нет.
+_API_BUY_BLOCKED = frozenset({"TMOS"})
 
 _MARKET_WORDS = (
     "акци", "акцы", "портфел", "котиров", "бирж", "брокер",
@@ -370,6 +373,7 @@ class StocksSkill(BaseSkill):
         self._cache: dict[str, tuple[float, Any]] = {}
         self._last_tickers: list[str] = []
         self._alias_extra: dict[str, str] = {}
+        self._buy_blocked: set[str] = set()
         self._desk_stop = threading.Event()
         self._desk_enabled = threading.Event()
         self._desk_enabled.set()
@@ -468,6 +472,9 @@ class StocksSkill(BaseSkill):
             if "no lots" in msg:
                 context.speak("Не хватает.")
                 return
+            if "api forbidden" in msg:
+                context.speak("Брокер эту бумагу через API не берёт.")
+                return
             if "no moex quote" in msg:
                 context.speak("Не нашёл.")
                 return
@@ -520,6 +527,8 @@ class StocksSkill(BaseSkill):
                 for marker in ("permission", "прав", "readonly", "read only", "недостаточно прав")
             ):
                 raise RuntimeError("trade token")
+            if "30052" in snippet or "forbidden for trading by api" in snippet:
+                raise RuntimeError("api forbidden")
             raise _http_error(response)
         data = response.json() if response.content else {}
         if cache_key:
@@ -601,7 +610,7 @@ class StocksSkill(BaseSkill):
             return self._book_cash()
         account_id = self._pick_account_id()
         if not account_id:
-            return self._book_cash()
+            return 0.0
         try:
             data = self._post(
                 self._url(_PORTFOLIO),
@@ -610,10 +619,11 @@ class StocksSkill(BaseSkill):
             )
             cash_obj = data.get("totalAmountCurrencies") or {}
             cash = _quotation_to_float(cash_obj)
-            return cash if cash > 0 else self._book_cash()
+            # С токеном нулевой кэш брокера — это ноль, а не устаревшая quiet_book.
+            return max(cash, 0.0)
         except Exception as exc:
             logger.warning("[Биржа] Не удалось получить кэш брокера: %s", exc)
-            return self._book_cash()
+            return 0.0
 
     def _watch_tickers(self) -> list[str]:
         ordered: list[str] = []
@@ -1009,6 +1019,9 @@ class StocksSkill(BaseSkill):
     def _place_order(self, ticker: str, direction: str, lots: int) -> str:
         if lots <= 0:
             raise RuntimeError("no lots")
+        ticker = ticker.upper()
+        if direction == "ORDER_DIRECTION_BUY" and self._is_buy_blocked(ticker):
+            raise RuntimeError("api forbidden")
         account_id = self._pick_account_id()
         if not account_id:
             raise RuntimeError("no account")
@@ -1024,7 +1037,12 @@ class StocksSkill(BaseSkill):
             body["instrumentId"] = uid
         if figi:
             body["figi"] = figi
-        data = self._post(self._url(_ORDERS), body)
+        try:
+            data = self._post(self._url(_ORDERS), body)
+        except RuntimeError as exc:
+            if "api forbidden" in str(exc) and direction == "ORDER_DIRECTION_BUY":
+                self._buy_blocked.add(ticker)
+            raise
         self._bust_broker_cache()
         if not self._order_filled(data):
             message = str(data.get("message") or data.get("rejectReason") or "заявка не прошла")
@@ -1069,6 +1087,9 @@ class StocksSkill(BaseSkill):
         return self._trade_sell(target, requested)
 
     def _trade_buy(self, ticker: str, requested: int | None) -> str:
+        ticker = ticker.upper()
+        if self._is_buy_blocked(ticker):
+            raise RuntimeError("api forbidden")
         buy_max, _sell_max = self._max_lots(ticker)
         if buy_max <= 0:
             raise RuntimeError("no lots")
@@ -1087,6 +1108,9 @@ class StocksSkill(BaseSkill):
         return self._place_order(ticker, "ORDER_DIRECTION_SELL", lots)
 
     def _trade_all_in(self, ticker: str) -> str:
+        ticker = ticker.upper()
+        if self._is_buy_blocked(ticker):
+            raise RuntimeError("api forbidden")
         parts: list[str] = []
         positions, _day, _total = self._safe_positions()
         for item in positions:
@@ -1198,15 +1222,8 @@ class StocksSkill(BaseSkill):
             row["held"] = qty
             add(row)
 
-        if "TMOS" not in seen:
-            try:
-                name, price, pct = self._moex_quote("TMOS")
-                add({"ticker": "TMOS", "name": name, "price": price, "pct": pct, "lot": 1, "value": 1_000_000, "held": held.get("TMOS", 0)})
-            except Exception:
-                pass
-
-        # Мелкий фонд: не гоняемся за всей лентой TQBR — только то, что уже есть,
-        # TMOS и watchlist, если лот реально влезает в капитал.
+        # Мелкий фонд: не гоняемся за всей лентой TQBR — только то, что уже есть
+        # и watchlist, если лот реально влезает в капитал.
         if equity < _SMALL_EQUITY_RUB:
             for ticker in self._watchlist:
                 ticker = ticker.upper()
@@ -1264,15 +1281,48 @@ class StocksSkill(BaseSkill):
             pass
         return 1
 
+    def _is_buy_blocked(self, ticker: str) -> bool:
+        ticker = ticker.upper()
+        return ticker in _API_BUY_BLOCKED or ticker in self._buy_blocked
+
+    def _filter_buy_alloc(
+        self,
+        alloc: dict[str, float],
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, float]:
+        """Убирает бумаги, которые API не покупает, и нормализует доли на 100%."""
+        cleaned: dict[str, float] = {}
+        for ticker, pct in (alloc or {}).items():
+            ticker_u = str(ticker).upper().strip()
+            if not ticker_u or self._is_buy_blocked(ticker_u):
+                continue
+            try:
+                val = float(pct)
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                cleaned[ticker_u] = val
+        if not cleaned:
+            return self._fallback_allocation(candidates)
+        total = sum(cleaned.values())
+        if total <= 0:
+            return self._fallback_allocation(candidates)
+        return {key: round((val / total) * 100.0, 1) for key, val in cleaned.items()}
+
     def _fallback_allocation(self, candidates: list[dict[str, Any]]) -> dict[str, float]:
-        """Фолбек: TMOS, если он в списке, иначе первая доступная бумага."""
-        tickers = [str(row.get("ticker") or "").upper() for row in candidates if row.get("ticker")]
-        if "TMOS" in tickers or not tickers:
-            return {"TMOS": 100.0}
-        return {tickers[0]: 100.0}
+        """Фолбек: первая бумага из списка, которую API позволяет купить."""
+        for row in candidates:
+            ticker = str(row.get("ticker") or "").upper()
+            if ticker and not self._is_buy_blocked(ticker):
+                return {ticker: 100.0}
+        return {}
 
     def _desk_choose(self, candidates: list[dict[str, Any]], equity: float | None = None) -> dict[str, float]:
-        allowed = {row["ticker"].upper() for row in candidates} | {"TMOS"}
+        allowed = {
+            str(row["ticker"]).upper()
+            for row in candidates
+            if row.get("ticker") and not self._is_buy_blocked(str(row["ticker"]))
+        }
         if not allowed:
             return self._fallback_allocation(candidates)
         if equity is None:
@@ -1309,18 +1359,17 @@ class StocksSkill(BaseSkill):
                     "Ты Джарвис. Управляешь фондом модернизации (покупка продвинутых моделей ИИ и нового железа для себя). "
                     f"Капитал маленький: {equity:.0f} руб. Не размазывай. "
                     "Выбери 1 или 2 бумаги из списка, которые реально купить хотя бы одним лотом. "
-                    "Предпочитай то, что уже в портфеле, или индексный фонд TMOS. "
+                    "Предпочитай то, что уже в портфеле. "
                     "Ответ только валидный JSON без markdown: {\"portfolio\": {\"TICKER1\": 70, \"TICKER2\": 30}}. "
-                    "Сумма долей должна быть строго равна 100. Тикеры строго из списка (или TMOS). Хозяин не выбирает. Не объясняй."
+                    "Сумма долей должна быть строго равна 100. Тикеры строго из списка. Хозяин не выбирает. Не объясняй."
                 )
             else:
                 system_prompt = (
                     "Ты Джарвис. Управляешь фондом модернизации (покупка продвинутых моделей ИИ и нового железа для себя). "
                     "Твоя задача — сформировать сбалансированный и диверсифицированный портфель. "
                     "Выбери от 2 до 4 наиболее перспективных и ликвидных бумаг из представленной ленты TQBR и распредели между ними доли капитала в процентах. "
-                    "Если на рынке нет четких трендов или сильных идей, можешь включить в портфель индексный фонд TMOS. "
                     "Ответ только валидный JSON без markdown: {\"portfolio\": {\"TICKER1\": 40, \"TICKER2\": 30, \"TICKER3\": 30}}. "
-                    "Сумма долей должна быть строго равна 100. Тикеры строго из списка (или TMOS). Хозяин не выбирает. Не объясняй."
+                    "Сумма долей должна быть строго равна 100. Тикеры строго из списка. Хозяин не выбирает. Не объясняй."
                 )
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -1379,6 +1428,15 @@ class StocksSkill(BaseSkill):
     def _rebalance_portfolio(self, target_alloc: dict[str, float], silent: bool = False) -> str:
         parts: list[str] = []
         acted = False
+        target_alloc = self._filter_buy_alloc(
+            target_alloc,
+            [{"ticker": str(ticker)} for ticker in (target_alloc or {})],
+        )
+        if not target_alloc:
+            result = "Нечего покупать: брокер не даёт эти бумаги через API."
+            if silent:
+                logger.info("[Биржа] авто-ребалансировка: %s", result)
+            return result
 
         positions_list, _day, _total = self._safe_positions()
         positions = {p["ticker"]: p for p in positions_list}
@@ -1463,10 +1521,13 @@ class StocksSkill(BaseSkill):
             }
 
         # 2. Цикл ПОКУПКИ: принцип «Сначала считаем — потом покупаем»
-        available_cash = self._broker_cash()
+        available_cash: float | None = self._broker_cash()
+        if self._token and (available_cash or 0) < min_trade_rub:
+            # После продаж кэш в GetPortfolio иногда ещё ноль; лимит — GetMaxLots.
+            available_cash = None
         buy_candidates: list[tuple[str, float]] = []
         for ticker, target_pct in target_alloc.items():
-            if ticker == "TMOS":
+            if self._is_buy_blocked(ticker):
                 continue
             diff = target_values[ticker] - current_values.get(ticker, 0.0)
             if diff >= min_trade_rub:
@@ -1487,12 +1548,12 @@ class StocksSkill(BaseSkill):
             if desired_lots <= 0:
                 continue
 
-            # Ограничиваем лоты оставшимся расчетным кэшем
-            if desired_lots * lot_cost > available_cash:
+            if available_cash is not None and desired_lots * lot_cost > available_cash:
                 desired_lots = int(available_cash / lot_cost)
 
             if desired_lots > 0:
-                available_cash -= desired_lots * lot_cost
+                if available_cash is not None:
+                    available_cash -= desired_lots * lot_cost
                 planned_buys.append((ticker, desired_lots))
 
         # Выполняем ордера по составленному плану покупок
@@ -1511,21 +1572,10 @@ class StocksSkill(BaseSkill):
             except Exception as exc:
                 logger.warning("[Биржа] Ошибка при покупке %s: %s", ticker, exc)
 
-        # 3. Парковка кэша в TMOS только если индексный фонд есть в целевом портфеле.
-        if target_alloc.get("TMOS", 0.0) > 0:
-            self._bust_broker_cache()
-            buy_max_tmos, _ = self._max_lots("TMOS")
-            if buy_max_tmos > 0:
-                try:
-                    res = self._place_order("TMOS", "ORDER_DIRECTION_BUY", buy_max_tmos)
-                    parts.append(res)
-                    acted = True
-                except Exception as exc:
-                    logger.warning("[Биржа] Ошибка при парковке кэша в TMOS: %s", exc)
-
         if not acted or not parts:
             leftover = any(
-                (target_alloc.get(ticker, 0.0) > 0)
+                (not self._is_buy_blocked(ticker))
+                and (target_alloc.get(ticker, 0.0) > 0)
                 and (target_values.get(ticker, 0.0) - current_values.get(ticker, 0.0) >= min_trade_rub)
                 for ticker in target_alloc
             )
@@ -1550,9 +1600,12 @@ class StocksSkill(BaseSkill):
         candidates = self._desk_candidates()
         if not candidates:
             return "Нечего решать: лента пуста."
-        alloc = self._desk_choose(candidates, equity=self._equity_estimate(candidates))
+        alloc = self._filter_buy_alloc(
+            self._desk_choose(candidates, equity=self._equity_estimate(candidates)),
+            candidates,
+        )
         if not alloc:
-            alloc = {"TMOS": 100.0}
+            return "Нечего покупать: брокер не даёт эти бумаги через API."
 
         alloc_parts = []
         for ticker, pct in alloc.items():
