@@ -4,7 +4,7 @@
 # Без ключа — котировки с публичного ISS Мосбиржи; quiet_book.json (не в git)
 # держит локальную книжку. Прибыль идёт в фонд модернизации Джарвиса:
 # подписки на продвинутые модели ИИ и новое железо.
-# Сделки: сам решает что купить и что продать.
+# Сделки: целевой портфель из активных сигналов Т-Инвест, заявки — код.
 
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ _FIND = "InstrumentsService/FindInstrument"
 _BY_ID = "InstrumentsService/GetInstrumentBy"
 _ORDERS = "OrdersService/PostOrder"
 _MAX_LOTS = "OrdersService/GetMaxLots"
+_SIGNALS = "SignalService/GetSignals"
 _MOEX = "https://iss.moex.com/iss/engines/stock/markets/shares"
 _MOEX_BOARDS = ("TQBR", "TQTF", "TQPI")
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -50,6 +51,9 @@ _MIN_TRADE_SMALL_PCT = 0.05
 _MIN_TRADE_HARD_RUB = 1000.0
 _MIN_TRADE_HARD_CAP_PCT = 0.25
 _SMALL_EQUITY_RUB = 5000.0
+_SIGNAL_PAGE = 50
+_SIGNAL_MAX_NAMES = 4
+_SIGNAL_MAX_SMALL = 2
 # TMOS через T-Invest API не покупается (30052 Instrument forbidden).
 # Котировки с ISS остаются, заявки на покупку — нет.
 _API_BUY_BLOCKED = frozenset({"TMOS"})
@@ -265,6 +269,12 @@ def _min_trade_rub(equity: float) -> float:
     if _MIN_TRADE_HARD_RUB > equity * _MIN_TRADE_HARD_CAP_PCT:
         return max(pct, equity * _MIN_TRADE_SMALL_PCT)
     return max(pct, _MIN_TRADE_HARD_RUB)
+
+
+def _signal_is_buy(direction: Any) -> bool:
+    if direction in (1, "1"):
+        return True
+    return "BUY" in str(direction or "").upper()
 
 
 def _quotation_to_float(value: Any) -> float:
@@ -721,7 +731,19 @@ class StocksSkill(BaseSkill):
                 return str(acc["id"])
         return None
 
-    def _instrument(self, figi: str | None, ticker: str | None) -> dict[str, Any]:
+    def _instrument(self, figi: str | None, ticker: str | None, uid: str | None = None) -> dict[str, Any]:
+        if uid:
+            try:
+                data = self._post(
+                    self._url(_BY_ID),
+                    {"idType": "INSTRUMENT_ID_TYPE_UID", "id": uid},
+                    cache_key=f"uid:{uid}",
+                )
+                inst = data.get("instrument") or {}
+                if inst:
+                    return inst
+            except Exception as exc:
+                logger.debug("[Биржа] инструмент uid %s: %s", uid, exc)
         if figi:
             data = self._post(
                 self._url(_BY_ID),
@@ -1317,113 +1339,96 @@ class StocksSkill(BaseSkill):
                 return {ticker: 100.0}
         return {}
 
+    def _fetch_buy_signals(self) -> list[dict[str, Any]]:
+        if not self._token:
+            return []
+        try:
+            data = self._post(
+                self._url(_SIGNALS),
+                {
+                    "direction": "SIGNAL_DIRECTION_BUY",
+                    "active": "SIGNAL_STATE_ACTIVE",
+                    "paging": {"limit": _SIGNAL_PAGE, "pageNumber": 0},
+                },
+                cache_key="signals:buy:active",
+            )
+        except Exception as exc:
+            logger.warning("[Биржа] сигналы Т-Инвест: %s", exc)
+            return []
+        out: list[dict[str, Any]] = []
+        for raw in data.get("signals") or []:
+            if isinstance(raw, dict) and _signal_is_buy(raw.get("direction")):
+                out.append(raw)
+        return out
+
+    def _signal_lot_cost(
+        self,
+        ticker: str,
+        inst: dict[str, Any],
+        lot_cost: dict[str, float],
+    ) -> float:
+        if ticker in lot_cost:
+            return lot_cost[ticker]
+        lot = max(int(inst.get("lot") or 1), 1)
+        try:
+            _name, price, _pct = self._quote(ticker)
+        except Exception:
+            return 0.0
+        cost = float(price or 0) * lot
+        if cost > 0:
+            lot_cost[ticker] = cost
+        return cost
+
     def _desk_choose(self, candidates: list[dict[str, Any]], equity: float | None = None) -> dict[str, float]:
-        allowed = {
-            str(row["ticker"]).upper()
-            for row in candidates
-            if row.get("ticker") and not self._is_buy_blocked(str(row["ticker"]))
-        }
-        if not allowed:
-            return self._fallback_allocation(candidates)
         if equity is None:
             equity = self._equity_estimate(candidates)
         small = equity < _SMALL_EQUITY_RUB
-
-        lines = []
-        for row in candidates:
-            mark = f"держим {row.get('held'):g}" if row.get("held") else "нет в портфеле"
-            lines.append(
-                f"{row['ticker']} {row['name']}: {row['price']:.4g} руб, "
-                f"{row['pct']:+.2f}% за день, лот {row['lot']}, {mark}"
-            )
-        facts = "\n".join(lines)
         lot_cost = {
             str(row["ticker"]).upper(): float(row.get("price") or 0) * max(int(row.get("lot") or 1), 1)
             for row in candidates
             if row.get("ticker")
         }
-        if not (os.getenv("GROQ_API_KEY") or "").strip():
+        scores: dict[str, float] = {}
+        for sig in self._fetch_buy_signals():
+            uid = str(sig.get("instrumentUid") or sig.get("instrument_uid") or "").strip()
+            if not uid:
+                continue
+            inst = self._instrument(None, None, uid=uid)
+            ticker = str(inst.get("ticker") or "").upper()
+            if not ticker or self._is_buy_blocked(ticker):
+                continue
+            class_code = str(inst.get("classCode") or "")
+            if class_code and class_code not in _MOEX_BOARDS:
+                continue
+            kind = str(inst.get("instrumentKind") or inst.get("instrumentType") or "").upper()
+            if kind and "SHARE" not in kind and "ETF" not in kind:
+                continue
+            if inst.get("apiTradeAvailableFlag") is False:
+                continue
+            cost = self._signal_lot_cost(ticker, inst, lot_cost)
+            if cost <= 0 or cost > equity * 0.98:
+                continue
+            try:
+                weight = float(sig.get("probability") if sig.get("probability") is not None else 50.0)
+            except (TypeError, ValueError):
+                weight = 50.0
+            if weight <= 0:
+                weight = 50.0
+            scores[ticker] = scores.get(ticker, 0.0) + weight
+            self._remember_name(ticker, self._spoken_name(ticker, inst))
+
+        if not scores:
+            logger.info("[Биржа] активных сигналов Т-Инвест нет, фоллбек")
             return self._fallback_allocation(candidates)
 
-        try:
-            from skills.groq_client import complete_one, is_retriable_model_error, model_chain
-
-            try:
-                from skill_settings import get_effective_groq_model
-
-                env_model = get_effective_groq_model()
-            except Exception:
-                env_model = (os.getenv("GROQ_MODEL") or "").strip()
-            if small:
-                system_prompt = (
-                    "Ты Джарвис. Управляешь фондом модернизации (покупка продвинутых моделей ИИ и нового железа для себя). "
-                    f"Капитал маленький: {equity:.0f} руб. Не размазывай. "
-                    "Выбери 1 или 2 бумаги из списка, которые реально купить хотя бы одним лотом. "
-                    "Предпочитай то, что уже в портфеле. "
-                    "Ответ только валидный JSON без markdown: {\"portfolio\": {\"TICKER1\": 70, \"TICKER2\": 30}}. "
-                    "Сумма долей должна быть строго равна 100. Тикеры строго из списка. Хозяин не выбирает. Не объясняй."
-                )
-            else:
-                system_prompt = (
-                    "Ты Джарвис. Управляешь фондом модернизации (покупка продвинутых моделей ИИ и нового железа для себя). "
-                    "Твоя задача — сформировать сбалансированный и диверсифицированный портфель. "
-                    "Выбери от 2 до 4 наиболее перспективных и ликвидных бумаг из представленной ленты TQBR и распредели между ними доли капитала в процентах. "
-                    "Ответ только валидный JSON без markdown: {\"portfolio\": {\"TICKER1\": 40, \"TICKER2\": 30, \"TICKER3\": 30}}. "
-                    "Сумма долей должна быть строго равна 100. Тикеры строго из списка. Хозяин не выбирает. Не объясняй."
-                )
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "Лента:\n" + facts + "\nВыбери portfolio."},
-            ]
-
-            for model_name in model_chain(env_model):
-                try:
-                    raw = complete_one(messages, model_name, 0.5, 120).strip()
-                    payload = _extract_json_object(raw)
-                    if not payload:
-                        continue
-                    raw_alloc = payload.get("portfolio")
-                    if not isinstance(raw_alloc, dict):
-                        raw_alloc = payload
-
-                    valid_alloc: dict[str, float] = {}
-                    for ticker_k, share_v in raw_alloc.items():
-                        ticker_clean = str(ticker_k).upper().strip()
-                        if ticker_clean not in allowed:
-                            continue
-                        if small:
-                            cost = lot_cost.get(ticker_clean)
-                            if cost is None and ticker_clean != "TMOS":
-                                continue
-                            if cost is not None and cost > equity * 0.98:
-                                continue
-                        try:
-                            val = float(share_v)
-                            if val > 0:
-                                valid_alloc[ticker_clean] = val
-                        except (TypeError, ValueError):
-                            continue
-
-                    if len(valid_alloc) >= 1:
-                        total_sum = sum(valid_alloc.values())
-                        if total_sum > 0:
-                            normalized = {
-                                k: round((v / total_sum) * 100.0, 1)
-                                for k, v in valid_alloc.items()
-                            }
-                            logger.info("[Биржа] Groq выбрал портфель: %s (модель %s)", normalized, model_name)
-                            return normalized
-
-                except Exception as model_exc:
-                    if is_retriable_model_error(model_exc):
-                        logger.warning("[Биржа] модель %s не подошла (%s), пробую альтернативу...", model_name, model_exc)
-                        continue
-                    logger.warning("[Биржа] Ошибка запроса к %s: %s", model_name, model_exc)
-
-        except Exception as exc:
-            logger.warning("[Биржа] выбор Groq: %s", exc)
-
-        return self._fallback_allocation(candidates)
+        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        picked = ranked[: _SIGNAL_MAX_SMALL if small else _SIGNAL_MAX_NAMES]
+        total = sum(value for _ticker, value in picked)
+        if total <= 0:
+            return self._fallback_allocation(candidates)
+        alloc = {ticker: round((value / total) * 100.0, 1) for ticker, value in picked}
+        logger.info("[Биржа] сигналы Т-Инвест: %s", alloc)
+        return alloc
 
     def _rebalance_portfolio(self, target_alloc: dict[str, float], silent: bool = False) -> str:
         parts: list[str] = []

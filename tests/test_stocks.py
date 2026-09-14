@@ -9,6 +9,7 @@ from skills.stocks import (
     _has_max_hint,
     _is_drop_sell,
     _min_trade_rub,
+    _signal_is_buy,
     _trade_kind,
 )
 
@@ -181,6 +182,101 @@ class TestStocks(unittest.TestCase):
         place.assert_called_with("VTBR", "ORDER_DIRECTION_BUY", 3)
         self.assertNotIn("TMOS", str(place.call_args_list))
         self.assertIn("Купил", result)
+
+    def test_signal_is_buy(self):
+        self.assertTrue(_signal_is_buy("SIGNAL_DIRECTION_BUY"))
+        self.assertTrue(_signal_is_buy(1))
+        self.assertFalse(_signal_is_buy("SIGNAL_DIRECTION_SELL"))
+
+    def test_desk_choose_weights_tinkoff_signals(self):
+        candidates = [
+            {"ticker": "SBER", "name": "Сбер", "price": 300.0, "pct": 0.0, "lot": 1},
+            {"ticker": "CHMF", "name": "Северсталь", "price": 900.0, "pct": 0.0, "lot": 1},
+        ]
+        signals = [
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-chmf", "probability": 60},
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-chmf", "probability": 40},
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-sber", "probability": 20},
+        ]
+        insts = {
+            "u-chmf": {
+                "ticker": "CHMF",
+                "classCode": "TQBR",
+                "instrumentKind": "INSTRUMENT_TYPE_SHARE",
+                "apiTradeAvailableFlag": True,
+                "lot": 1,
+            },
+            "u-sber": {
+                "ticker": "SBER",
+                "classCode": "TQBR",
+                "instrumentKind": "INSTRUMENT_TYPE_SHARE",
+                "apiTradeAvailableFlag": True,
+                "lot": 1,
+            },
+        }
+
+        def fake_instrument(_figi, _ticker, uid=None):
+            return insts.get(uid or "", {})
+
+        with (
+            patch.object(self.skill, "_fetch_buy_signals", return_value=signals),
+            patch.object(self.skill, "_instrument", side_effect=fake_instrument),
+        ):
+            alloc = self.skill._desk_choose(candidates, equity=20_000)
+        self.assertGreater(alloc["CHMF"], alloc["SBER"])
+        self.assertAlmostEqual(sum(alloc.values()), 100.0, delta=0.2)
+
+    def test_desk_choose_skips_blocked_and_expensive(self):
+        candidates = [{"ticker": "VTBR", "name": "ВТБ", "price": 50.0, "pct": 0.0, "lot": 1}]
+        signals = [
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-tmos", "probability": 90},
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-lkoh", "probability": 80},
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-vtbr", "probability": 10},
+        ]
+        insts = {
+            "u-tmos": {
+                "ticker": "TMOS",
+                "classCode": "TQTF",
+                "instrumentKind": "INSTRUMENT_TYPE_ETF",
+                "apiTradeAvailableFlag": True,
+                "lot": 1,
+            },
+            "u-lkoh": {
+                "ticker": "LKOH",
+                "classCode": "TQBR",
+                "instrumentKind": "INSTRUMENT_TYPE_SHARE",
+                "apiTradeAvailableFlag": True,
+                "lot": 1,
+            },
+            "u-vtbr": {
+                "ticker": "VTBR",
+                "classCode": "TQBR",
+                "instrumentKind": "INSTRUMENT_TYPE_SHARE",
+                "apiTradeAvailableFlag": True,
+                "lot": 1,
+            },
+        }
+
+        def fake_instrument(_figi, _ticker, uid=None):
+            return insts.get(uid or "", {})
+
+        def fake_quote(ticker):
+            prices = {"LKOH": 7000.0, "TMOS": 6.5, "VTBR": 50.0}
+            return ticker, prices[ticker], 0.0
+
+        with (
+            patch.object(self.skill, "_fetch_buy_signals", return_value=signals),
+            patch.object(self.skill, "_instrument", side_effect=fake_instrument),
+            patch.object(self.skill, "_quote", side_effect=fake_quote),
+        ):
+            alloc = self.skill._desk_choose(candidates, equity=5000)
+        self.assertEqual(alloc, {"VTBR": 100.0})
+
+    def test_desk_choose_falls_back_without_signals(self):
+        candidates = [{"ticker": "VTBR", "name": "ВТБ", "price": 50.0, "pct": 0.0, "lot": 1}]
+        with patch.object(self.skill, "_fetch_buy_signals", return_value=[]):
+            alloc = self.skill._desk_choose(candidates, equity=5000)
+        self.assertEqual(alloc, {"VTBR": 100.0})
 
 
 if __name__ == "__main__":
