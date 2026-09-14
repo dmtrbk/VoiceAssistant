@@ -45,6 +45,11 @@ _MOMENTUM_SPREAD = 0.8
 
 _CACHE_SEC = 25.0
 _MOOD_TTL_SEC = 3600.0
+_MIN_TRADE_PCT = 0.02
+_MIN_TRADE_SMALL_PCT = 0.05
+_MIN_TRADE_HARD_RUB = 1000.0
+_MIN_TRADE_HARD_CAP_PCT = 0.25
+_SMALL_EQUITY_RUB = 5000.0
 
 _MARKET_WORDS = (
     "акци", "акцы", "портфел", "котиров", "бирж", "брокер",
@@ -244,6 +249,19 @@ def _extract_lots(text: str) -> int | None:
 
 def _lots_phrase(n: int) -> str:
     return f"{n} {_plural(n, 'лот', 'лота', 'лотов')}"
+
+
+def _min_trade_rub(equity: float) -> float:
+    """Порог ребаланса: 2% капитала. Пол: 1000 ₽, только если счёт его выдерживает.
+
+    Иначе мелкий фонд после продажи остаётся в кэше: рука 40% меньше тысячи,
+    покупки отсекаются, а чужие бумаги режутся без порога.
+    """
+    equity = max(float(equity or 0.0), 1.0)
+    pct = equity * _MIN_TRADE_PCT
+    if _MIN_TRADE_HARD_RUB > equity * _MIN_TRADE_HARD_CAP_PCT:
+        return max(pct, equity * _MIN_TRADE_SMALL_PCT)
+    return max(pct, _MIN_TRADE_HARD_RUB)
 
 
 def _quotation_to_float(value: Any) -> float:
@@ -705,6 +723,22 @@ class StocksSkill(BaseSkill):
                 return inst
         if ticker:
             ticker_up = ticker.upper()
+            for class_code in _MOEX_BOARDS:
+                try:
+                    data = self._post(
+                        self._url(_BY_ID),
+                        {
+                            "idType": "INSTRUMENT_ID_TYPE_TICKER",
+                            "classCode": class_code,
+                            "id": ticker_up,
+                        },
+                        cache_key=f"by:{class_code}:{ticker_up}",
+                    )
+                except Exception:
+                    continue
+                inst = data.get("instrument") or {}
+                if inst.get("figi") or inst.get("uid") or inst.get("instrumentId"):
+                    return inst
             kinds = (
                 None,
                 "INSTRUMENT_TYPE_SHARE",
@@ -1171,6 +1205,33 @@ class StocksSkill(BaseSkill):
             except Exception:
                 pass
 
+        # Мелкий фонд: не гоняемся за всей лентой TQBR — только то, что уже есть,
+        # TMOS и watchlist, если лот реально влезает в капитал.
+        if equity < _SMALL_EQUITY_RUB:
+            for ticker in self._watchlist:
+                ticker = ticker.upper()
+                if ticker in seen:
+                    continue
+                row = from_tape.get(ticker)
+                if row is None:
+                    try:
+                        name, price, pct = self._moex_quote(ticker)
+                        row = {
+                            "ticker": ticker,
+                            "name": name,
+                            "price": price,
+                            "pct": pct,
+                            "lot": 1,
+                            "value": 0,
+                        }
+                    except Exception:
+                        continue
+                lot = max(int(row.get("lot") or 1), 1)
+                if row["price"] * lot > equity * 0.98:
+                    continue
+                add(dict(row, held=held.get(ticker, 0)))
+            return chosen
+
         affordable = [
             row
             for row in tape
@@ -1204,13 +1265,19 @@ class StocksSkill(BaseSkill):
         return 1
 
     def _fallback_allocation(self, candidates: list[dict[str, Any]]) -> dict[str, float]:
-        """Фолбек распределения, если ИИ недоступен: 100% в индексный фонд TMOS."""
-        return {"TMOS": 100.0}
+        """Фолбек: TMOS, если он в списке, иначе первая доступная бумага."""
+        tickers = [str(row.get("ticker") or "").upper() for row in candidates if row.get("ticker")]
+        if "TMOS" in tickers or not tickers:
+            return {"TMOS": 100.0}
+        return {tickers[0]: 100.0}
 
-    def _desk_choose(self, candidates: list[dict[str, Any]]) -> dict[str, float]:
+    def _desk_choose(self, candidates: list[dict[str, Any]], equity: float | None = None) -> dict[str, float]:
         allowed = {row["ticker"].upper() for row in candidates} | {"TMOS"}
         if not allowed:
             return self._fallback_allocation(candidates)
+        if equity is None:
+            equity = self._equity_estimate(candidates)
+        small = equity < _SMALL_EQUITY_RUB
 
         lines = []
         for row in candidates:
@@ -1220,6 +1287,11 @@ class StocksSkill(BaseSkill):
                 f"{row['pct']:+.2f}% за день, лот {row['lot']}, {mark}"
             )
         facts = "\n".join(lines)
+        lot_cost = {
+            str(row["ticker"]).upper(): float(row.get("price") or 0) * max(int(row.get("lot") or 1), 1)
+            for row in candidates
+            if row.get("ticker")
+        }
         if not (os.getenv("GROQ_API_KEY") or "").strip():
             return self._fallback_allocation(candidates)
 
@@ -1232,14 +1304,24 @@ class StocksSkill(BaseSkill):
                 env_model = get_effective_groq_model()
             except Exception:
                 env_model = (os.getenv("GROQ_MODEL") or "").strip()
-            system_prompt = (
-                "Ты Джарвис. Управляешь фондом модернизации (покупка продвинутых моделей ИИ и нового железа для себя). "
-                "Твоя задача — сформировать сбалансированный и диверсифицированный портфель. "
-                "Выбери от 2 до 4 наиболее перспективных и ликвидных бумаг из представленной ленты TQBR и распредели между ними доли капитала в процентах. "
-                "Если на рынке нет четких трендов или сильных идей, можешь включить в портфель индексный фонд TMOS. "
-                "Ответ только валидный JSON без markdown: {\"portfolio\": {\"TICKER1\": 40, \"TICKER2\": 30, \"TICKER3\": 30}}. "
-                "Сумма долей должна быть строго равна 100. Тикеры строго из списка (или TMOS). Хозяин не выбирает. Не объясняй."
-            )
+            if small:
+                system_prompt = (
+                    "Ты Джарвис. Управляешь фондом модернизации (покупка продвинутых моделей ИИ и нового железа для себя). "
+                    f"Капитал маленький: {equity:.0f} руб. Не размазывай. "
+                    "Выбери 1 или 2 бумаги из списка, которые реально купить хотя бы одним лотом. "
+                    "Предпочитай то, что уже в портфеле, или индексный фонд TMOS. "
+                    "Ответ только валидный JSON без markdown: {\"portfolio\": {\"TICKER1\": 70, \"TICKER2\": 30}}. "
+                    "Сумма долей должна быть строго равна 100. Тикеры строго из списка (или TMOS). Хозяин не выбирает. Не объясняй."
+                )
+            else:
+                system_prompt = (
+                    "Ты Джарвис. Управляешь фондом модернизации (покупка продвинутых моделей ИИ и нового железа для себя). "
+                    "Твоя задача — сформировать сбалансированный и диверсифицированный портфель. "
+                    "Выбери от 2 до 4 наиболее перспективных и ликвидных бумаг из представленной ленты TQBR и распредели между ними доли капитала в процентах. "
+                    "Если на рынке нет четких трендов или сильных идей, можешь включить в портфель индексный фонд TMOS. "
+                    "Ответ только валидный JSON без markdown: {\"portfolio\": {\"TICKER1\": 40, \"TICKER2\": 30, \"TICKER3\": 30}}. "
+                    "Сумма долей должна быть строго равна 100. Тикеры строго из списка (или TMOS). Хозяин не выбирает. Не объясняй."
+                )
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": "Лента:\n" + facts + "\nВыбери portfolio."},
@@ -1258,13 +1340,20 @@ class StocksSkill(BaseSkill):
                     valid_alloc: dict[str, float] = {}
                     for ticker_k, share_v in raw_alloc.items():
                         ticker_clean = str(ticker_k).upper().strip()
-                        if ticker_clean in allowed:
-                            try:
-                                val = float(share_v)
-                                if val > 0:
-                                    valid_alloc[ticker_clean] = val
-                            except (TypeError, ValueError):
+                        if ticker_clean not in allowed:
+                            continue
+                        if small:
+                            cost = lot_cost.get(ticker_clean)
+                            if cost is None and ticker_clean != "TMOS":
                                 continue
+                            if cost is not None and cost > equity * 0.98:
+                                continue
+                        try:
+                            val = float(share_v)
+                            if val > 0:
+                                valid_alloc[ticker_clean] = val
+                        except (TypeError, ValueError):
+                            continue
 
                     if len(valid_alloc) >= 1:
                         total_sum = sum(valid_alloc.values())
@@ -1298,11 +1387,10 @@ class StocksSkill(BaseSkill):
         # Общая стоимость портфеля (Equity = Cash + Стоимость всех позиций)
         total_pos_value = sum(p["price"] * p["qty"] for p in positions.values())
         equity = max(cash + total_pos_value, 1.0)
-        # Динамический порог чувствительности (2% от портфеля, но не менее 1000 ₽)
-        min_trade_rub = max(equity * 0.02, 1000.0)
+        min_trade_rub = _min_trade_rub(equity)
 
         # Собираем актуальные цены и размер лотов для всех задействованных бумаг
-        relevant_tickers = set(positions.keys()) | set(target_alloc.keys()) | {"TMOS"}
+        relevant_tickers = set(positions.keys()) | set(target_alloc.keys())
         prices: dict[str, float] = {}
         lotsizes: dict[str, int] = {}
 
@@ -1331,8 +1419,9 @@ class StocksSkill(BaseSkill):
         sell_candidates: list[tuple[str, float]] = []
         for ticker in relevant_tickers:
             diff = current_values[ticker] - target_values[ticker]
-            # Полная ликвидация исключенных активов идет без порога; частичное сокращение — при diff >= min_trade_rub
-            if diff > 0 and (diff >= min_trade_rub or target_alloc.get(ticker, 0.0) <= 0):
+            # Полная ликвидация исключенных — тоже с порогом, чтобы мелкий фонд
+            # не продавал всё в кэш, который потом не набирает лоты цели.
+            if diff > 0 and diff >= min_trade_rub:
                 sell_candidates.append((ticker, diff))
 
         sell_candidates.sort(key=lambda item: item[1], reverse=True)
@@ -1364,7 +1453,7 @@ class StocksSkill(BaseSkill):
 
         # После продаж пересчитываем позиции и кэш — иначе покупки идут по старым долям.
         if acted:
-            time.sleep(0.4)
+            time.sleep(1.0)
             self._bust_broker_cache()
             positions_list, _day, _total = self._safe_positions()
             positions = {item["ticker"]: item for item in positions_list}
@@ -1435,7 +1524,15 @@ class StocksSkill(BaseSkill):
                     logger.warning("[Биржа] Ошибка при парковке кэша в TMOS: %s", exc)
 
         if not acted or not parts:
-            result = "Портфель уже сбалансирован в целевых долях."
+            leftover = any(
+                (target_alloc.get(ticker, 0.0) > 0)
+                and (target_values.get(ticker, 0.0) - current_values.get(ticker, 0.0) >= min_trade_rub)
+                for ticker in target_alloc
+            )
+            if leftover:
+                result = "Цель есть, но свободных лотов пока не набралось."
+            else:
+                result = "Портфель уже сбалансирован в целевых долях."
         else:
             result = "Ребалансировал портфель: " + " ".join(parts)
 
@@ -1453,7 +1550,7 @@ class StocksSkill(BaseSkill):
         candidates = self._desk_candidates()
         if not candidates:
             return "Нечего решать: лента пуста."
-        alloc = self._desk_choose(candidates)
+        alloc = self._desk_choose(candidates, equity=self._equity_estimate(candidates))
         if not alloc:
             alloc = {"TMOS": 100.0}
 
