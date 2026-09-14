@@ -7,6 +7,7 @@ from skills.stocks import (
     _extract_lots,
     _wants_market_report,
     _has_max_hint,
+    _is_api_buy_forbidden_text,
     _is_drop_sell,
     _min_trade_rub,
     _signal_is_buy,
@@ -115,6 +116,11 @@ class TestStocks(unittest.TestCase):
             [{"ticker": "VTBR"}, {"ticker": "TMOS"}],
         )
         self.assertEqual(cleaned, {"VTBR": 100.0})
+        cleaned_sibn = self.skill._filter_buy_alloc(
+            {"SIBN": 20.0, "NVTK": 80.0},
+            [{"ticker": "NVTK"}, {"ticker": "SIBN"}],
+        )
+        self.assertEqual(cleaned_sibn, {"NVTK": 100.0})
 
     def test_small_desk_skips_tape_movers(self):
         self.skill._watchlist = ["SBER", "VTBR"]
@@ -151,6 +157,30 @@ class TestStocks(unittest.TestCase):
                 self.skill._place_order("TMOS", "ORDER_DIRECTION_BUY", 1)
             self.assertIn("api forbidden", str(ctx.exception))
             post.assert_not_called()
+
+    def test_place_order_blocks_sibn_buy(self):
+        with patch.object(self.skill, "_post") as post:
+            with self.assertRaises(RuntimeError) as ctx:
+                self.skill._place_order("SIBN", "ORDER_DIRECTION_BUY", 1)
+            self.assertIn("api forbidden", str(ctx.exception))
+            post.assert_not_called()
+
+    def test_qualification_test_error_is_api_forbidden(self):
+        snippet = (
+            'http 400: {"code":3,"message":"Post order error: '
+            "Dlya torgovli e`tim instrumentom neobxodimo projti sootvetstvuyushhij test v razd"
+        )
+        self.assertTrue(_is_api_buy_forbidden_text(snippet))
+        with (
+            patch.object(self.skill, "_instrument_ids", return_value=("uid", "figi", "Газпром нефть")),
+            patch.object(self.skill, "_pick_account_id", return_value="acc"),
+            patch.object(self.skill, "_post", side_effect=RuntimeError(snippet)),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.skill._place_order("LKOH", "ORDER_DIRECTION_BUY", 1)
+        self.assertIn("api forbidden", str(ctx.exception))
+        self.assertTrue(self.skill._is_buy_blocked("LKOH"))
+        self.assertIn("LKOH", self.skill._manual_holds)
 
     def test_rebalance_small_account_buys_target(self):
         self.skill._token = "test-token"
@@ -277,6 +307,67 @@ class TestStocks(unittest.TestCase):
         with patch.object(self.skill, "_fetch_buy_signals", return_value=[]):
             alloc = self.skill._desk_choose(candidates, equity=5000)
         self.assertEqual(alloc, {"VTBR": 100.0})
+
+    def test_desk_choose_telegrams_blocked_signal(self):
+        candidates = [
+            {"ticker": "NVTK", "name": "Новатэк", "price": 1000.0, "pct": 0.0, "lot": 1},
+            {"ticker": "SIBN", "name": "Газпром нефть", "price": 500.0, "pct": 0.0, "lot": 1},
+        ]
+        signals = [
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-sibn", "probability": 80},
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-nvtk", "probability": 20},
+        ]
+        insts = {
+            "u-sibn": {
+                "ticker": "SIBN",
+                "classCode": "TQBR",
+                "instrumentKind": "INSTRUMENT_TYPE_SHARE",
+                "apiTradeAvailableFlag": True,
+                "lot": 1,
+            },
+            "u-nvtk": {
+                "ticker": "NVTK",
+                "classCode": "TQBR",
+                "instrumentKind": "INSTRUMENT_TYPE_SHARE",
+                "apiTradeAvailableFlag": True,
+                "lot": 1,
+            },
+        }
+
+        def fake_instrument(_figi, _ticker, uid=None):
+            return insts.get(uid or "", {})
+
+        with (
+            patch.object(self.skill, "_fetch_buy_signals", return_value=signals),
+            patch.object(self.skill, "_instrument", side_effect=fake_instrument),
+            patch("skills.stocks.telegram_configured", return_value=True),
+            patch("skills.stocks.send_telegram_notification") as send,
+        ):
+            alloc = self.skill._desk_choose(candidates, equity=20_000)
+            alloc_again = self.skill._desk_choose(candidates, equity=20_000)
+        self.assertEqual(alloc, {"NVTK": 100.0})
+        self.assertEqual(alloc_again, {"NVTK": 100.0})
+        send.assert_called_once()
+        text = send.call_args[0][0]
+        self.assertIn("SIBN", text)
+        self.assertIn("приложении", text)
+        self.assertIn("SIBN", self.skill._manual_holds)
+
+    def test_rebalance_keeps_manual_hold(self):
+        self.skill._token = "test-token"
+        self.skill._manual_holds.add("SIBN")
+        positions = ([{"ticker": "SIBN", "qty": 1.0, "price": 500.0}], 0.0, 0.0)
+        with (
+            patch.object(self.skill, "_safe_positions", return_value=positions),
+            patch.object(self.skill, "_broker_cash", return_value=0.0),
+            patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=(0, 1)),
+            patch.object(self.skill, "_place_order") as place,
+            patch("skills.stocks.time.sleep"),
+        ):
+            self.skill._rebalance_portfolio({"VTBR": 100.0})
+        place.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ import requests
 
 from skills.base import BaseSkill, RequestContext
 from skills.text_utils import norm as _norm, plural as _plural
+from skills.utils import send_telegram_notification, telegram_configured
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +55,21 @@ _SMALL_EQUITY_RUB = 5000.0
 _SIGNAL_PAGE = 50
 _SIGNAL_MAX_NAMES = 4
 _SIGNAL_MAX_SMALL = 2
-# TMOS через T-Invest API не покупается (30052 Instrument forbidden).
-# Котировки с ISS остаются, заявки на покупку — нет.
-_API_BUY_BLOCKED = frozenset({"TMOS"})
+# TMOS: API 30052 Instrument forbidden. SIBN: нужен тест неквала, хозяин берёт в приложении.
+# Котировки с ISS остаются, заявки на покупку через API — нет.
+_API_BUY_BLOCKED = frozenset({"TMOS", "SIBN"})
+_API_BUY_BLOCK_REASON = {
+    "TMOS": "брокер запрещает заявку через API",
+    "SIBN": "нужен тест в кабинете Т-Банка",
+}
+_API_FORBIDDEN_MARKERS = (
+    "30052",
+    "forbidden for trading by api",
+    "sootvetstvuyushhij test",
+    "projti sootvetstvuyushhij",
+    "пройти соответствующий тест",
+    "необходим тест",
+)
 
 _MARKET_WORDS = (
     "акци", "акцы", "портфел", "котиров", "бирж", "брокер",
@@ -158,6 +171,9 @@ _SPOKEN = {
     "MOEX": "Мосбиржа",
     "T": "Т-Технологии",
     "TCSG": "Т-Технологии",
+    "SIBN": "Газпром нефть",
+    "NVTK": "Новатэк",
+    "CNRU": "Китай",
 }
 
 def _http_error(response: requests.Response) -> RuntimeError:
@@ -277,6 +293,23 @@ def _signal_is_buy(direction: Any) -> bool:
     return "BUY" in str(direction or "").upper()
 
 
+def _is_api_buy_forbidden_text(text: str) -> bool:
+    snippet = (text or "").lower()
+    return any(marker in snippet for marker in _API_FORBIDDEN_MARKERS)
+
+
+def _buy_block_reason(ticker: str) -> str:
+    return _API_BUY_BLOCK_REASON.get(ticker.upper(), "через API заявку не принять")
+
+
+def _signal_weight(raw: Any) -> float:
+    try:
+        weight = float(raw if raw is not None else 50.0)
+    except (TypeError, ValueError):
+        weight = 50.0
+    return weight if weight > 0 else 50.0
+
+
 def _quotation_to_float(value: Any) -> float:
     if not isinstance(value, dict):
         return 0.0
@@ -384,6 +417,8 @@ class StocksSkill(BaseSkill):
         self._last_tickers: list[str] = []
         self._alias_extra: dict[str, str] = {}
         self._buy_blocked: set[str] = set()
+        self._manual_holds: set[str] = set()
+        self._manual_tips_sent: set[str] = set()
         self._desk_stop = threading.Event()
         self._desk_enabled = threading.Event()
         self._desk_enabled.set()
@@ -537,7 +572,7 @@ class StocksSkill(BaseSkill):
                 for marker in ("permission", "прав", "readonly", "read only", "недостаточно прав")
             ):
                 raise RuntimeError("trade token")
-            if "30052" in snippet or "forbidden for trading by api" in snippet:
+            if _is_api_buy_forbidden_text(snippet):
                 raise RuntimeError("api forbidden")
             raise _http_error(response)
         data = response.json() if response.content else {}
@@ -1062,8 +1097,13 @@ class StocksSkill(BaseSkill):
         try:
             data = self._post(self._url(_ORDERS), body)
         except RuntimeError as exc:
-            if "api forbidden" in str(exc) and direction == "ORDER_DIRECTION_BUY":
+            if direction == "ORDER_DIRECTION_BUY" and (
+                "api forbidden" in str(exc) or _is_api_buy_forbidden_text(str(exc))
+            ):
                 self._buy_blocked.add(ticker)
+                self._recommend_manual_buys([ticker])
+                if "api forbidden" not in str(exc):
+                    raise RuntimeError("api forbidden") from exc
             raise
         self._bust_broker_cache()
         if not self._order_filled(data):
@@ -1379,6 +1419,37 @@ class StocksSkill(BaseSkill):
             lot_cost[ticker] = cost
         return cost
 
+    def _recommend_manual_buys(self, tickers: list[str]) -> None:
+        """Раз: сигнал есть, через API не купить — написать хозяину в Telegram."""
+        fresh: list[str] = []
+        for ticker in tickers:
+            ticker_u = str(ticker or "").upper().strip()
+            if not ticker_u or ticker_u in self._manual_tips_sent:
+                continue
+            self._manual_tips_sent.add(ticker_u)
+            self._manual_holds.add(ticker_u)
+            fresh.append(ticker_u)
+        if not fresh:
+            return
+        lines = [
+            f"{self._spoken_name(ticker)} ({ticker}) — {_buy_block_reason(ticker)}"
+            for ticker in fresh
+        ]
+        if len(lines) == 1:
+            text = (
+                f"Сигнал Т-Инвест: {lines[0]}. "
+                "Сам не куплю. Если согласен — возьми в приложении."
+            )
+        else:
+            text = (
+                "Сигналы, которые сам не куплю:\n"
+                + "\n".join(f"• {line}" for line in lines)
+                + "\nЕсли согласен — возьми в приложении."
+            )
+        logger.info("[Биржа] рекомендация хозяину: %s", text)
+        if telegram_configured():
+            send_telegram_notification(text)
+
     def _desk_choose(self, candidates: list[dict[str, Any]], equity: float | None = None) -> dict[str, float]:
         if equity is None:
             equity = self._equity_estimate(candidates)
@@ -1389,13 +1460,14 @@ class StocksSkill(BaseSkill):
             if row.get("ticker")
         }
         scores: dict[str, float] = {}
+        blocked_scores: dict[str, float] = {}
         for sig in self._fetch_buy_signals():
             uid = str(sig.get("instrumentUid") or sig.get("instrument_uid") or "").strip()
             if not uid:
                 continue
             inst = self._instrument(None, None, uid=uid)
             ticker = str(inst.get("ticker") or "").upper()
-            if not ticker or self._is_buy_blocked(ticker):
+            if not ticker:
                 continue
             class_code = str(inst.get("classCode") or "")
             if class_code and class_code not in _MOEX_BOARDS:
@@ -1403,26 +1475,33 @@ class StocksSkill(BaseSkill):
             kind = str(inst.get("instrumentKind") or inst.get("instrumentType") or "").upper()
             if kind and "SHARE" not in kind and "ETF" not in kind:
                 continue
-            if inst.get("apiTradeAvailableFlag") is False:
-                continue
             cost = self._signal_lot_cost(ticker, inst, lot_cost)
             if cost <= 0 or cost > equity * 0.98:
                 continue
-            try:
-                weight = float(sig.get("probability") if sig.get("probability") is not None else 50.0)
-            except (TypeError, ValueError):
-                weight = 50.0
-            if weight <= 0:
-                weight = 50.0
-            scores[ticker] = scores.get(ticker, 0.0) + weight
+            weight = _signal_weight(sig.get("probability"))
             self._remember_name(ticker, self._spoken_name(ticker, inst))
+            blocked = self._is_buy_blocked(ticker) or inst.get("apiTradeAvailableFlag") is False
+            if blocked:
+                blocked_scores[ticker] = blocked_scores.get(ticker, 0.0) + weight
+                continue
+            scores[ticker] = scores.get(ticker, 0.0) + weight
+
+        limit = _SIGNAL_MAX_SMALL if small else _SIGNAL_MAX_NAMES
+        ranked_all = sorted(
+            list(scores.items()) + list(blocked_scores.items()),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        tips = [ticker for ticker, _weight in ranked_all[:limit] if ticker in blocked_scores]
+        if tips:
+            self._recommend_manual_buys(tips)
 
         if not scores:
             logger.info("[Биржа] активных сигналов Т-Инвест нет, фоллбек")
             return self._fallback_allocation(candidates)
 
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-        picked = ranked[: _SIGNAL_MAX_SMALL if small else _SIGNAL_MAX_NAMES]
+        picked = ranked[:limit]
         total = sum(value for _ticker, value in picked)
         if total <= 0:
             return self._fallback_allocation(candidates)
@@ -1498,8 +1577,11 @@ class StocksSkill(BaseSkill):
             lot_size = lotsizes.get(ticker, 1)
             lot_cost = price * lot_size
 
-            # Если бумаги нет в целевом портфеле — продаем весь доступный объем
+            # Если бумаги нет в целевом портфеле — продаем весь доступный объем.
+            # Рекомендованные хозяину бумаги не трогаем: он мог купить их сам.
             if target_alloc.get(ticker, 0.0) <= 0:
+                if ticker in self._manual_holds:
+                    continue
                 lots_to_sell = sell_max
             else:
                 lots_to_sell = int(excess_rub / lot_cost) if lot_cost > 0 else 0
