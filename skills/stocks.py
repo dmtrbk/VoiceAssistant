@@ -41,6 +41,8 @@ _MOEX = "https://iss.moex.com/iss/engines/stock/markets/shares"
 _MOEX_BOARDS = ("TQBR", "TQTF", "TQPI")
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _BOOK_PATH = os.path.join(_PROJECT_DIR, "quiet_book.json")
+_HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_holds.json")
+_BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_bought.json")
 _RU_CA = os.path.join(_PROJECT_DIR, "certs", "russian_trusted_root_ca.pem")
 _DESK_PERIOD_SEC = 45 * 60
 _MOMENTUM_SPREAD = 0.8
@@ -107,6 +109,14 @@ _SELL_HINTS = ("продай",)
 _AUTO_HINTS = (
     "поторгуй", "поторгуйся", "сыграй на бирже",
     "поработай счетом", "поработай счётом",
+)
+_ADVICE_HINTS = (
+    "посоветуй",
+    "рекомендаци",
+    "разбери сигнал",
+    "что по сигналам",
+    "пришли совет",
+    "советник",
 )
 _ALLIN_HINTS = ("переложи", "вложи все", "вложи всё", "все в ", "всё в ")
 _MAX_HINTS = ("все", "всё", "весь", "всю", "целиком", "максимум", "полностью")
@@ -181,6 +191,36 @@ def _http_error(response: requests.Response) -> RuntimeError:
     return RuntimeError(f"http {response.status_code}: {snippet[:120]}")
 
 
+def _read_ticker_set(path: str) -> set[str] | None:
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return set()
+    if isinstance(raw, dict):
+        raw = raw.get("tickers") or []
+    if not isinstance(raw, list):
+        return set()
+    return {str(item).upper().strip() for item in raw if str(item).strip()}
+
+
+def _write_ticker_set(path: str, tickers: set[str]) -> None:
+    payload = {"tickers": sorted(tickers)}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Биржа] не записал %s: %s", os.path.basename(path), exc)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
     start = raw.find("{")
     if start < 0:
@@ -212,6 +252,13 @@ def _tinkoff_verify() -> str | bool:
     if os.path.isfile(_RU_CA):
         return _RU_CA
     return True
+
+
+def _wants_advice(text: str) -> bool:
+    """Разбор сигналов для хозяина, без заявок."""
+    if any(hint in text for hint in _ADVICE_HINTS):
+        return True
+    return "совет" in text and any(word in text for word in _MARKET_WORDS)
 
 
 def _wants_market_report(text: str) -> bool:
@@ -417,8 +464,11 @@ class StocksSkill(BaseSkill):
         self._last_tickers: list[str] = []
         self._alias_extra: dict[str, str] = {}
         self._buy_blocked: set[str] = set()
-        self._manual_holds: set[str] = set()
-        self._manual_tips_sent: set[str] = set()
+        self._manual_holds: set[str] = _read_ticker_set(_HOLD_PATH) or set()
+        self._manual_tips_sent: set[str] = set(self._manual_holds)
+        loaded_bought = _read_ticker_set(_BOUGHT_PATH)
+        self._desk_bought: set[str] = loaded_bought or set()
+        self._desk_bought_ready = loaded_bought is not None
         self._desk_stop = threading.Event()
         self._desk_enabled = threading.Event()
         self._desk_enabled.set()
@@ -452,6 +502,8 @@ class StocksSkill(BaseSkill):
         text = _norm(context.raw_text)
         if not text:
             return False
+        if _wants_advice(text):
+            return True
         kind = _trade_kind(text)
         if kind == "auto":
             return True
@@ -492,7 +544,9 @@ class StocksSkill(BaseSkill):
         kind = _trade_kind(text)
 
         try:
-            if kind:
+            if _wants_advice(text):
+                reply = self._run_advisor(context.channel)
+            elif kind:
                 reply = self._execute_trade(text, kind, ticker)
             elif ticker:
                 reply = self._speak_one(ticker)
@@ -532,6 +586,23 @@ class StocksSkill(BaseSkill):
             return
 
         context.speak(reply)
+
+    def _run_advisor(self, channel: str = "voice") -> str:
+        """Сигналы → Groq → Telegram. Заявки не ставит."""
+        import signal_advisor
+
+        send_tg = telegram_configured() and channel != "telegram"
+        try:
+            text = signal_advisor.run(skill=self, to_telegram=send_tg, to_stdout=False)
+        except RuntimeError as exc:
+            if "нет токена" in str(exc):
+                return "Без ключа брокера сигналы не достать."
+            raise
+        if channel == "telegram":
+            return text
+        if telegram_configured():
+            return "Отправил рекомендацию в телеграм."
+        return text
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -1109,6 +1180,8 @@ class StocksSkill(BaseSkill):
         if not self._order_filled(data):
             message = str(data.get("message") or data.get("rejectReason") or "заявка не прошла")
             raise RuntimeError(message)
+        if direction == "ORDER_DIRECTION_BUY":
+            self._mark_desk_bought(ticker)
         verb = "купил" if direction == "ORDER_DIRECTION_BUY" else "продал"
         return f"{verb.capitalize()} {_lots_phrase(lots)}: {spoken}."
 
@@ -1347,6 +1420,28 @@ class StocksSkill(BaseSkill):
         ticker = ticker.upper()
         return ticker in _API_BUY_BLOCKED or ticker in self._buy_blocked
 
+    def _save_holds(self) -> None:
+        _write_ticker_set(_HOLD_PATH, self._manual_holds)
+
+    def _mark_desk_bought(self, ticker: str) -> None:
+        ticker = ticker.upper()
+        self._desk_bought.add(ticker)
+        self._desk_bought_ready = True
+        _write_ticker_set(_BOUGHT_PATH, self._desk_bought)
+
+    def _ensure_desk_bought(self, held: set[str]) -> None:
+        if self._desk_bought_ready:
+            return
+        self._desk_bought = {ticker.upper() for ticker in held if ticker.upper() not in self._manual_holds}
+        self._desk_bought_ready = True
+        _write_ticker_set(_BOUGHT_PATH, self._desk_bought)
+
+    def _is_owner_position(self, ticker: str) -> bool:
+        ticker = ticker.upper()
+        if ticker in self._manual_holds:
+            return True
+        return self._desk_bought_ready and ticker not in self._desk_bought
+
     def _filter_buy_alloc(
         self,
         alloc: dict[str, float],
@@ -1431,6 +1526,7 @@ class StocksSkill(BaseSkill):
             fresh.append(ticker_u)
         if not fresh:
             return
+        self._save_holds()
         lines = [
             f"{self._spoken_name(ticker)} ({ticker}) — {_buy_block_reason(ticker)}"
             for ticker in fresh
@@ -1524,6 +1620,7 @@ class StocksSkill(BaseSkill):
 
         positions_list, _day, _total = self._safe_positions()
         positions = {p["ticker"]: p for p in positions_list}
+        self._ensure_desk_bought(set(positions.keys()))
         cash = self._broker_cash()
 
         # Общая стоимость портфеля (Equity = Cash + Стоимость всех позиций)
@@ -1578,9 +1675,9 @@ class StocksSkill(BaseSkill):
             lot_cost = price * lot_size
 
             # Если бумаги нет в целевом портфеле — продаем весь доступный объем.
-            # Рекомендованные хозяину бумаги не трогаем: он мог купить их сам.
+            # Бумаги хозяина (купил сам) не трогаем.
             if target_alloc.get(ticker, 0.0) <= 0:
-                if ticker in self._manual_holds:
+                if self._is_owner_position(ticker):
                     continue
                 lots_to_sell = sell_max
             else:

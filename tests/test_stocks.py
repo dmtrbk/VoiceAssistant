@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -6,6 +8,7 @@ from skills.stocks import (
     StocksSkill,
     _extract_lots,
     _wants_market_report,
+    _wants_advice,
     _has_max_hint,
     _is_api_buy_forbidden_text,
     _is_drop_sell,
@@ -17,6 +20,16 @@ from skills.stocks import (
 
 class TestStocks(unittest.TestCase):
     def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        hold_path = os.path.join(self.tmp.name, "holds.json")
+        bought_path = os.path.join(self.tmp.name, "bought.json")
+        patcher_hold = patch("skills.stocks._HOLD_PATH", hold_path)
+        patcher_bought = patch("skills.stocks._BOUGHT_PATH", bought_path)
+        patcher_hold.start()
+        patcher_bought.start()
+        self.addCleanup(patcher_hold.stop)
+        self.addCleanup(patcher_bought.stop)
         self.skill = StocksSkill()
 
     def test_extract_lots(self):
@@ -51,6 +64,14 @@ class TestStocks(unittest.TestCase):
         self.assertFalse(_wants_market_report("что такое акции"))
         self.assertFalse(_wants_market_report("что значит биржа"))
         self.assertFalse(_wants_market_report("кто такой брокер"))
+
+    def test_wants_advice(self):
+        self.assertTrue(_wants_advice("посоветуй"))
+        self.assertTrue(_wants_advice("пришли рекомендацию"))
+        self.assertTrue(_wants_advice("разбери сигналы"))
+        self.assertTrue(_wants_advice("совет по портфелю"))
+        self.assertFalse(_wants_advice("как там портфель"))
+        self.assertIsNone(_trade_kind("посоветуй"))
 
     def test_order_filled(self):
         # NEW is not filled yet
@@ -93,6 +114,34 @@ class TestStocks(unittest.TestCase):
         ):
             self.skill.execute(RequestContext(raw_text="сколько стоит сбер", speak=spoken.append))
         self.assertEqual(spoken, ["Сбер 300 рублей."])
+
+    def test_advice_sends_telegram_without_orders(self):
+        spoken: list[str] = []
+        with (
+            patch("skills.stocks._voice_trade_enabled", return_value=False),
+            patch("skills.stocks.telegram_configured", return_value=True),
+            patch("signal_advisor.run", return_value="Бери Новатэк.") as advise,
+            patch.object(self.skill, "_place_order") as place,
+        ):
+            self.skill.execute(RequestContext(raw_text="посоветуй", speak=spoken.append))
+        place.assert_not_called()
+        advise.assert_called_once()
+        kwargs = advise.call_args.kwargs
+        self.assertTrue(kwargs.get("to_telegram"))
+        self.assertFalse(kwargs.get("to_stdout"))
+        self.assertEqual(spoken, ["Отправил рекомендацию в телеграм."])
+
+    def test_advice_from_telegram_speaks_text(self):
+        spoken: list[str] = []
+        with (
+            patch("skills.stocks.telegram_configured", return_value=True),
+            patch("signal_advisor.run", return_value="Бери Новатэк.") as advise,
+        ):
+            self.skill.execute(
+                RequestContext(raw_text="посоветуй", speak=spoken.append, channel="telegram")
+            )
+        self.assertFalse(advise.call_args.kwargs.get("to_telegram"))
+        self.assertEqual(spoken, ["Бери Новатэк."])
 
     def test_min_trade_rub_scales_with_small_equity(self):
         small = _min_trade_rub(300)
@@ -368,6 +417,41 @@ class TestStocks(unittest.TestCase):
         ):
             self.skill._rebalance_portfolio({"VTBR": 100.0})
         place.assert_not_called()
+
+    def test_rebalance_keeps_owner_bought_norilsk(self):
+        self.skill._token = "test-token"
+        self.skill._desk_bought = {"VTBR"}
+        self.skill._desk_bought_ready = True
+        positions = ([{"ticker": "GMKN", "qty": 1.0, "price": 3000.0}], 0.0, 0.0)
+        with (
+            patch.object(self.skill, "_safe_positions", return_value=positions),
+            patch.object(self.skill, "_broker_cash", return_value=0.0),
+            patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=(0, 1)),
+            patch.object(self.skill, "_place_order") as place,
+            patch("skills.stocks.time.sleep"),
+        ):
+            self.skill._rebalance_portfolio({"VTBR": 100.0})
+        place.assert_not_called()
+
+    def test_rebalance_sells_desk_bought_outsider(self):
+        self.skill._token = "test-token"
+        self.skill._desk_bought = {"EUTR"}
+        self.skill._desk_bought_ready = True
+        positions = ([{"ticker": "EUTR", "qty": 10.0, "price": 100.0}], 0.0, 0.0)
+        with (
+            patch.object(self.skill, "_safe_positions", return_value=positions),
+            patch.object(self.skill, "_broker_cash", return_value=0.0),
+            patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=(0, 10)),
+            patch.object(self.skill, "_place_order", return_value="Продал 10 лотов: EUTR.") as place,
+            patch("skills.stocks.time.sleep"),
+        ):
+            result = self.skill._rebalance_portfolio({"VTBR": 100.0})
+        place.assert_called_with("EUTR", "ORDER_DIRECTION_SELL", 10)
+        self.assertIn("Продал", result)
 
 
 if __name__ == "__main__":
