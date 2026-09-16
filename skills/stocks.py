@@ -561,6 +561,9 @@ class StocksSkill(BaseSkill):
         text = _norm(context.raw_text)
         if not text:
             return False
+        from skills.crypto import is_crypto_command
+        if is_crypto_command(text):
+            return False
         if _wants_journal(text) or _wants_advice(text):
             return True
         kind = _trade_kind(text)

@@ -6,7 +6,9 @@ from unittest.mock import patch
 
 from skills.base import RequestContext
 from skills.image_gen import (
+    ImageBackendNotConfigured,
     ImageGenSkill,
+    ImageQuotaError,
     _default_save_dir,
     expand_prompt,
     extract_prompt,
@@ -77,22 +79,61 @@ class TestImageGenSkill(unittest.TestCase):
         self.skill.execute(RequestContext(raw_text="нарисуй", speak=spoken.append))
         self.assertEqual(spoken, ["Что нарисовать?"])
 
-    def test_generate_image_reads_jpeg(self):
+    def test_generate_image_decodes_cloudflare_jpeg(self):
         jpeg = b"\xff\xd8\xff" + b"fakejpeg"
+        captured = {}
 
-        class _Img:
+        class _Resp:
             status_code = 200
-            content = jpeg
-            headers = {"content-type": "image/jpeg"}
+            content = b"{}"
+            headers = {"content-type": "application/json"}
+
+            def json(self):
+                return {"success": True, "result": {"image": base64.b64encode(jpeg).decode()}}
+
+        def fake_post(url, **kwargs):
+            captured["url"] = url
+            captured["json"] = kwargs["json"]
+            captured["headers"] = kwargs["headers"]
+            return _Resp()
 
         raw, model = generate_image(
             "кот",
-            get=lambda *_args, **_kwargs: _Img(),
-            models=("flux",),
-            seed=1,
+            post=fake_post,
+            steps=4,
+            account_id="acc123",
+            api_token="tok456",
         )
         self.assertEqual(raw, jpeg)
-        self.assertEqual(model, "flux")
+        self.assertEqual(model, "flux-1-schnell")
+        self.assertIn("acc123", captured["url"])
+        self.assertIn("flux-1-schnell", captured["url"])
+        self.assertEqual(captured["json"]["prompt"], "кот")
+        self.assertEqual(captured["json"]["steps"], 4)
+        self.assertNotIn("seed", captured["json"])
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer tok456")
+
+    def test_generate_image_requires_keys(self):
+        with patch.dict(os.environ, {"CLOUDFLARE_ACCOUNT_ID": "", "CLOUDFLARE_API_TOKEN": ""}):
+            with self.assertRaises(ImageBackendNotConfigured):
+                generate_image("кот", post=lambda *_a, **_k: None)
+
+    def test_generate_image_quota(self):
+        class _Resp:
+            status_code = 429
+            content = b"{}"
+            headers = {"content-type": "application/json"}
+
+            def json(self):
+                return {"success": False, "errors": [{"message": "quota"}]}
+
+        with self.assertRaises(ImageQuotaError):
+            generate_image(
+                "кот",
+                post=lambda *_a, **_k: _Resp(),
+                account_id="acc",
+                api_token="tok",
+            )
 
     def test_fallback_prompt_keeps_subject(self):
         text = fallback_prompt("рыжего кота")
@@ -110,8 +151,9 @@ class TestImageGenSkill(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             skill = ImageGenSkill(save_dir=tmp)
             with (
+                patch("skills.image_gen.cloudflare_configured", return_value=True),
                 patch("skills.image_gen.expand_prompt", side_effect=lambda prompt: prompt),
-                patch("skills.image_gen.generate_image", return_value=(TINY_PNG, "sana")),
+                patch("skills.image_gen.generate_image", return_value=(TINY_PNG, "flux-1-schnell")),
                 patch("skills.image_gen.telegram_configured", return_value=True),
                 patch("skills.image_gen.send_telegram_notification", return_value=True) as send,
             ):
@@ -129,6 +171,12 @@ class TestImageGenSkill(unittest.TestCase):
             self.assertFalse(kwargs["background"])
         self.assertIn("Рисую.", spoken)
         self.assertIn("Отправил.", spoken)
+
+    def test_execute_without_cloudflare_keys(self):
+        spoken = []
+        with patch.dict(os.environ, {"CLOUDFLARE_ACCOUNT_ID": "", "CLOUDFLARE_API_TOKEN": ""}):
+            self.skill.execute(RequestContext(raw_text="нарисуй рыжего кота", speak=spoken.append))
+        self.assertEqual(spoken, ["Нет ключа Cloudflare."])
 
     def test_default_save_dir_is_pictures_jarvis(self):
         path = _default_save_dir()

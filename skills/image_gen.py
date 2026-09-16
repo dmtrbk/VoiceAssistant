@@ -1,15 +1,14 @@
 # skills/image_gen.py
-# «нарисуй …» → Pollinations → Telegram sendPhoto. Ключ не нужен.
+# «нарисуй …» → Cloudflare Workers AI (FLUX.1 schnell) → файл и Telegram.
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
-import random
 import re
 import time
 from typing import Callable
-from urllib.parse import quote
 
 import requests
 
@@ -18,8 +17,10 @@ from skills.utils import send_telegram_notification, telegram_configured
 
 logger = logging.getLogger(__name__)
 
-POLLINATIONS_URL = "https://image.pollinations.ai/prompt/{prompt}"
-POLLINATIONS_MODELS = ("sana", "flux")
+CF_RUN_URL = "https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{model}"
+CF_FLUX_SCHNELL = "@cf/black-forest-labs/flux-1-schnell"
+PROMPT_MAX = 2048
+DEFAULT_STEPS = 4
 KEEP_FILES = 20
 TELEGRAM_CAPTION_LIMIT = 900
 _EXPAND_SYSTEM = (
@@ -210,45 +211,158 @@ def expand_prompt(user_text: str, complete: Callable[..., str] | None = None) ->
     return cleaned
 
 
+class ImageBackendNotConfigured(RuntimeError):
+    """Нет или отклонён CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN."""
+
+
+class ImageQuotaError(RuntimeError):
+    """Дневной лимит нейронов Cloudflare."""
+
+
+def cloudflare_credentials() -> tuple[str, str]:
+    account = (
+        os.getenv("CLOUDFLARE_ACCOUNT_ID") or os.getenv("CF_ACCOUNT_ID") or ""
+    ).strip().strip("\"'")
+    token = (
+        os.getenv("CLOUDFLARE_API_TOKEN")
+        or os.getenv("CLOUDFLARE_AI_TOKEN")
+        or os.getenv("CF_API_TOKEN")
+        or ""
+    ).strip().strip("\"'")
+    return account, token
+
+
+def cloudflare_configured() -> bool:
+    account, token = cloudflare_credentials()
+    return bool(account and token)
+
+
+def _image_model() -> str:
+    raw = (os.getenv("CLOUDFLARE_IMAGE_MODEL") or CF_FLUX_SCHNELL).strip()
+    return raw or CF_FLUX_SCHNELL
+
+
+def _image_steps(override: int | None = None) -> int:
+    if override is not None:
+        value = override
+    else:
+        raw = (os.getenv("CLOUDFLARE_IMAGE_STEPS") or "").strip()
+        try:
+            value = int(raw) if raw else DEFAULT_STEPS
+        except ValueError:
+            value = DEFAULT_STEPS
+    return max(1, min(8, int(value)))
+
+
+def _model_short_name(model: str) -> str:
+    return model.rsplit("/", 1)[-1].lstrip("@") or model
+
+
+def _decode_image_b64(raw: str) -> bytes:
+    text = (raw or "").strip()
+    if text.lower().startswith("data:") and "," in text:
+        text = text.split(",", 1)[1]
+    text = re.sub(r"\s+", "", text)
+    pad = (-len(text)) % 4
+    if pad:
+        text += "=" * pad
+    return base64.b64decode(text)
+
+
+def _cf_error_text(payload: object, status: int) -> str:
+    if isinstance(payload, dict):
+        errors = payload.get("errors") or []
+        messages = []
+        for item in errors:
+            if isinstance(item, dict) and item.get("message"):
+                messages.append(str(item["message"]))
+            elif item:
+                messages.append(str(item))
+        if messages:
+            return "; ".join(messages)
+        for key in ("error", "message"):
+            if payload.get(key):
+                return str(payload[key])
+    return f"HTTP {status}"
+
+
 def generate_image(
     prompt: str,
     *,
-    get: Callable[..., requests.Response] | None = None,
-    models: tuple[str, ...] | None = None,
-    seed: int | None = None,
+    post: Callable[..., requests.Response] | None = None,
+    steps: int | None = None,
+    account_id: str | None = None,
+    api_token: str | None = None,
+    model: str | None = None,
 ) -> tuple[bytes, str]:
-    getter = get or requests.get
-    seed = random.randint(1, 2_000_000_000) if seed is None else seed
-    last_err = "Сервис картинок не ответил"
-    for model_name in models or POLLINATIONS_MODELS:
-        url = POLLINATIONS_URL.format(prompt=quote(prompt, safe=""))
-        try:
-            response = getter(
-                url,
-                params={
-                    "model": model_name,
-                    "width": 1024,
-                    "height": 1024,
-                    "nologo": "true",
-                    "private": "true",
-                    "enhance": "true",
-                    "seed": seed,
-                },
-                headers={"User-Agent": "VoiceAssistant/1.0"},
-                timeout=90,
-            )
-        except requests.RequestException as exc:
-            last_err = str(exc)
-            logger.warning("[Картинки] %s не ответил: %s", model_name, exc)
-            continue
-        content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip()
-        data = response.content or b""
-        if response.status_code >= 400 or not _looks_like_image(data, content_type):
-            last_err = f"HTTP {response.status_code}"
-            logger.warning("[Картинки] %s: %s", model_name, last_err)
-            continue
-        return data, model_name
-    raise RuntimeError(last_err)
+    """Workers AI REST: POST /ai/run/@cf/black-forest-labs/flux-1-schnell → JPEG."""
+    creds_account, creds_token = cloudflare_credentials()
+    account = (account_id if account_id is not None else creds_account).strip()
+    token = (api_token if api_token is not None else creds_token).strip()
+    if not account or not token:
+        raise ImageBackendNotConfigured(
+            "Нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_API_TOKEN"
+        )
+
+    model_name = (model or _image_model()).strip() or CF_FLUX_SCHNELL
+    poster = post or requests.post
+    url = CF_RUN_URL.format(account=account, model=model_name)
+    # Живой REST-схемы flux-1-schnell: только prompt и steps. Поле seed отклоняется.
+    try:
+        response = poster(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "prompt": (prompt or "")[:PROMPT_MAX],
+                "steps": _image_steps(steps),
+            },
+            timeout=90,
+        )
+    except requests.RequestException as exc:
+        logger.warning("[Картинки] Cloudflare не ответил: %s", exc)
+        raise RuntimeError(str(exc)) from exc
+
+    if response.status_code == 429:
+        raise ImageQuotaError("Лимит нейронов Cloudflare")
+
+    content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip()
+    data = response.content or b""
+    if _looks_like_image(data, content_type):
+        return data, _model_short_name(model_name)
+
+    try:
+        payload: object = response.json()
+    except ValueError:
+        payload = None
+
+    if response.status_code >= 400:
+        err = _cf_error_text(payload, response.status_code)
+        logger.warning("[Картинки] Cloudflare: %s", err)
+        if response.status_code in (401, 403):
+            raise ImageBackendNotConfigured(err)
+        raise RuntimeError(err)
+
+    image_b64 = ""
+    if isinstance(payload, dict):
+        if payload.get("success") is False:
+            raise RuntimeError(_cf_error_text(payload, response.status_code))
+        result = payload.get("result")
+        if isinstance(result, dict):
+            image_b64 = str(result.get("image") or result.get("image_b64") or "")
+        elif isinstance(result, str):
+            image_b64 = result
+        if not image_b64:
+            image_b64 = str(payload.get("image") or "")
+
+    if not image_b64:
+        raise RuntimeError("Cloudflare не вернул картинку")
+    decoded = _decode_image_b64(image_b64)
+    if not _looks_like_image(decoded):
+        raise RuntimeError("Cloudflare вернул не картинку")
+    return decoded, _model_short_name(model_name)
 
 
 def _default_save_dir() -> str:
@@ -291,11 +405,25 @@ class ImageGenSkill(BaseSkill):
             return
 
         self._last_prompt = prompt
+        if not cloudflare_configured():
+            logger.error(
+                "[Картинки] Нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_API_TOKEN в .env."
+            )
+            speak("Нет ключа Cloudflare.")
+            return
+
         speak("Рисую.")
         drawn = expand_prompt(prompt)
         logger.info("[Картинки] Промпт: %s", drawn)
         try:
             image_bytes, model_name = generate_image(drawn)
+        except ImageBackendNotConfigured:
+            speak("Нет ключа Cloudflare.")
+            return
+        except ImageQuotaError:
+            logger.warning("[Картинки] Дневной лимит нейронов Cloudflare.")
+            speak("Лимит на сегодня.")
+            return
         except Exception as exc:
             logger.error("[Картинки] Ошибка генерации: %s", exc)
             speak("Не рисует.")

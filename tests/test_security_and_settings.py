@@ -84,6 +84,9 @@ class TestSecurityAndSettings(unittest.TestCase):
             self.assertFalse(_env_voice_trade_default())
         with patch.dict(os.environ, {"TINKOFF_VOICE_TRADE": "true"}, clear=False):
             self.assertTrue(_env_voice_trade_default())
+        from skill_settings import _env_crypto_voice_trade_default
+        with patch.dict(os.environ, {"CRYPTO_VOICE_TRADE": "", "BYBIT_VOICE_TRADE": ""}, clear=False):
+            self.assertFalse(_env_crypto_voice_trade_default())
 
     def test_groq_model_chain_puts_strong_first(self):
         chain = model_chain(STRONG_MODEL)

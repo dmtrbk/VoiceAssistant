@@ -188,8 +188,9 @@ def run_interactive_loop(mute: bool = False, verbose: bool = False):
     """Запускает интерактивную командную строку."""
     start_telegram_listener_thread()
     try:
-        from skills import stocks_skill, timer_skill
+        from skills import stocks_skill, crypto_skill, timer_skill
         stocks_skill.start_background()
+        crypto_skill.start_background()
         timer_skill.start_background(lambda text: play_audio_feedback(text, mute=mute))
     except Exception as exc:
         logging.warning("[CLI] Фоновые сервисы: %s", exc)

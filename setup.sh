@@ -73,6 +73,13 @@ TINKOFF_SANDBOX=false
 TINKOFF_VOICE_TRADE=
 TINKOFF_AUTO_TRADE=
 TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
+# Крипта — спот Bybit. Курс без ключа; сделки — CRYPTO_VOICE_TRADE.
+BYBIT_API_KEY=
+BYBIT_API_SECRET=
+BYBIT_TESTNET=false
+CRYPTO_VOICE_TRADE=
+CRYPTO_AUTO_TRADE=
+CRYPTO_WATCHLIST=BTC,ETH,SOL
 
 # Telegram-бот: управление и снимки охраны
 TELEGRAM_BOT_TOKEN=
@@ -95,6 +102,10 @@ DEFAULT_CITY=Москва
 # Лампа Xiaomi / Yeelight (опционально)
 XIAOMI_BULB_IP=
 XIAOMI_BULB_TOKEN=
+
+# Cloudflare Workers AI — картинки (FLUX.1 schnell)
+CLOUDFLARE_ACCOUNT_ID=
+CLOUDFLARE_API_TOKEN=
 
 # Home Assistant (умный дом, тумблер в настройках)
 HA_URL=http://127.0.0.1:8123

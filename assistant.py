@@ -717,8 +717,9 @@ def _start_runtime_services() -> None:
     """Telegram, автоторговля и восстановление таймеров — только после старта, не с импорта."""
     start_telegram_listener_thread()
     try:
-        from skills import stocks_skill, timer_skill
+        from skills import stocks_skill, crypto_skill, timer_skill
         stocks_skill.start_background()
+        crypto_skill.start_background()
         timer_skill.start_background(speak)
     except Exception as exc:
         logging.warning("[Система] Фоновые сервисы: %s", exc)

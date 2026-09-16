@@ -26,11 +26,15 @@ from skill_settings import (
     get_stt_mode,
     grouped_skills,
     is_auto_trade_enabled,
+    is_crypto_auto_trade_enabled,
+    is_crypto_voice_trade_enabled,
     is_cursor_running,
     is_voice_trade_enabled,
     ordered_skill_ids,
     persona_preset_choices,
     set_auto_trade,
+    set_crypto_auto_trade,
+    set_crypto_voice_trade,
     set_flag,
     set_groq_model,
     set_persona_preset,
@@ -104,6 +108,9 @@ class SettingsWindow(QWidget):
         self._voice_trade_box: QCheckBox | None = None
         self._auto_trade_box: QCheckBox | None = None
         self._stocks_menu: QFrame | None = None
+        self._crypto_voice_box: QCheckBox | None = None
+        self._crypto_auto_box: QCheckBox | None = None
+        self._crypto_menu: QFrame | None = None
         self._list: QVBoxLayout | None = None
 
         self._stack = QStackedWidget()
@@ -419,12 +426,15 @@ class SettingsWindow(QWidget):
             and list(self._boxes.keys()) == expected
             and self._voice_trade_box is not None
             and self._auto_trade_box is not None
+            and self._crypto_voice_box is not None
+            and self._crypto_auto_box is not None
         ):
             for skill_id, box in self._boxes.items():
                 box.blockSignals(True)
                 box.setChecked(flags.get(skill_id, True))
                 box.blockSignals(False)
             self._sync_stocks_menu(flags.get("stocks", True))
+            self._sync_crypto_menu(flags.get("crypto", True))
             return
 
         while self._list.count():
@@ -436,6 +446,9 @@ class SettingsWindow(QWidget):
         self._voice_trade_box = None
         self._auto_trade_box = None
         self._stocks_menu = None
+        self._crypto_voice_box = None
+        self._crypto_auto_box = None
+        self._crypto_menu = None
 
         for group_name, rows in grouped_skills():
             self._list.addWidget(self._section_label(group_name))
@@ -453,10 +466,14 @@ class SettingsWindow(QWidget):
                 box.toggled.connect(lambda checked, sid=skill_id: set_flag(sid, checked))
                 if skill_id == "stocks":
                     box.toggled.connect(self._on_stocks_toggled)
+                if skill_id == "crypto":
+                    box.toggled.connect(self._on_crypto_toggled)
                 self._boxes[skill_id] = box
                 self._add_text_toggle(col, title, hint, box)
                 if skill_id == "stocks":
                     self._add_stocks_menu(col, flags.get("stocks", True))
+                if skill_id == "crypto":
+                    self._add_crypto_menu(col, flags.get("crypto", True))
 
             self._list.addWidget(card)
 
@@ -515,3 +532,57 @@ class SettingsWindow(QWidget):
 
     def _on_stocks_toggled(self, checked: bool) -> None:
         self._sync_stocks_menu(checked)
+
+    def _add_crypto_menu(self, parent: QVBoxLayout, crypto_on: bool) -> None:
+        menu = QFrame()
+        menu.setObjectName("submenu")
+        menu.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        col = QVBoxLayout(menu)
+        col.setContentsMargins(10, 10, 10, 10)
+        col.setSpacing(8)
+
+        voice_box = self._make_toggle(is_crypto_voice_trade_enabled())
+        voice_box.toggled.connect(set_crypto_voice_trade)
+        self._add_text_toggle(
+            col,
+            "Сделки голосом",
+            "«Купи биткоин» ставит спот на Bybit. Выключено — только курс.",
+            voice_box,
+        )
+
+        self._add_divider(col)
+
+        auto_box = self._make_toggle(is_crypto_auto_trade_enabled())
+        auto_box.toggled.connect(set_crypto_auto_trade)
+        self._add_text_toggle(
+            col,
+            "Автоторговля",
+            "Фон раз в ~45 мин. ИИ выбирает монеты, стол ребалансирует спот. Без плеча.",
+            auto_box,
+        )
+
+        self._crypto_voice_box = voice_box
+        self._crypto_auto_box = auto_box
+        self._crypto_menu = menu
+        parent.addWidget(menu)
+        self._sync_crypto_menu(crypto_on)
+
+    def _sync_crypto_menu(self, crypto_on: bool) -> None:
+        if (
+            self._crypto_voice_box is None
+            or self._crypto_auto_box is None
+            or self._crypto_menu is None
+        ):
+            return
+        self._crypto_voice_box.blockSignals(True)
+        self._crypto_voice_box.setChecked(is_crypto_voice_trade_enabled())
+        self._crypto_voice_box.setEnabled(crypto_on)
+        self._crypto_voice_box.blockSignals(False)
+        self._crypto_auto_box.blockSignals(True)
+        self._crypto_auto_box.setChecked(is_crypto_auto_trade_enabled())
+        self._crypto_auto_box.setEnabled(crypto_on)
+        self._crypto_auto_box.blockSignals(False)
+        self._crypto_menu.setVisible(crypto_on)
+
+    def _on_crypto_toggled(self, checked: bool) -> None:
+        self._sync_crypto_menu(checked)

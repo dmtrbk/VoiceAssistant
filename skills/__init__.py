@@ -22,6 +22,7 @@ from .music_search import MusicSearchSkill
 from .assistant_settings import AssistantSettingsSkill
 from .home_assistant import HomeAssistantSkill
 from .stocks import StocksSkill
+from .crypto import CryptoSkill
 from .image_gen import ImageGenSkill
 from .wikipedia import WikipediaSkill
 from .site_apps import SiteAppsSkill
@@ -48,6 +49,7 @@ games_skill = GamesAndRandomSkill()
 assistant_settings_skill = AssistantSettingsSkill()
 home_assistant_skill = HomeAssistantSkill()
 stocks_skill = StocksSkill()
+crypto_skill = CryptoSkill()
 image_gen_skill = ImageGenSkill()
 wikipedia_skill = WikipediaSkill()
 site_apps_skill = SiteAppsSkill()
@@ -64,6 +66,7 @@ ALL_SKILLS = [
     weather_skill,
     datetime_skill,
     wikipedia_skill,  # «что такое» до поиска, системы и Groq
+    crypto_skill,  # до акций, чтобы «биткоин» не уходил в Мосбиржу
     stocks_skill,  # до поиска и Groq, чтобы котировки не выдумывались
     games_skill,
     jokes_skill,

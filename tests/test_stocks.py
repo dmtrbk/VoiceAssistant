@@ -488,6 +488,13 @@ class TestStocks(unittest.TestCase):
         send.assert_called_once()
         self.assertEqual(spoken, ["Отправил дневник в телеграм."])
 
+    def test_can_handle_yields_crypto(self):
+        self.assertTrue(self.skill.can_handle(RequestContext(raw_text="поторгуй")))
+        self.assertTrue(self.skill.can_handle(RequestContext(raw_text="купи сбер")))
+        self.assertFalse(self.skill.can_handle(RequestContext(raw_text="поторгуй криптой")))
+        self.assertFalse(self.skill.can_handle(RequestContext(raw_text="купи биткоин")))
+        self.assertFalse(self.skill.can_handle(RequestContext(raw_text="сколько стоит эфир")))
+
 
 if __name__ == "__main__":
     unittest.main()

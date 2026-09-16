@@ -21,6 +21,7 @@ OPTIONAL_SKILLS = (
     ("audacious", "Музыка и радио", "Audacious, папки, плейлисты и поиск песен"),
     ("weather", "Погода", "Прогноз Open-Meteo"),
     ("stocks", "Биржа и портфель", "Котировки Мосбиржи и сводка счёта Т-Инвест. Сделки — тумблеры ниже"),
+    ("crypto", "Крипта", "Спот Bybit: курс, портфель, сделки. ИИ выбирает монеты"),
     ("timer", "Таймеры", "Отсчёт и оповещение"),
     ("calculator", "Калькулятор", "Счёт без облака"),
     ("games", "Игры и рандомайзер", "Больше-Меньше, кубики d6/d20, случайные числа"),
@@ -28,7 +29,7 @@ OPTIONAL_SKILLS = (
     ("web_search", "Поиск в интернете", "Яндекс / Google в браузере"),
     ("wikipedia", "Википедия", "Краткая справка: что такое, кто такой"),
     ("maps", "Карты", "Поиск мест и маршруты"),
-    ("image_gen", "Картинки", "Рисует бесплатно и шлёт в Telegram"),
+    ("image_gen", "Картинки", "Flux schnell (Cloudflare), файл и Telegram"),
     ("security", "Охрана", "Гасит экран, камера и снимки в Telegram"),
     ("telegram", "Telegram", "Открыть или закрыть приложение"),
     ("pentagon", "Пентагон", "Шутка с зелёным кодом в терминале"),
@@ -41,7 +42,7 @@ SKILL_GROUPS = (
     ("Дом", ("home_assistant", "xiaomi_bulb", "security")),
     ("Медиа", ("audacious", "movie", "image_gen", "site_apps")),
     ("Сеть", ("web_search", "wikipedia", "maps", "telegram")),
-    ("Сервисы", ("weather", "stocks", "timer", "calculator")),
+    ("Сервисы", ("weather", "stocks", "crypto", "timer", "calculator")),
     ("Разное", ("games", "jokes", "pentagon")),
 )
 
@@ -72,6 +73,8 @@ def ordered_skill_ids() -> list[str]:
 
 AUTO_TRADE_KEY = "stocks_auto_trade"
 VOICE_TRADE_KEY = "stocks_voice_trade"
+CRYPTO_AUTO_TRADE_KEY = "crypto_auto_trade"
+CRYPTO_VOICE_TRADE_KEY = "crypto_voice_trade"
 GROQ_MODEL_KEY = "groq_model"
 STT_MODE_KEY = "stt_mode"
 PERSONA_PRESET_KEY = "persona_preset"
@@ -84,6 +87,8 @@ _lock = threading.Lock()
 _enabled: dict[str, bool] = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
 _auto_trade = False
 _voice_trade = False
+_crypto_auto_trade = False
+_crypto_voice_trade = False
 _groq_model = ""
 _stt_mode = ""
 _persona_preset = ""
@@ -104,6 +109,22 @@ def _env_auto_trade_default() -> bool:
 def _env_voice_trade_default() -> bool:
     """Сделки из Джарвиса выключены, пока явно не включат."""
     raw = (os.getenv("TINKOFF_VOICE_TRADE") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _env_crypto_auto_trade_default() -> bool:
+    raw = (os.getenv("CRYPTO_AUTO_TRADE") or os.getenv("BYBIT_AUTO_TRADE") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return (os.getenv("BYBIT_TESTNET") or os.getenv("CRYPTO_TESTNET") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _env_crypto_voice_trade_default() -> bool:
+    raw = (os.getenv("CRYPTO_VOICE_TRADE") or os.getenv("BYBIT_VOICE_TRADE") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
@@ -186,6 +207,7 @@ def _skill_map() -> dict[str, Any]:
         xiaomi_bulb_skill,
         home_assistant_skill,
         stocks_skill,
+        crypto_skill,
         image_gen_skill,
         wikipedia_skill,
         site_apps_skill,
@@ -207,6 +229,7 @@ def _skill_map() -> dict[str, Any]:
         "pentagon": pentagon_skill,
         "home_assistant": home_assistant_skill,
         "stocks": stocks_skill,
+        "crypto": crypto_skill,
         "image_gen": image_gen_skill,
         "wikipedia": wikipedia_skill,
         "site_apps": site_apps_skill,
@@ -227,6 +250,8 @@ def _persist() -> None:
         snapshot = dict(_enabled)
         snapshot[AUTO_TRADE_KEY] = bool(_auto_trade)
         snapshot[VOICE_TRADE_KEY] = bool(_voice_trade)
+        snapshot[CRYPTO_AUTO_TRADE_KEY] = bool(_crypto_auto_trade)
+        snapshot[CRYPTO_VOICE_TRADE_KEY] = bool(_crypto_voice_trade)
         snapshot[GROQ_MODEL_KEY] = _groq_model
         snapshot[STT_MODE_KEY] = _stt_mode
         snapshot[PERSONA_PRESET_KEY] = _persona_preset
@@ -238,10 +263,12 @@ def _persist() -> None:
 
 def reload_from_disk() -> dict[str, bool]:
     """Читает skills_enabled.json. Нет ключа — навык включён."""
-    global _enabled, _auto_trade, _voice_trade, _groq_model, _stt_mode, _persona_preset
+    global _enabled, _auto_trade, _voice_trade, _crypto_auto_trade, _crypto_voice_trade, _groq_model, _stt_mode, _persona_preset
     flags = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
     auto_trade = _env_auto_trade_default()
     voice_trade = _env_voice_trade_default()
+    crypto_auto_trade = _env_crypto_auto_trade_default()
+    crypto_voice_trade = _env_crypto_voice_trade_default()
     groq_model = _env_groq_model_default()
     stt_mode = _env_stt_mode_default()
     persona_preset = _env_persona_preset_default()
@@ -258,6 +285,10 @@ def reload_from_disk() -> dict[str, bool]:
                     auto_trade = bool(raw[AUTO_TRADE_KEY])
                 if VOICE_TRADE_KEY in raw:
                     voice_trade = bool(raw[VOICE_TRADE_KEY])
+                if CRYPTO_AUTO_TRADE_KEY in raw:
+                    crypto_auto_trade = bool(raw[CRYPTO_AUTO_TRADE_KEY])
+                if CRYPTO_VOICE_TRADE_KEY in raw:
+                    crypto_voice_trade = bool(raw[CRYPTO_VOICE_TRADE_KEY])
                 if GROQ_MODEL_KEY in raw:
                     from skills.groq_client import normalize_groq_model
 
@@ -274,6 +305,8 @@ def reload_from_disk() -> dict[str, bool]:
         _enabled = flags
         _auto_trade = auto_trade
         _voice_trade = voice_trade
+        _crypto_auto_trade = crypto_auto_trade
+        _crypto_voice_trade = crypto_voice_trade
         _groq_model = groq_model
         _stt_mode = stt_mode
         _persona_preset = persona_preset
@@ -345,6 +378,46 @@ def set_voice_trade(enabled: bool) -> None:
     os.environ["TINKOFF_VOICE_TRADE"] = "true" if enabled else "false"
     _persist()
     logging.info("[Настройки] Сделки голосом: %s", "вкл" if enabled else "выкл")
+
+
+def is_crypto_auto_trade_enabled() -> bool:
+    """Фоновые заявки навыка «Крипта» (Bybit)."""
+    _ensure_loaded()
+    with _lock:
+        return bool(_crypto_auto_trade)
+
+
+def set_crypto_auto_trade(enabled: bool) -> None:
+    global _crypto_auto_trade
+    _ensure_loaded()
+    with _lock:
+        _crypto_auto_trade = bool(enabled)
+    os.environ["CRYPTO_AUTO_TRADE"] = "true" if enabled else "false"
+    _persist()
+    if enabled:
+        try:
+            from skills import crypto_skill
+            crypto_skill.start_background()
+        except Exception as exc:
+            logging.debug("[Настройки] Старт автоторговли крипты: %s", exc)
+    logging.info("[Настройки] Автоторговля крипты: %s", "вкл" if enabled else "выкл")
+
+
+def is_crypto_voice_trade_enabled() -> bool:
+    """Заявки крипты по команде («купи биткоин»)."""
+    _ensure_loaded()
+    with _lock:
+        return bool(_crypto_voice_trade)
+
+
+def set_crypto_voice_trade(enabled: bool) -> None:
+    global _crypto_voice_trade
+    _ensure_loaded()
+    with _lock:
+        _crypto_voice_trade = bool(enabled)
+    os.environ["CRYPTO_VOICE_TRADE"] = "true" if enabled else "false"
+    _persist()
+    logging.info("[Настройки] Сделки крипты голосом: %s", "вкл" if enabled else "выкл")
 
 
 def get_groq_model() -> str:
