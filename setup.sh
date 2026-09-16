@@ -32,6 +32,7 @@ CORE_PKGS=(
     htop neofetch
     libxcb tk xorg-xhost
     xdotool wmctrl
+    conky librsvg
 )
 sudo pacman -Syu --needed --noconfirm "${CORE_PKGS[@]}"
 
@@ -47,6 +48,7 @@ mkdir -p "$PROJECT_DIR/model"
 mkdir -p "$PROJECT_DIR/piper/models"
 mkdir -p "$PROJECT_DIR/.tts_cache"
 mkdir -p "$HOME/.scripts"
+mkdir -p "$HOME/.conky/icons"
 mkdir -p "$SERVICE_DIR"
 
 # 3. Настройка файла конфигурации (.env)
@@ -73,7 +75,9 @@ TINKOFF_SANDBOX=false
 TINKOFF_VOICE_TRADE=
 TINKOFF_AUTO_TRADE=
 TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
-# Крипта — спот Bybit. Курс без ключа; сделки — CRYPTO_VOICE_TRADE.
+# Крипта — спот Bybit. Курс без ключа.
+# Сделки: тумблер «Сделки голосом» или CRYPTO_VOICE_TRADE=true.
+# Авто: CRYPTO_AUTO_TRADE=true (пустое — только тестнет BYBIT_TESTNET=true).
 BYBIT_API_KEY=
 BYBIT_API_SECRET=
 BYBIT_TESTNET=false
@@ -213,6 +217,41 @@ EOF
     chmod +x "$HOME/.scripts/player_off.sh"
 fi
 
+# Виджет Conky: дневной +/- биржи и крипты (правый нижний угол)
+echo "[+] Ставлю виджет Conky рынков..."
+CONKY_SRC="$PROJECT_DIR/conky"
+CONKY_DST="$HOME/.conky"
+if [ -f "$CONKY_SRC/conky_markets.conf" ]; then
+    mkdir -p "$CONKY_DST/icons"
+    sed -e "s|__HOME__|$HOME|g" -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
+        "$CONKY_SRC/conky_markets.conf" > "$CONKY_DST/conky_markets.conf"
+    for icon in tinkoff bitcoin; do
+        if [ -f "$CONKY_SRC/icons/${icon}.svg" ]; then
+            cp "$CONKY_SRC/icons/${icon}.svg" "$CONKY_DST/icons/${icon}.svg"
+            if command -v rsvg-convert >/dev/null 2>&1; then
+                rsvg-convert -w 64 -h 64 "$CONKY_DST/icons/${icon}.svg" \
+                    -o "$CONKY_DST/icons/${icon}.png"
+            fi
+        fi
+    done
+    STARTUP="$CONKY_DST/conky-startup.sh"
+    if [ -f "$STARTUP" ] && ! grep -q 'conky_markets.conf' "$STARTUP"; then
+        tmp_startup="$(mktemp)"
+        awk '
+            { print }
+            /muzinfo_n.conf/ {
+                print "   cd \"$HOME/.conky\""
+                print "   conky -c \"$HOME/.conky/conky_markets.conf\" &"
+            }
+        ' "$STARTUP" > "$tmp_startup"
+        mv "$tmp_startup" "$STARTUP"
+        chmod +x "$STARTUP"
+    fi
+    echo "    Конфиг: $CONKY_DST/conky_markets.conf"
+else
+    echo "[!] Шаблона conky/conky_markets.conf нет, виджет пропущен."
+fi
+
 # 7. Настройка службы systemd и расширения GNOME
 echo "[+] Шаг 7/7: Настройка службы systemd..."
 echo "    Юнит: $SERVICE_FILE"
@@ -272,6 +311,11 @@ echo "   TINKOFF_TOKEN — биржа (сводка; сделки — тумбл
 echo "   TINKOFF_VOICE_TRADE=true — заявки голосом (по умолчанию выкл)"
 echo "   TINKOFF_AUTO_TRADE=true — фоновые заявки на живом счёте"
 echo "   TINKOFF_SANDBOX=true — песочница без реальных денег"
+echo "   BYBIT_API_KEY / BYBIT_API_SECRET — спот Bybit (курс без ключа)"
+echo "   BYBIT_TESTNET=true — бумажный счёт api-testnet.bybit.com"
+echo "   CRYPTO_VOICE_TRADE=true — заявки крипты голосом (по умолчанию выкл)"
+echo "   CRYPTO_AUTO_TRADE=true — фон крипты; пустой флаг — только тестнет"
+echo "   CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN — картинки Flux"
 echo "   CAMERA_INDEX — камера охраны (по умолчанию 0)"
 echo "   Тумблеры: правый клик по сфере или «открой настройки»"
 echo ""
@@ -301,4 +345,7 @@ echo "   scp старый:~/VoiceAssistant/skills_enabled.json $PROJECT_DIR/"
 echo "   scp старый:~/VoiceAssistant/jarvis_holds.json $PROJECT_DIR/"
 echo "   scp старый:~/VoiceAssistant/jarvis_bought.json $PROJECT_DIR/"
 echo "   scp старый:~/VoiceAssistant/jarvis_trades.json $PROJECT_DIR/"
+echo "   scp старый:~/VoiceAssistant/jarvis_crypto_holds.json $PROJECT_DIR/"
+echo "   scp старый:~/VoiceAssistant/jarvis_crypto_bought.json $PROJECT_DIR/"
+echo "   scp старый:~/VoiceAssistant/jarvis_crypto_trades.json $PROJECT_DIR/"
 echo "=================================================================="

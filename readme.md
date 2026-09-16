@@ -27,7 +27,8 @@
 - **Barge-in (Мгновенное перебивание):** имя «Джарвис» или «стоп» / «замолчи» / «спать» гасит колонку и обрывает недочитанный ответ Groq.
 - **Погода (Open-Meteo):** прогноз на сегодня и завтра. Без города — точка `DEFAULT_LAT`/`DEFAULT_LON` (озвучка «здесь», если `DEFAULT_CITY` пуст) либо геокодинг `DEFAULT_CITY`. «Что надеть» / «чемодан» — короткий совет по одежде.
 - **Биржа и портфель (Т-Инвест):** котировки Мосбиржи, сводка счёта. Сделки голосом («купи», «продай», «поторгуй») — тумблер «Сделки голосом» в настройках (по умолчанию выкл, пишет `stocks_voice_trade`) или `TINKOFF_VOICE_TRADE=true`; без числа — один лот, «все / целиком» — максимум. Фоновая авто-ребалансировка — тумблер «Автоторговля» (пишет `skills_enabled.json`) или `TINKOFF_AUTO_TRADE=true`; пустой флаг и нет ключа в JSON — только песочница. Без токена — публичные котировки ISS и ручная книжка `quiet_book.json`. **При включённых сделках живой токен с правом торговли выставляет реальные заявки**; для тестов `TINKOFF_SANDBOX=true`. Сертификат Минцифры: `certs/russian_trusted_root_ca.pem` или `TINKOFF_CA_BUNDLE`.
-- **Крипта (Bybit спот):** курс без ключа; сводка счёта с `BYBIT_API_KEY` / `BYBIT_API_SECRET`. Сделки голосом — отдельный тумблер (по умолчанию выкл) или `CRYPTO_VOICE_TRADE=true`. Без суммы — минимум биржи (~5 USDT), «на 20 долларов» — сумма, «все» — максимум. Автоторговля — свой тумблер / `CRYPTO_AUTO_TRADE`; ИИ выбирает доли монет из ленты Bybit, без плеча. Тумблеры акций на крипту не действуют. «Что такое биткоин» — Википедия. Тестнет: `BYBIT_TESTNET=true`.
+- **Крипта (Bybit спот):** курс без ключа; сводка счёта с `BYBIT_API_KEY` / `BYBIT_API_SECRET`. Сделки голосом — отдельный тумблер (по умолчанию выкл) или `CRYPTO_VOICE_TRADE=true`. Без суммы — минимум биржи (~5 USDT), «на 20 долларов» — сумма, «все / весь» — максимум. Автоторговля — свой тумблер / `CRYPTO_AUTO_TRADE`; пустой флаг — авто только на тестнете. ИИ выбирает доли монет из ленты Bybit, без плеча. Тумблеры акций на крипту не действуют. «Что такое биткоин» — Википедия. Тестнет: `BYBIT_TESTNET=true`.
+- **Conky рынков:** правый нижний угол, дневной +/- Т-Инвест (₽) и Bybit ($). Плюс светло-серый, минус темнее. После сделки сразу, иначе раз в 90 мин. Ставит `setup.sh` в `~/.conky/conky_markets.conf`.
 - **Таймеры:** Фоновый отсчет («поставь таймер на 5 минут», «сколько осталось»). Ответ с деталью: «Поставил на 5 минут.» Без длительности — «На сколько?»
 - **Быстрый калькулятор:** Мгновенный расчет математических выражений, корней, степеней, процентов и словесных чисел без задержки на LLM.
 - **Игры и рандомайзер:** «Больше — Меньше», кубики d6/d20, случайное число, выбор из вариантов. Тумблер в окне настроек.
@@ -73,6 +74,8 @@ VoiceAssistant/
 ├── intents.json              # Базовые интенты (прощания, монетка)
 ├── signal_advisor.py         # Советник: сигналы Т-Инвест + моментум 10д → Telegram
 ├── crypto_advisor.py         # Советник: ИИ выбирает спот Bybit, заявки не ставит
+├── conky_markets.py          # Строки +/- для Conky (биржа ₽, крипта $)
+├── conky/                    # Шаблон виджета и иконки Tinkoff / Bitcoin
 ├── setup.sh                  # Скрипт полной автоустановки окружения и systemd
 ├── setup_echo_cancel.sh      # Настройка PipeWire WebRTC AEC (эхоподавление)
 ├── commands.txt              # Подробная документация всех поддерживаемых команд
@@ -120,7 +123,6 @@ VoiceAssistant/
 ```bash
 git clone https://github.com/dmtrbk/VoiceAssistant.git
 cd VoiceAssistant
-git checkout experimental
 chmod +x setup.sh setup_echo_cancel.sh
 ./setup.sh
 ```
@@ -131,9 +133,10 @@ chmod +x setup.sh setup_echo_cancel.sh
 3. Скачает **Vosk** (`vosk-model-small-ru-0.22`) в `model/`.
 4. Скачает **Piper TTS** и голос Дмитрия в `piper/`.
 5. Создаст `.env` из `.env.example`, если файла ещё нет.
-6. Включит пользовательскую службу `voice-assistant.service`.
+6. Поставит виджет Conky рынков в `~/.conky` (и допишет `conky-startup.sh`, если он уже есть).
+7. Включит пользовательскую службу `voice-assistant.service`.
 
-Дальше впиши ключи в `.env` (`GROQ_API_KEY`, для биржи `TINKOFF_TOKEN`, Telegram). Сделки голосом по умолчанию выключены. Живой фон — `TINKOFF_AUTO_TRADE=true` или тумблер «Автоторговля».
+Дальше впиши ключи в `.env` (`GROQ_API_KEY`, для акций `TINKOFF_TOKEN`, для крипты `BYBIT_API_KEY` / `BYBIT_API_SECRET`, картинки — Cloudflare, Telegram). Сделки голосом по умолчанию выключены и у акций, и у крипты. Живой фон акций — `TINKOFF_AUTO_TRADE=true` или тумблер. Крипта: `CRYPTO_AUTO_TRADE` или тумблер; пустой флаг включает авто только при `BYBIT_TESTNET=true`.
 
 ### Переезд на новое железо
 
@@ -146,10 +149,13 @@ scp старый-хост:~/VoiceAssistant/skills_enabled.json ~/VoiceAssistant/
 scp старый-хост:~/VoiceAssistant/jarvis_holds.json \
     старый-хост:~/VoiceAssistant/jarvis_bought.json \
     старый-хост:~/VoiceAssistant/jarvis_trades.json \
+    старый-хост:~/VoiceAssistant/jarvis_crypto_holds.json \
+    старый-хост:~/VoiceAssistant/jarvis_crypto_bought.json \
+    старый-хост:~/VoiceAssistant/jarvis_crypto_trades.json \
     ~/VoiceAssistant/
 ```
 
-`jarvis_*.json` — какие бумаги ты купил сам, что купил стол, дневник сделок. Без них Джарвис на новом ПК не вспомнит Норникель. `skills_enabled.json` — тумблеры навыков. `.env` — ключи. После копирования: `systemctl --user restart voice-assistant.service`.
+`jarvis_*.json` — какие бумаги и монеты купил сам, что купил стол, дневник сделок. Без них Джарвис на новом ПК не вспомнит Норникель и биткоин. `skills_enabled.json` — тумблеры навыков. `.env` — ключи. После копирования: `systemctl --user restart voice-assistant.service`.
 
 ---
 
@@ -178,13 +184,19 @@ TINKOFF_SANDBOX=false
 TINKOFF_VOICE_TRADE=
 TINKOFF_AUTO_TRADE=
 TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
-# Крипта — спот Bybit (не Т-Инвест).
+# Крипта — спот Bybit (не Т-Инвест). Ключ не нужен для курса.
+# Сделки: тумблер у навыка Крипта или CRYPTO_VOICE_TRADE=true.
+# Авто: CRYPTO_AUTO_TRADE=true (пустое — только тестнет).
 BYBIT_API_KEY=
 BYBIT_API_SECRET=
 BYBIT_TESTNET=false
 CRYPTO_VOICE_TRADE=
 CRYPTO_AUTO_TRADE=
 CRYPTO_WATCHLIST=BTC,ETH,SOL
+
+# Cloudflare Workers AI — картинки (FLUX.1 schnell)
+CLOUDFLARE_ACCOUNT_ID=
+CLOUDFLARE_API_TOKEN=
 
 # Telegram-бот: управление и фото охраны (опционально)
 TELEGRAM_BOT_TOKEN=
