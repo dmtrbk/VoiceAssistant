@@ -1010,6 +1010,11 @@ class CryptoSkill(BaseSkill):
         trades = _read_trades()
         trades.append(entry)
         _write_trades(trades)
+        try:
+            import conky_markets
+            conky_markets.poke_refresh()
+        except Exception:
+            pass
         line = "Дневник крипты: " + format_trade_line(entry)
         logger.info("[Крипта] %s", line)
         if telegram_configured():

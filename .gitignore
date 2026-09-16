@@ -22,6 +22,8 @@ jarvis_trades.json
 jarvis_crypto_holds.json
 jarvis_crypto_bought.json
 jarvis_crypto_trades.json
+.conky_markets.cache
+.conky_markets.cache.lock
 quiet_vitality.json
 volume_cache.json
 timers_cache.json

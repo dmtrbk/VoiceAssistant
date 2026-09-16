@@ -1583,6 +1583,11 @@ class StocksSkill(BaseSkill):
         trades = _read_trades()
         trades.append(entry)
         _write_trades(trades)
+        try:
+            import conky_markets
+            conky_markets.poke_refresh()
+        except Exception:
+            pass
         line = "Дневник: " + format_trade_line(entry)
         logger.info("[Биржа] %s", line)
         if telegram_configured():
