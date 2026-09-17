@@ -28,9 +28,9 @@ class TestStocks(unittest.TestCase):
         hold_path = os.path.join(self.tmp.name, "holds.json")
         bought_path = os.path.join(self.tmp.name, "bought.json")
         trade_path = os.path.join(self.tmp.name, "trades.json")
-        patcher_hold = patch("skills.stocks._HOLD_PATH", hold_path)
-        patcher_bought = patch("skills.stocks._BOUGHT_PATH", bought_path)
-        patcher_trade = patch("skills.stocks._TRADE_PATH", trade_path)
+        patcher_hold = patch("skills.stocks.common._HOLD_PATH", hold_path)
+        patcher_bought = patch("skills.stocks.common._BOUGHT_PATH", bought_path)
+        patcher_trade = patch("skills.stocks.common._TRADE_PATH", trade_path)
         patcher_hold.start()
         patcher_bought.start()
         patcher_trade.start()
@@ -106,7 +106,7 @@ class TestStocks(unittest.TestCase):
     def test_voice_trade_off_blocks_orders(self):
         spoken: list[str] = []
         with (
-            patch("skills.stocks._voice_trade_enabled", return_value=False),
+            patch("skills.stocks.common._voice_trade_enabled", return_value=False),
             patch.object(self.skill, "_place_order") as place,
         ):
             self.skill.execute(RequestContext(raw_text="купи сбер", speak=spoken.append))
@@ -119,7 +119,7 @@ class TestStocks(unittest.TestCase):
     def test_quote_works_when_voice_trade_off(self):
         spoken: list[str] = []
         with (
-            patch("skills.stocks._voice_trade_enabled", return_value=False),
+            patch("skills.stocks.common._voice_trade_enabled", return_value=False),
             patch.object(self.skill, "_speak_one", return_value="Сбер 300 рублей."),
         ):
             self.skill.execute(RequestContext(raw_text="сколько стоит сбер", speak=spoken.append))
@@ -128,8 +128,8 @@ class TestStocks(unittest.TestCase):
     def test_advice_sends_telegram_without_orders(self):
         spoken: list[str] = []
         with (
-            patch("skills.stocks._voice_trade_enabled", return_value=False),
-            patch("skills.stocks.telegram_configured", return_value=True),
+            patch("skills.stocks.common._voice_trade_enabled", return_value=False),
+            patch("skills.stocks.common.telegram_configured", return_value=True),
             patch("signal_advisor.run", return_value="Бери Новатэк.") as advise,
             patch.object(self.skill, "_place_order") as place,
         ):
@@ -144,7 +144,7 @@ class TestStocks(unittest.TestCase):
     def test_advice_from_telegram_speaks_text(self):
         spoken: list[str] = []
         with (
-            patch("skills.stocks.telegram_configured", return_value=True),
+            patch("skills.stocks.common.telegram_configured", return_value=True),
             patch("signal_advisor.run", return_value="Бери Новатэк.") as advise,
         ):
             self.skill.execute(
@@ -250,7 +250,7 @@ class TestStocks(unittest.TestCase):
             patch.object(self.skill, "_lot_size", return_value=1),
             patch.object(self.skill, "_max_lots", return_value=(3, 0)),
             patch.object(self.skill, "_place_order", return_value="Купил 3 лота: ВТБ.") as place,
-            patch("skills.stocks.time.sleep"),
+            patch("skills.stocks.desk.time.sleep"),
         ):
             result = self.skill._rebalance_portfolio({"VTBR": 100.0})
         place.assert_called_with("VTBR", "ORDER_DIRECTION_BUY", 3)
@@ -265,7 +265,7 @@ class TestStocks(unittest.TestCase):
             patch.object(self.skill, "_lot_size", return_value=1),
             patch.object(self.skill, "_max_lots", return_value=(3, 0)),
             patch.object(self.skill, "_place_order", return_value="Купил 3 лота: ВТБ.") as place,
-            patch("skills.stocks.time.sleep"),
+            patch("skills.stocks.desk.time.sleep"),
         ):
             result = self.skill._rebalance_portfolio({"TMOS": 70.0, "VTBR": 30.0})
         place.assert_called_with("VTBR", "ORDER_DIRECTION_BUY", 3)
@@ -399,8 +399,8 @@ class TestStocks(unittest.TestCase):
         with (
             patch.object(self.skill, "_fetch_buy_signals", return_value=signals),
             patch.object(self.skill, "_instrument", side_effect=fake_instrument),
-            patch("skills.stocks.telegram_configured", return_value=True),
-            patch("skills.stocks.send_telegram_notification") as send,
+            patch("skills.stocks.common.telegram_configured", return_value=True),
+            patch("skills.stocks.common.send_telegram_notification") as send,
         ):
             alloc = self.skill._desk_choose(candidates, equity=20_000)
             alloc_again = self.skill._desk_choose(candidates, equity=20_000)
@@ -423,7 +423,7 @@ class TestStocks(unittest.TestCase):
             patch.object(self.skill, "_lot_size", return_value=1),
             patch.object(self.skill, "_max_lots", return_value=(0, 1)),
             patch.object(self.skill, "_place_order") as place,
-            patch("skills.stocks.time.sleep"),
+            patch("skills.stocks.desk.time.sleep"),
         ):
             self.skill._rebalance_portfolio({"VTBR": 100.0})
         place.assert_not_called()
@@ -440,7 +440,7 @@ class TestStocks(unittest.TestCase):
             patch.object(self.skill, "_lot_size", return_value=1),
             patch.object(self.skill, "_max_lots", return_value=(0, 1)),
             patch.object(self.skill, "_place_order") as place,
-            patch("skills.stocks.time.sleep"),
+            patch("skills.stocks.desk.time.sleep"),
         ):
             self.skill._rebalance_portfolio({"VTBR": 100.0})
         place.assert_not_called()
@@ -457,7 +457,7 @@ class TestStocks(unittest.TestCase):
             patch.object(self.skill, "_lot_size", return_value=1),
             patch.object(self.skill, "_max_lots", return_value=(0, 10)),
             patch.object(self.skill, "_place_order", return_value="Продал 10 лотов: EUTR.") as place,
-            patch("skills.stocks.time.sleep"),
+            patch("skills.stocks.desk.time.sleep"),
         ):
             result = self.skill._rebalance_portfolio({"VTBR": 100.0})
         place.assert_called_with("EUTR", "ORDER_DIRECTION_SELL", 10)
@@ -480,9 +480,9 @@ class TestStocks(unittest.TestCase):
         self.assertIn("NVTK", line)
         self.assertIn("дневник сделок", format_journal([{"ts": "14.09 18:00", "side": "buy", "lots": 1, "name": "Новатэк", "ticker": "NVTK", "price": 1180}]).lower())
         with (
-            patch("skills.stocks.telegram_configured", return_value=True),
-            patch("skills.stocks.send_telegram_notification") as send,
-            patch("skills.stocks.format_journal", return_value="Дневник сделок:\nкупил 1 лот"),
+            patch("skills.stocks.common.telegram_configured", return_value=True),
+            patch("skills.stocks.common.send_telegram_notification") as send,
+            patch("skills.stocks.journal.format_journal", return_value="Дневник сделок:\nкупил 1 лот"),
         ):
             self.skill.execute(RequestContext(raw_text="дневник", speak=spoken.append))
         send.assert_called_once()

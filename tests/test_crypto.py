@@ -45,9 +45,9 @@ class TestCryptoSkill(unittest.TestCase):
         hold_path = os.path.join(self.tmp.name, "holds.json")
         bought_path = os.path.join(self.tmp.name, "bought.json")
         trade_path = os.path.join(self.tmp.name, "trades.json")
-        patcher_hold = patch("skills.crypto._HOLD_PATH", hold_path)
-        patcher_bought = patch("skills.crypto._BOUGHT_PATH", bought_path)
-        patcher_trade = patch("skills.crypto._TRADE_PATH", trade_path)
+        patcher_hold = patch("skills.crypto.common._HOLD_PATH", hold_path)
+        patcher_bought = patch("skills.crypto.common._BOUGHT_PATH", bought_path)
+        patcher_trade = patch("skills.crypto.common._TRADE_PATH", trade_path)
         patcher_hold.start()
         patcher_bought.start()
         patcher_trade.start()
@@ -164,7 +164,7 @@ class TestCryptoSkill(unittest.TestCase):
     def test_voice_trade_off_blocks_orders(self):
         spoken: list[str] = []
         with (
-            patch("skills.crypto._voice_trade_enabled", return_value=False),
+            patch("skills.crypto.common._voice_trade_enabled", return_value=False),
             patch.object(self.skill, "_place_order") as place,
             self._patch_ticker(),
         ):
@@ -176,7 +176,7 @@ class TestCryptoSkill(unittest.TestCase):
         spoken: list[str] = []
         with (
             patch.dict(os.environ, {"BYBIT_API_KEY": "k", "BYBIT_API_SECRET": "s"}, clear=False),
-            patch("skills.crypto._voice_trade_enabled", return_value=True),
+            patch("skills.crypto.common._voice_trade_enabled", return_value=True),
             patch.object(self.skill, "_cash_and_held", return_value=(100.0, {})),
             patch.object(self.skill, "_place_order", return_value="Купил Биткоин на 5 долларов.") as place,
             self._patch_ticker(),
@@ -195,7 +195,7 @@ class TestCryptoSkill(unittest.TestCase):
         filters = {"min_qty": 1e-6, "min_amt": 5.0, "step": 1e-6}
         with (
             patch.dict(os.environ, {"BYBIT_API_KEY": "k", "BYBIT_API_SECRET": "s"}, clear=False),
-            patch("skills.crypto._voice_trade_enabled", return_value=True),
+            patch("skills.crypto.common._voice_trade_enabled", return_value=True),
             patch.object(self.skill, "_cash_and_held", return_value=(9973.0, {"BTC": pos})),
             patch.object(self.skill, "_filters", return_value=filters),
             patch.object(self.skill, "_place_order", return_value="Продал Биткоин на 5 долларов.") as place,
@@ -216,7 +216,7 @@ class TestCryptoSkill(unittest.TestCase):
         filters = {"min_qty": 1e-6, "min_amt": 5.0, "step": 1e-6}
         with (
             patch.dict(os.environ, {"BYBIT_API_KEY": "k", "BYBIT_API_SECRET": "s"}, clear=False),
-            patch("skills.crypto._voice_trade_enabled", return_value=True),
+            patch("skills.crypto.common._voice_trade_enabled", return_value=True),
             patch.object(self.skill, "_cash_and_held", return_value=(9973.0, {"BTC": pos})),
             patch.object(self.skill, "_filters", return_value=filters),
             patch.object(self.skill, "_place_order", return_value="Продал Биткоин на 20 долларов.") as place,
@@ -230,7 +230,17 @@ class TestCryptoSkill(unittest.TestCase):
     def test_execute_watchlist(self):
         spoken: list[str] = []
         with (
-            patch.dict(os.environ, {"CRYPTO_WATCHLIST": "bitcoin,ethereum"}, clear=False),
+            patch.dict(
+                os.environ,
+                {
+                    "CRYPTO_WATCHLIST": "bitcoin,ethereum",
+                    "BYBIT_API_KEY": "",
+                    "BYBIT_API_SECRET": "",
+                    "CRYPTO_API_KEY": "",
+                    "CRYPTO_API_SECRET": "",
+                },
+                clear=False,
+            ),
             self._patch_ticker(),
         ):
             self.skill._api_key = ""
@@ -240,7 +250,19 @@ class TestCryptoSkill(unittest.TestCase):
 
     def test_followup_after_quote(self):
         spoken: list[str] = []
-        with self._patch_ticker():
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "BYBIT_API_KEY": "",
+                    "BYBIT_API_SECRET": "",
+                    "CRYPTO_API_KEY": "",
+                    "CRYPTO_API_SECRET": "",
+                },
+                clear=False,
+            ),
+            self._patch_ticker(),
+        ):
             self.skill.execute(RequestContext(raw_text="биткоин", speak=spoken.append))
             self.assertTrue(self.skill.accepts_followup(RequestContext(raw_text="подробнее")))
             self.skill.execute(RequestContext(raw_text="подробнее", speak=spoken.append))
