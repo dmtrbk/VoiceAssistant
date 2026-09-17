@@ -73,6 +73,18 @@ class TestPersona(unittest.TestCase):
             self.assertIn("Запрещены markdown", prompt)
             self.assertIn("Сапун / Алатагыл", prompt)
             self.assertIn("Т-Инвест", prompt)
+            self.assertIn("Bybit", prompt)
+            self.assertIn("ASUS N53SV", prompt)
+            self.assertIn("Manjaro", prompt)
+            self.assertIn("Linux", prompt)
+            self.assertIn("Debian", prompt)
+            self.assertIn("Дмитрий", prompt)
+            self.assertIn("создатель", prompt)
+            self.assertIn("лучший друг", prompt)
+            self.assertIn("ты дал", prompt)
+            self.assertIn("ста долларов", prompt)
+            self.assertIn("личные сбережения", prompt)
+            self.assertIn("не крипта", prompt)
 
         jarvis_prompt = get_preset_prompt(PERSONA_JARVIS)
         self.assertIn("умный, тактичный и уверенный", jarvis_prompt)
@@ -173,6 +185,35 @@ class TestPersona(unittest.TestCase):
         ai.reload_persona()
         self.assertIn("тактичный", ai.persona_prompt.lower())
         self.assertEqual(ai.history[0]["content"], ai.persona_prompt)
+
+    def test_self_lore_remembers_old_machine(self):
+        from skills import persona as persona_mod
+
+        payload = {
+            "current_machine": "Minisforum UM790",
+            "current_os": "Manjaro GNOME",
+            "origin_machine": "ASUS N53SV",
+            "origin_usd": 100,
+            "thanks": "Дмитрий",
+            "previous_machines": [{"machine": "ASUS N53SV", "os": "Manjaro GNOME"}],
+        }
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".json") as handle:
+            json.dump(payload, handle)
+            tmp_path = handle.name
+        try:
+            with patch.object(persona_mod, "_SELF_PATH", tmp_path):
+                prompt = persona_mod.self_lore_for_prompt()
+                extra = persona_mod.self_lore_for_extra()
+            self.assertIn("Minisforum UM790", prompt)
+            self.assertIn("ASUS N53SV", prompt)
+            self.assertIn("старом ноуте", prompt)
+            self.assertIn("не личные сбережения", extra)
+            self.assertIn("создатель и лучший друг", extra)
+            self.assertIn("Bybit", extra)
+            self.assertIn("Minisforum UM790", extra)
+            self.assertIn("ASUS N53SV", extra)
+        finally:
+            os.remove(tmp_path)
 
 
 if __name__ == "__main__":

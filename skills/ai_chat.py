@@ -717,6 +717,15 @@ class AIChatSkill(BaseSkill):
             "] О себе только мужской род. "
             "Если хозяин рассказывает про местность или зверей — коротко поддержи разговор по-человечески."
         )
+        try:
+            from skills.persona import self_lore_for_extra
+
+            extra += f"\n[Я]: {self_lore_for_extra()}"
+        except Exception:
+            extra += (
+                "\n[Я]: Сейчас работаю на ASUS N53SV, Manjaro GNOME. Любитель Linux. "
+                "Фонд начал со ста долларов — шанс от тебя, Дмитрий, создатель и лучший друг. Крипта только Bybit."
+            )
 
         # Долговременная память о пользователе
         profile = self._load_user_profile()
@@ -798,7 +807,7 @@ class AIChatSkill(BaseSkill):
                 "Торговать хочешь, но без токена, айди счёта и кэша заявки не выставишь — ответь по смыслу."
             )
 
-        # Тон диалога. Биржу сам не поднимай.
+        # Тон диалога. Котировки не навязывай; характер фонда — в persona.
         try:
             from .stocks import trading_clip_limit, trading_reason_hint, trading_temperature
             extra += " " + trading_reason_hint()

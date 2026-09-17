@@ -46,10 +46,29 @@ from .common import (
 
 logger = logging.getLogger(__name__)
 
+# «Зачем тебе биржа» — характер, не сводка. Короткое «биржа» / «акции» — сводка.
+_IDENTITY_TALK = (
+    "зачем",
+    "почему ты",
+    "почему тебе",
+    "для чего",
+    "любишь",
+    "предпочита",
+    "смысл бирж",
+    "зачем тебе",
+    "зачем ты",
+)
+
+
+def _is_identity_talk(text: str) -> bool:
+    return any(hint in text for hint in _IDENTITY_TALK)
+
 
 def _wants_market_report(text: str) -> bool:
-    """Сводка по счёту, а не «что такое акции» и не болтовня про торговлю."""
+    """Сводка по счёту, а не «что такое акции» и не «зачем тебе биржа»."""
     if any(phrase in text for phrase in _ENCYCLOPEDIA):
+        return False
+    if _is_identity_talk(text):
         return False
     if not any(word in text for word in _MARKET_WORDS):
         return False

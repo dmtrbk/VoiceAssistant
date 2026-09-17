@@ -48,6 +48,23 @@ def _is_encyclopedia(text: str) -> bool:
     return any(phrase in text for phrase in _ENCYCLOPEDIA)
 
 
+_IDENTITY_TALK = (
+    "зачем",
+    "почему ты",
+    "почему тебе",
+    "для чего",
+    "любишь",
+    "предпочита",
+    "смысл крипт",
+    "зачем тебе",
+    "зачем ты",
+)
+
+
+def _is_identity_talk(text: str) -> bool:
+    return any(hint in text for hint in _IDENTITY_TALK)
+
+
 def _has_topic(text: str) -> bool:
     if "криптовалют" in text:
         return True
@@ -78,6 +95,21 @@ def is_crypto_command(text: str) -> bool:
     text = _norm(text)
     if not text or _is_encyclopedia(text):
         return False
+    if _is_identity_talk(text):
+        has_action = any(
+            hint in text
+            for hint in (
+                *_PRICE_HINTS,
+                *_BUY_HINTS,
+                *_SELL_HINTS,
+                *_AUTO_HINTS,
+                *_ALLIN_HINTS,
+                *_ADVICE_HINTS,
+                *_STATUS_ASK,
+            )
+        )
+        if not has_action:
+            return False
     coins = _coin_hits(text)
     topic = _has_topic(text)
     if not coins and not topic:

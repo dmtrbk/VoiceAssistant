@@ -71,6 +71,10 @@ class TestStocks(unittest.TestCase):
         self.assertFalse(_wants_market_report("что такое акции"))
         self.assertFalse(_wants_market_report("что значит биржа"))
         self.assertFalse(_wants_market_report("кто такой брокер"))
+        self.assertFalse(_wants_market_report("зачем тебе биржа"))
+        self.assertFalse(_wants_market_report("почему тебе акции"))
+        self.assertFalse(self.skill.can_handle(RequestContext(raw_text="зачем тебе биржа")))
+        self.assertTrue(self.skill.can_handle(RequestContext(raw_text="как там акции")))
 
     def test_wants_advice(self):
         self.assertTrue(_wants_advice("посоветуй"))

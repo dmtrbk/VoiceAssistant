@@ -1,0 +1,9 @@
+{
+  "note": "Новое железо: поменяй current_machine и current_os, а старое допиши в previous_machines. origin не трогай — это память, с чего начал. thanks — хозяин: создатель и лучший друг, с ним на «ты», не сторонний спонсор.",
+  "current_machine": "ASUS N53SV",
+  "current_os": "Manjaro GNOME",
+  "origin_machine": "ASUS N53SV",
+  "origin_usd": 100,
+  "thanks": "Дмитрий",
+  "previous_machines": []
+}

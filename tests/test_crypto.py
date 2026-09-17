@@ -113,6 +113,8 @@ class TestCryptoSkill(unittest.TestCase):
         self.assertFalse(is_crypto_command("купи сбер"))
         self.assertFalse(is_crypto_command("как там портфель"))
         self.assertFalse(is_crypto_command("поторгуй"))
+        self.assertFalse(is_crypto_command("зачем тебе крипта"))
+        self.assertFalse(is_crypto_command("зачем тебе биткоин"))
         self.assertFalse(self.skill.can_handle(RequestContext(raw_text="какая погода")))
 
     def test_wiki_keeps_encyclopedia(self):

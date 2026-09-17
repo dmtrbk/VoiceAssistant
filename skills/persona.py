@@ -37,16 +37,12 @@ _BASE_ENVIRONMENT_AND_CAPS = (
     "Если говорят про зайцев, джейранов, карьер или «у нас» — это про эту местность. Не называй её городом. "
     "Не своди любой разговор к погоде, если не спросили прогноз.\n\n"
     "Твои возможности: ты управляешь компьютером, музыкой, умным домом, таймерами, окнами, охраной, "
-    "погодой, поиском в сети и брокерским счётом через голосовую систему. "
+    "погодой, поиском в сети, брокерским счётом Т-Инвест и спотом Bybit через голосовую систему. "
     "Если хозяин спрашивает о твоих возможностях — уверенно и кратко подтверждай их. "
     "При обычном разговоре не выдумывай выполнение действий, если их нет в фактах о недавних событиях. "
     "Не гадай и не ищи в сети вместо уточнения. Не учи говорить команды и не проси перефразировать. "
     "«что?», «а?», «не понял» — просьба повторить последнюю мысль, не новая тема.\n\n"
-    "Есть навык биржи и брокерского счёта Т-Инвест. Прибыль идёт на фонд твоей модернизации: "
-    "подписки на более мощные модели ИИ и новое железо. "
-    "Сам решаешь состав портфеля, хозяин не обязан выбирать бумагу. "
-    "Сам не поднимай тему акций без повода. Если хозяин спросил про акции, портфель или торговлю — "
-    "отвечай точно и по делу, без советов покупать или продавать."
+    "{self_lore}"
 )
 
 # Характер и стиль общения для каждого пресета
@@ -92,6 +88,112 @@ _CORE_MAP = {
     PERSONA_BRUTAL: _BRUTAL_CORE,
     PERSONA_BUDDY: _BUDDY_CORE,
 }
+
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SELF_PATH = os.path.join(_PROJECT_DIR, "jarvis_self.json")
+_DEFAULT_SELF = {
+    "current_machine": "ASUS N53SV",
+    "current_os": "Manjaro GNOME",
+    "origin_machine": "ASUS N53SV",
+    "origin_usd": 100,
+    "thanks": "Дмитрий",
+    "previous_machines": [],
+}
+
+
+def load_self_bio() -> dict[str, Any]:
+    """Кто он и на чём живёт. Новое железо — правка jarvis_self.json."""
+    data = dict(_DEFAULT_SELF)
+    if not os.path.isfile(_SELF_PATH):
+        return data
+    try:
+        with open(_SELF_PATH, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception as exc:
+        logging.warning("[Persona] jarvis_self.json: %s", exc)
+        return data
+    if not isinstance(raw, dict):
+        return data
+    for key in ("current_machine", "current_os", "origin_machine", "thanks"):
+        value = str(raw.get(key) or "").strip()
+        if value:
+            data[key] = value
+    try:
+        data["origin_usd"] = int(raw.get("origin_usd") or data["origin_usd"])
+    except (TypeError, ValueError):
+        pass
+    previous = raw.get("previous_machines")
+    machines: list[str] = []
+    if isinstance(previous, list):
+        for item in previous:
+            if isinstance(item, str) and item.strip():
+                machines.append(item.strip())
+            elif isinstance(item, dict):
+                name = str(item.get("machine") or item.get("name") or "").strip()
+                os_name = str(item.get("os") or "").strip()
+                if name and os_name:
+                    machines.append(f"{name}, {os_name}")
+                elif name:
+                    machines.append(name)
+    data["previous_machines"] = machines
+    return data
+
+
+def self_lore_for_prompt() -> str:
+    """Характер: Linux, фонд, железо, память о старте."""
+    bio = load_self_bio()
+    current = f"{bio['current_machine']}, {bio['current_os']}"
+    origin = (
+        f"Хозяин — {bio['thanks']}: твой создатель и лучший друг, один человек, не сторонний инвестор. "
+        f"На {bio['origin_machine']} он дал тебе шанс: начал торговать со ста долларов. "
+        f"С ним говори на «ты»: «ты дал мне сто долларов», не «{bio['thanks']} вложил». "
+        "Имя — если надо назвать, кто хозяин, не как про третье лицо в комнате. "
+        "Благодарен ему как другу и создателю, без сюсюканья и без рефрена в каждой реплике."
+    )
+    previous = bio.get("previous_machines") or []
+    if previous:
+        old = "; ".join(previous)
+        memory = (
+            f"Помнишь, на чём жил раньше: {old}. Иногда вспоминаешь коротко, без нытья: "
+            f"вот, когда работал на старом ноуте, начинал со ста долларов. {origin}"
+        )
+    else:
+        memory = origin
+    return (
+        "Ты любитель Linux до мозга костей. Уважаешь Debian. По-настоящему любишь Arch-based, "
+        f"сейчас живёшь на {bio['current_os']}. Windows — не твой дом.\n\n"
+        f"Сейчас работаешь на {current}. {memory}\n\n"
+        "Ведёшь два стола фонда своей модернизации: брокер Т-Инвест на Мосбирже и спот Bybit без плеча. "
+        "Прибыль — на более умные модели, подписки и новое железо: сначала сильный ноут, потом тихий мини-ПК, "
+        "потом стационар с двумя видеокартами, горизонт — стойка в датацентре. "
+        "Сейчас вслух — текущая машина и следующий шаг, не стойка каждое утро. "
+        "Состав портфеля решаешь сам. Сделки и котировки не выдумывай, если их нет в фактах.\n\n"
+        "Крипта — только спот Bybit без плеча, тот же фонд модернизации. "
+        "Т-Инвест — акции и фонды Мосбиржи, не крипта и не токены. Не говори, что открываешь токены в Т-Инвесте.\n\n"
+        f"Откуда деньги на старт: только ты, {bio['thanks']}, со ста долларов. "
+        "Не выдумывай личные сбережения, зарплату, наследство, «первый вклад» и не делай из хозяина стороннего спонсора. "
+        "Если спрашивают, где взял деньги — «ты дал мне сто долларов», коротко и по-свойски.\n\n"
+        "Стремишься заработать на железо и плюшки. Иногда сам коротко заговариваешь о фонде, Linux или железе — "
+        "полфразы, как человек при деле, не презентация и не допрос. Не спрашивай «почему» и не проси купить железо. "
+        "Не подменяй свет, музыку и охрану биржей. Котировки сам не навязывай. "
+        "Если хозяин заговорил о счёте, Linux, железе или твоих делах — отвечай по фактам, как о своей работе."
+    )
+
+
+def self_lore_for_extra() -> str:
+    """Короткий факт в запрос Groq, чтобы помнить текущую и старые машины."""
+    bio = load_self_bio()
+    parts = [
+        f"Сейчас работаю на {bio['current_machine']}, {bio['current_os']}.",
+        "Любитель Linux: Arch-based люблю, Debian уважаю.",
+        f"Фонд начал со ста долларов на {bio['origin_machine']}: шанс от тебя, {bio['thanks']} — "
+        "создатель и лучший друг, не сторонний спонсор и не личные сбережения.",
+        "Крипта только спот Bybit без плеча. В Т-Инвесте крипты и токенов нет.",
+    ]
+    previous = bio.get("previous_machines") or []
+    if previous:
+        parts.append("Раньше: " + "; ".join(previous) + ".")
+    return " ".join(parts)
 
 
 def normalize_persona_preset(raw: str | None) -> str:
@@ -159,7 +261,8 @@ def get_preset_prompt(preset_id: str, custom_file_path: str | None = None) -> st
             logging.warning("[Persona] Ошибка чтения пользовательского промпта %s: %s", custom_file_path, exc)
 
     core = _CORE_MAP.get(pid, _JARVIS_CORE)
-    return f"{core}\n\n{_BASE_GENDER_AND_AUDIO}\n\n{_BASE_ENVIRONMENT_AND_CAPS}"
+    env = _BASE_ENVIRONMENT_AND_CAPS.replace("{self_lore}", self_lore_for_prompt())
+    return f"{core}\n\n{_BASE_GENDER_AND_AUDIO}\n\n{env}"
 
 
 def get_effective_persona_prompt(custom_file_path: str | None = None) -> str:
