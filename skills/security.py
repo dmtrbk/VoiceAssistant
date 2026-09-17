@@ -74,18 +74,18 @@ def _gdbus_call(dest: str, path: str, method: str, *args: str) -> bool:
             env=_session_env(),
         )
         if res.returncode != 0:
-            logging.debug("[Охрана] %s: %s", method, (res.stderr or "").strip())
+            logging.warning("[Экран] %s: %s", method, (res.stderr or "").strip())
             return False
         return True
     except Exception as exc:
-        logging.debug("[Охрана] %s: %s", method, exc)
+        logging.warning("[Экран] %s: %s", method, exc)
         return False
 
 
 def set_display_power(on: bool) -> bool:
-    """Включает или гасит мониторы через Mutter DisplayConfig (GNOME Wayland)."""
+    """Гасит или будит мониторы: DPMS Mutter и хранитель GNOME 50."""
     mode = _DISPLAY_ON if on else _DISPLAY_OFF
-    ok = _gdbus_call(
+    dpms = _gdbus_call(
         "org.gnome.Mutter.DisplayConfig",
         "/org/gnome/Mutter/DisplayConfig",
         "org.freedesktop.DBus.Properties.Set",
@@ -93,13 +93,17 @@ def set_display_power(on: bool) -> bool:
         "PowerSaveMode",
         f"<int32 {mode}>",
     )
-    if on:
-        _gdbus_call(
-            "org.gnome.ScreenSaver",
-            "/org/gnome/ScreenSaver",
-            "org.gnome.ScreenSaver.WakeUpScreen",
-        )
-    return ok
+    # GNOME 50: WakeUpScreen — сигнал, не метод. Картинку гасит SetActive.
+    saver = _gdbus_call(
+        "org.gnome.ScreenSaver",
+        "/org/gnome/ScreenSaver",
+        "org.gnome.ScreenSaver.SetActive",
+        "false" if on else "true",
+    )
+    if not dpms and not saver:
+        logging.warning("[Экран] Не удалось переключить дисплей (on=%s)", on)
+        return False
+    return True
 
 
 class SurveillanceThread(threading.Thread):

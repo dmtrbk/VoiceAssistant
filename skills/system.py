@@ -2,10 +2,12 @@
 
 import random
 import logging
+import re
 import subprocess
 import shutil
 import time
 from skills.base import BaseSkill, RequestContext
+from skills.security import set_display_power
 from window_control import (
     close_all_windows,
     close_focused_window,
@@ -17,6 +19,37 @@ from browser import chrome_command, close_browser, is_close_browser_text
 SUCCESS_RESPONSES = [
     "Сделано.", "Готово.", "Есть.",
 ]
+
+_DISPLAY_NOUN = r"(?:экран(?:а|у|ом|е|ы)?|монитор(?:а|у|ом|е|ы)?|диспле(?:й|я|ю|ем|е))"
+_DISPLAY_OFF_VERB = r"(?:выключи|выключить|погаси|погасить|отключи|отключить|выруби|вырубить|гаси)"
+_DISPLAY_ON_VERB = r"(?:включи|включить)"
+_DISPLAY_OFF_RE = re.compile(
+    rf"(?:{_DISPLAY_OFF_VERB}(?:\s+пожалуйста)?\s+{_DISPLAY_NOUN}"
+    rf"|{_DISPLAY_NOUN}\s+{_DISPLAY_OFF_VERB})"
+)
+_DISPLAY_ON_RE = re.compile(
+    rf"(?:{_DISPLAY_ON_VERB}(?:\s+пожалуйста)?\s+{_DISPLAY_NOUN}"
+    rf"|{_DISPLAY_NOUN}\s+{_DISPLAY_ON_VERB})"
+)
+
+
+def detect_display_power_action(text: str) -> str | None:
+    """off | on | None. «Выключи экран» — монитор, не охрана и не системный монитор."""
+    lowered = re.sub(r"\s+", " ", (text or "").lower().replace("ё", "е").strip())
+    if not lowered:
+        return None
+    if "системный монитор" in lowered:
+        return None
+    if "на весь экран" in lowered or "полный экран" in lowered:
+        return None
+    if "настройк" in lowered:
+        return None
+    if _DISPLAY_OFF_RE.search(lowered):
+        return "off"
+    if _DISPLAY_ON_RE.search(lowered):
+        return "on"
+    return None
+
 
 class SystemSkill(BaseSkill):
     """Навык для управления операционной системой Linux (громкость, утилиты, выключение)."""
@@ -33,12 +66,35 @@ class SystemSkill(BaseSkill):
         return (
             any(w in text for w in triggers)
             or is_shutdown
+            or detect_display_power_action(text) is not None
             or is_close_browser_text(text)
             or detect_window_action(text) is not None
         )
 
     def execute(self, context: RequestContext) -> None:
         text = context.raw_text.lower().strip()
+
+        display_action = detect_display_power_action(text)
+        if display_action == "off":
+            context.speak("Выключаю.")
+            time.sleep(2)
+            if set_display_power(False):
+                logging.info("[Система] Экран выключен.")
+                from skills.ai_chat import log_system_action
+                log_system_action("Пользователь выключил экран")
+            else:
+                context.speak("Не вышло.")
+            return
+
+        if display_action == "on":
+            if set_display_power(True):
+                logging.info("[Система] Экран включен.")
+                from skills.ai_chat import log_system_action
+                log_system_action("Пользователь включил экран")
+                context.speak("Включил.")
+            else:
+                context.speak("Не вышло.")
+            return
 
         window_action = detect_window_action(text)
         if window_action == "show_desktop":

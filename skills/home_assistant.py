@@ -14,6 +14,7 @@ import requests
 from skills.ai_chat import log_system_action
 from skills.base import BaseSkill, RequestContext
 from browser import is_close_browser_text
+from skills.system import detect_display_power_action
 from skills.text_utils import fuzzy_phrase_match, norm as _norm
 from window_control import is_window_command_text
 
@@ -204,6 +205,8 @@ class HomeAssistantSkill(BaseSkill):
             return True
         if any(verb in text for verb in _ON + _OFF):
             if is_window_command_text(text) or is_close_browser_text(text):
+                return False
+            if detect_display_power_action(text) is not None:
                 return False
             if _xiaomi_takes_bare_light(text):
                 return False

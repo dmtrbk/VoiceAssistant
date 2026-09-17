@@ -47,16 +47,20 @@ class TestSecurityAndSettings(unittest.TestCase):
         with patch("skills.security.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="()\n", stderr="")
             self.assertTrue(set_display_power(False))
-            off_args = run.call_args_list[0].args[0]
-            self.assertIn("org.gnome.Mutter.DisplayConfig", off_args)
-            self.assertIn("PowerSaveMode", off_args)
-            self.assertIn("<int32 3>", off_args)
+            off_dpms = run.call_args_list[0].args[0]
+            self.assertIn("org.gnome.Mutter.DisplayConfig", off_dpms)
+            self.assertIn("PowerSaveMode", off_dpms)
+            self.assertIn("<int32 3>", off_dpms)
+            off_saver = run.call_args_list[1].args[0]
+            self.assertIn("org.gnome.ScreenSaver.SetActive", off_saver)
+            self.assertIn("true", off_saver)
 
             self.assertTrue(set_display_power(True))
-            on_args = run.call_args_list[1].args[0]
-            self.assertIn("<int32 0>", on_args)
-            wakeup_args = run.call_args_list[2].args[0]
-            self.assertTrue(any("WakeUpScreen" in str(part) for part in wakeup_args))
+            on_dpms = run.call_args_list[2].args[0]
+            self.assertIn("<int32 0>", on_dpms)
+            on_saver = run.call_args_list[3].args[0]
+            self.assertIn("org.gnome.ScreenSaver.SetActive", on_saver)
+            self.assertIn("false", on_saver)
 
     def test_control_screens_powers_display(self):
         sec = SecuritySkill()
