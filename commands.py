@@ -37,7 +37,7 @@ from dialogue_repair import (
     slot_clarify,
     take_pending_rewrite,
 )
-from runtime_state import bump_speak_epoch, stop_extra_tts
+from runtime_state import bump_speak_epoch, stop_extra_tts, voice_interrupt
 
 
 def _noop_speak(_text: str) -> None:
@@ -71,13 +71,36 @@ def _match_narrow_skill(context: RequestContext):
     return None, disabled
 
 
+def _hush_remote_speech(text: str, channel: str) -> None:
+    """Telegram/CLI: сразу гасим Piper, даже если фразу потом заберёт игра."""
+    if channel == "voice":
+        return
+    if is_emergency_stop(text):
+        bump_speak_epoch()
+        stop_extra_tts()
+        if is_in_context():
+            voice_interrupt("hold")
+        else:
+            voice_interrupt("stop")
+        return
+    if is_hold_interrupt(text):
+        bump_speak_epoch()
+        stop_extra_tts()
+        voice_interrupt("hold")
+        return
+    if is_sleep_command(text):
+        bump_speak_epoch()
+        stop_extra_tts()
+        voice_interrupt("sleep")
+
+
 def _channel_session_command(text: str, speak_callback, channel: str) -> bool | None:
     """Стоп / замолчи / спать для CLI и Telegram. Голос это делает в цикле Vosk."""
     if channel == "voice":
         return None
     if is_emergency_stop(text):
-        bump_speak_epoch()
-        stop_extra_tts()
+        if is_in_context():
+            return None
         try:
             from player_control import emergency_silence
             emergency_silence()
@@ -85,12 +108,8 @@ def _channel_session_command(text: str, speak_callback, channel: str) -> bool | 
             logging.error("[Маршрутизатор] emergency_silence: %s", exc)
         return True
     if is_hold_interrupt(text):
-        bump_speak_epoch()
-        stop_extra_tts()
         return False
     if is_sleep_command(text):
-        bump_speak_epoch()
-        stop_extra_tts()
         clear_active_context(call_on_exit=True, speak_callback=speak_callback)
         return True
     return None
@@ -161,6 +180,8 @@ def _execute_unlocked(
     channel: str = "voice",
     alert_speak=None,
 ) -> bool:
+    _hush_remote_speech(text, channel)
+
     # 1. Если активен интерактивный контекст (игра, опрос, подтверждение)
     if is_in_context():
         handled, should_sleep = handle_context_input(text, speak_callback)

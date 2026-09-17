@@ -1,6 +1,7 @@
 # runtime_state.py
 # Поколение речи: «замолчи» / стоп увеличивает счётчик, стрим Groq это видит
 # без циклического импорта assistant ↔ skills.
+# Telegram/CLI через voice_interrupt гасят Piper в assistant.py.
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ _lock = threading.Lock()
 _speak_epoch = 0
 _session_epoch = 0
 _extra_tts_stops: list = []
+_voice_interrupts: list = []
 
 
 def bump_speak_epoch() -> int:
@@ -52,3 +54,29 @@ def stop_extra_tts() -> None:
             hook()
         except Exception:
             pass
+
+
+def register_voice_interrupt(callback) -> None:
+    """assistant.py: «стоп» / «замолчи» / «спать» с Telegram и CLI гасят Piper."""
+    with _lock:
+        if callback not in _voice_interrupts:
+            _voice_interrupts.append(callback)
+
+
+def voice_interrupt(kind: str) -> None:
+    """kind: stop | hold | sleep. Без хука (CLI без assistant) — тихий no-op."""
+    with _lock:
+        hooks = list(_voice_interrupts)
+    for hook in hooks:
+        try:
+            hook(kind)
+        except Exception:
+            pass
+
+
+def reset_interrupt_hooks() -> None:
+    """Только тесты: не оставлять чужие хуки между кейсами."""
+    global _extra_tts_stops, _voice_interrupts
+    with _lock:
+        _extra_tts_stops.clear()
+        _voice_interrupts.clear()

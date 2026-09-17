@@ -54,7 +54,19 @@ from tts_cache import (
     release_temp_wav,
     SYSTEM_CACHE_PHRASES,
 )
-from runtime_state import bump_session_epoch, bump_speak_epoch, session_epoch, speak_epoch
+from runtime_state import (
+    bump_session_epoch,
+    bump_speak_epoch,
+    register_voice_interrupt,
+    session_epoch,
+    speak_epoch,
+)
+from session_policy import (
+    attention_timeout_sec,
+    is_speaker_leak,
+    should_expire_attention,
+    voice_stop_goes_to_skill,
+)
 from context_manager import clear_active_context, is_in_context
 from dialogue_repair import (
     early_dialogue_turn,
@@ -401,6 +413,15 @@ def speak(text, recognizer=None):
         threading.Thread(target=_tts_worker, daemon=True, name="tts-worker").start()
 
 
+def wake_session() -> None:
+    """Имя активации: зелёная сессия и приглушение плеера."""
+    global is_active
+    is_active = True
+    reset_dialogue_repair(keep_replayable=True, keep_pending=True)
+    put_status("listening")
+    volume_ctrl.duck()
+
+
 def go_idle(*, stop_tts: bool = False):
     """Полный сон сессии: idle, сброс переспроса, музыка обратно."""
     global is_active, awaiting_followup
@@ -674,25 +695,31 @@ def execute_command_async(cmd_text, safe_speak_func):
     threading.Thread(target=run, daemon=True).start()
 
 
+def on_remote_voice_interrupt(kind: str) -> None:
+    """Telegram/CLI: те же стоп / замолчи / спать, что в цикле Vosk."""
+    if kind == "hold":
+        handle_hold_interrupt(None)
+    elif kind == "stop":
+        handle_emergency_stop(None)
+    elif kind == "sleep":
+        handle_sleep(None)
+
+
 def is_music_leak(
     phrase_rms: float,
     detected_wake_word: str | None,
     text: str = "",
 ) -> bool:
     """Речь с колонок: тихая песня или громкий диалог фильма без имени активации."""
-    if detected_wake_word:
-        return False
-    if is_movie_playing():
-        # Фильм говорит громко — порог RMS его не отсекает. Без «Джарвис» не слушаем,
-        # кроме короткого пульта в уже открытой сессии («пауза», «закрой»).
-        if is_active and is_movie_control_phrase(text):
-            return False
-        return True
-    if MIN_SPEECH_RMS <= 0:
-        return False
-    if not volume_ctrl.is_ducked_or_playing():
-        return False
-    return phrase_rms < MIN_SPEECH_RMS
+    return is_speaker_leak(
+        phrase_rms,
+        bool(detected_wake_word),
+        movie_playing=is_movie_playing(),
+        session_active=is_active,
+        is_movie_control=is_movie_control_phrase(text),
+        min_speech_rms=MIN_SPEECH_RMS,
+        ducked_or_playing=volume_ctrl.is_ducked_or_playing(),
+    )
 
 
 def timeout_monitor():
@@ -700,21 +727,31 @@ def timeout_monitor():
     global is_active, is_speaking, is_thinking, last_active_time
     while True:
         time.sleep(0.5)
-        # Проверяем тайм-аут, только если активны, НЕ говорим и НЕ ожидаем ответ от ИИ (заморозка таймера)
-        if is_active and not is_speaking and not is_thinking:
-            if is_in_context():
-                continue
-            media_on = volume_ctrl.is_ducked_or_playing() or is_movie_playing()
-            current_timeout = ATTENTION_TIMEOUT_MUSIC if media_on else ATTENTION_TIMEOUT
-            if has_pending():
-                current_timeout = max(current_timeout, ATTENTION_TIMEOUT)
-            if time.time() - last_active_time > current_timeout:
-                go_idle(stop_tts=True)
-                logging.info(f"[Система] Время ожидания истекло ({current_timeout:g} с). Возврат в спящий режим.")
+        media_on = volume_ctrl.is_ducked_or_playing() or is_movie_playing()
+        current_timeout = attention_timeout_sec(
+            media_on=media_on,
+            has_pending=has_pending(),
+            timeout=ATTENTION_TIMEOUT,
+            timeout_music=ATTENTION_TIMEOUT_MUSIC,
+        )
+        idle_for = time.time() - last_active_time
+        if should_expire_attention(
+            is_active=is_active,
+            is_speaking=is_speaking,
+            is_thinking=is_thinking,
+            in_context=is_in_context(),
+            idle_for=idle_for,
+            timeout_sec=current_timeout,
+        ):
+            go_idle(stop_tts=True)
+            logging.info(
+                f"[Система] Время ожидания истекло ({current_timeout:g} с). Возврат в спящий режим."
+            )
 
 
 def _start_runtime_services() -> None:
     """Telegram, автоторговля и восстановление таймеров — только после старта, не с импорта."""
+    register_voice_interrupt(on_remote_voice_interrupt)
     start_telegram_listener_thread()
     try:
         from skills import stocks_skill, crypto_skill, timer_skill
@@ -787,13 +824,6 @@ def main():
         phrase = random.choice(ACTIVATION_PHRASES)
         # speak() только кладёт в очередь — цикл Vosk не блокируем.
         safe_speak(phrase)
-
-    def wake_session() -> None:
-        global is_active
-        is_active = True
-        reset_dialogue_repair(keep_replayable=True, keep_pending=True)
-        put_status("listening")
-        volume_ctrl.duck()
 
     def audio_callback(indata, frames, time_info, status):
         chunk = bytes(indata)
@@ -887,7 +917,7 @@ def main():
 
                 # Сессионные команды: авария / сон / стоп TTS. «тишина» сюда не входит.
                 if is_emergency_stop(text):
-                    if is_in_context():
+                    if voice_stop_goes_to_skill(is_in_context()):
                         phrase = _strip_wake(text, detected_wake_word) or text
                         stop_speaking(to_idle=False)
                         keep_session_alive()
@@ -973,7 +1003,7 @@ def main():
                         continue
 
                     if is_emergency_stop(partial_text):
-                        if not is_in_context():
+                        if not voice_stop_goes_to_skill(is_in_context()):
                             handle_emergency_stop(recognizer)
                         continue
 
