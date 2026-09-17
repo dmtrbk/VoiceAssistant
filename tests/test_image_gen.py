@@ -52,6 +52,26 @@ class TestImageGenSkill(unittest.TestCase):
         self.assertFalse(is_draw_command("покажи картинку"))
         self.assertFalse(is_draw_command("кота видел на крыльце"))
         self.assertFalse(self.skill.can_handle(RequestContext(raw_text="какая погода")))
+        # Биржа / диалог: «песочница» раньше ловилась как «пёс» + сцена.
+        sandbox = (
+            "счет сейчас в песочнице на днях переключимся на реальные торги "
+            "тогда начнешь зарабатывать понастоящему"
+        )
+        self.assertFalse(is_draw_command(sandbox))
+        self.assertFalse(
+            self.skill.can_handle(RequestContext(raw_text=sandbox, channel="telegram"))
+        )
+        # В Telegram без «нарисуй» не угадываем кадр.
+        self.assertFalse(
+            self.skill.can_handle(
+                RequestContext(raw_text="рыжего кота на деревянном крыльце", channel="telegram")
+            )
+        )
+        self.assertTrue(
+            self.skill.can_handle(
+                RequestContext(raw_text="нарисуй рыжего кота", channel="telegram")
+            )
+        )
 
     def test_extract_prompt(self):
         self.assertEqual(extract_prompt("нарисуй рыжего кота в шляпе"), "рыжего кота в шляпе")

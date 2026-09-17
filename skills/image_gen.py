@@ -89,17 +89,27 @@ _TALK_VERBS = re.compile(
     r"поставь|найди|открой|какая|какой|какое|сколько|почему|зачем)\b",
     re.IGNORECASE,
 )
+# Диалог / биржа — не кадр. «песочница» иначе ловится как «пёс».
+_NOT_SCENE = re.compile(
+    r"(?:"
+    r"\bсч[её]т\b|\bторг\w*|\bбирж\w*|\bпесочниц\w*|\bзарабатыв\w*|"
+    r"\bакци\w*|\bкрипт\w*|\bпортфел\w*|\bброкер\w*|"
+    r"\bпереключ\w*|\bреальн\w*\s+торг"
+    r")",
+    re.IGNORECASE,
+)
+# Короткие основы без жадного \w*: «пёс» ≠ «песочница», «лес» ≠ «переключимся».
 _SUBJECT = re.compile(
     r"\b("
-    r"кот|кота|коту|кошка|кошку|кошк|"
-    r"собак|п[её]с|щен|"
-    r"дракон|робот|машин|"
-    r"дом|замок|корабл|"
-    r"закат|рассвет|космос|лун|"
-    r"гор[аыеу]|лес|море|океан|"
-    r"человек|девушк|парень|рыцар|"
-    r"цвет|шляп|крыльц"
-    r")\w*\b",
+    r"кот(?:а|у|ом|е|ы|ов)?|кошк\w*|"
+    r"собак\w*|п[её]с(?:а|у|ом|е|ы|ов|ам|ами|ах)?|щен(?:ок|ка|ку|ком|ке|ки|ков)?|"
+    r"дракон\w*|робот\w*|машин\w*|"
+    r"дом(?:а|у|ом|е)?|замок\w*|корабл\w*|"
+    r"закат\w*|рассвет\w*|космос\w*|лун\w*|"
+    r"гор[аыеу]|лес(?:а|у|ом|е|а)?|море|океан\w*|"
+    r"человек\w*|девушк\w*|парень|парня|рыцар\w*|"
+    r"цвет\w*|шляп\w*|крыльц\w*"
+    r")\b",
     re.IGNORECASE,
 )
 _SETTING = re.compile(
@@ -118,17 +128,29 @@ def is_scene_prompt(text: str) -> bool:
     cleaned = _bare_scene(text)
     if not cleaned or _TALK_VERBS.search(cleaned) or _REJECT_RE.search(cleaned):
         return False
+    if _NOT_SCENE.search(cleaned):
+        return False
     words = cleaned.split()
     if len(words) < 3 or len(words) > 14:
         return False
     return bool(_SUBJECT.search(cleaned) and _SETTING.search(cleaned))
 
 
-def is_draw_command(text: str) -> bool:
+def is_explicit_draw_command(text: str) -> bool:
+    """Явно «нарисуй / сделай картинку …», без угадывания сцены."""
     lowered = (text or "").lower().strip()
     if not lowered or _REJECT_RE.search(lowered):
         return False
-    return bool(_HANDLE_RE.search(lowered) or is_scene_prompt(lowered))
+    return bool(_HANDLE_RE.search(lowered))
+
+
+def is_draw_command(text: str, *, allow_bare_scene: bool = True) -> bool:
+    lowered = (text or "").lower().strip()
+    if not lowered or _REJECT_RE.search(lowered):
+        return False
+    if _HANDLE_RE.search(lowered):
+        return True
+    return bool(allow_bare_scene and is_scene_prompt(lowered))
 
 
 def extract_prompt(text: str) -> str:
@@ -386,7 +408,11 @@ class ImageGenSkill(BaseSkill):
         self._last_prompt = ""
 
     def can_handle(self, context: RequestContext) -> bool:
-        return is_draw_command(context.raw_text)
+        # В Telegram/CLI «голая» сцена без «нарисуй» — слишком часто чужой диалог.
+        # Bare scene оставляем для голоса: Vosk часто съедает глагол.
+        channel = getattr(context, "channel", "voice") or "voice"
+        allow_bare = channel == "voice"
+        return is_draw_command(context.raw_text, allow_bare_scene=allow_bare)
 
     def accepts_followup(self, context: RequestContext) -> bool:
         return bool(self._last_prompt) and is_followup_redraw(context.raw_text)
