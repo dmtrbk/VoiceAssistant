@@ -131,11 +131,13 @@ def transcribe_groq_whisper(
             return None
 
         wav_data = pcm_to_wav(pcm_bytes, sample_rate=sample_rate)
+        # Без своего timeout берётся клиентский read=45 с: реплика зависла бы до минуты.
         response = client.audio.transcriptions.create(
             model=model,
             file=("speech.wav", io.BytesIO(wav_data), "audio/wav"),
             language=language,
             response_format="text",
+            timeout=timeout,
         )
         raw_text = response if isinstance(response, str) else getattr(response, "text", str(response))
         cleaned = clean_whisper_text(raw_text)

@@ -782,6 +782,9 @@ def main():
     vosk_model = Model(MODEL_PATH)
     recognizer = KaldiRecognizer(vosk_model, SAMPLERATE)
     phrase_audio_buffer = PhraseAudioBuffer(sample_rate=SAMPLERATE)
+
+    # Один воркер: реплики уточняются по очереди и не обгоняют друг друга.
+    refine_queue: queue.Queue[tuple[bytes, str, str | None, int]] = queue.Queue(maxsize=4)
     
     logging.info(
         f"[Система] Ассистент готов. Позовите: {', '.join(WAKE_WORDS)}. "
@@ -825,6 +828,50 @@ def main():
         # speak() только кладёт в очередь — цикл Vosk не блокируем.
         safe_speak(phrase)
 
+    def route_phrase(phrase: str, detected_wake_word: str | None) -> None:
+        """Куда уходит готовая фраза. Зовётся и из цикла Vosk, и из потока уточнения."""
+        if is_active:
+            if detected_wake_word and not phrase:
+                speak_activation()
+            else:
+                dispatch_phrase(phrase)
+        elif detected_wake_word:
+            if phrase and is_quick_command(phrase):
+                execute_command_async(phrase, safe_speak)
+            else:
+                wake_session()
+                if phrase:
+                    dispatch_phrase(phrase)
+                else:
+                    speak_activation()
+
+    def refine_once(captured_audio: bytes, vosk_text: str, wake: str | None, epoch: int) -> None:
+        # Без thinking монитор внимания успел бы усыпить сессию прямо на уточнении.
+        _begin_thinking()
+        try:
+            final_text = transcribe_audio(
+                captured_audio, fallback_text=vosk_text, sample_rate=SAMPLERATE
+            )
+        finally:
+            _end_thinking()
+        if epoch != session_epoch():
+            logging.info(f"[STT] Сессия уже сброшена, фраза не пойдёт в навыки: '{final_text}'")
+            return
+        whisper_wake = get_wake_word(final_text) if wake else None
+        wake_to_strip = whisper_wake or wake
+        phrase = _strip_wake(final_text, wake_to_strip) if wake_to_strip else final_text
+        route_phrase(phrase, wake)
+
+    def refine_worker() -> None:
+        """Whisper отдельным потоком: пока он отвечает, микрофон слушают дальше."""
+        while True:
+            item = refine_queue.get()
+            try:
+                refine_once(*item)
+            except Exception as exc:
+                # Воркер один на процесс: умрёт — уточнения молча пропадут до перезапуска.
+                logging.error(f"[STT] Поток уточнения не справился с фразой: {exc}")
+
     def audio_callback(indata, frames, time_info, status):
         chunk = bytes(indata)
         try:
@@ -843,6 +890,7 @@ def main():
 
     # Запускаем фоновый монитор тайм-аута внимания
     threading.Thread(target=timeout_monitor, daemon=True).start()
+    threading.Thread(target=refine_worker, daemon=True, name="stt-refine").start()
 
     current_phrase_max_rms = 0.0
     input_device = _read_audio_input_device()
@@ -951,30 +999,19 @@ def main():
                         _reset_recognizer(recognizer)
                         continue
 
-                # Уточнение фразы через онлайн Groq Whisper для диалога или полной команды
+                # Уточнение фразы через онлайн Groq Whisper для диалога или полной команды.
+                # Запрос уходит в refine_worker: в цикле он глушил микрофон на время ответа.
                 vosk_phrase = _strip_wake(text, detected_wake_word) if detected_wake_word else text
                 if is_active or (detected_wake_word and vosk_phrase):
-                    final_text = transcribe_audio(captured_audio, fallback_text=text, sample_rate=SAMPLERATE)
-                    whisper_wake = get_wake_word(final_text) if detected_wake_word else None
-                    wake_to_strip = whisper_wake or detected_wake_word
-                    phrase = _strip_wake(final_text, wake_to_strip) if wake_to_strip else final_text
+                    try:
+                        refine_queue.put_nowait(
+                            (captured_audio, text, detected_wake_word, session_epoch())
+                        )
+                    except queue.Full:
+                        logging.warning("[STT] Очередь уточнения полна, беру текст Vosk.")
+                        route_phrase(vosk_phrase, detected_wake_word)
                 else:
-                    phrase = vosk_phrase
-
-                if is_active:
-                    if detected_wake_word and not phrase:
-                        speak_activation()
-                    else:
-                        dispatch_phrase(phrase)
-                elif detected_wake_word:
-                    if phrase and is_quick_command(phrase):
-                        execute_command_async(phrase, safe_speak)
-                    else:
-                        wake_session()
-                        if phrase:
-                            dispatch_phrase(phrase)
-                        else:
-                            speak_activation()
+                    route_phrase(vosk_phrase, detected_wake_word)
             
             # 2. Обработка промежуточных результатов для мгновенного прерывания с блокировкой
             else:
