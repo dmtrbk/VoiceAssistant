@@ -10,7 +10,13 @@ from .common import (
     _voice_trade_enabled,
     parse_ai_alloc,
 )
-from .journal import format_journal, format_trade_line, _wants_journal
+from .journal import (
+    format_journal,
+    format_trade_line,
+    read_lifetime_pnl,
+    recompute_lifetime_pnl,
+    _wants_journal,
+)
 from .quotes import is_crypto_command
 from .skill import CryptoSkill
 from .trades import _extract_quote

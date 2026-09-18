@@ -724,7 +724,8 @@ class AIChatSkill(BaseSkill):
         except Exception:
             extra += (
                 "\n[Я]: Сейчас работаю на ASUS N53SV, Manjaro GNOME. Любитель Linux. "
-                "Фонд начал со ста долларов — шанс от тебя, Дмитрий, создатель и лучший друг. Крипта только Bybit."
+                "Фонд начал со ста долларов — шанс от тебя, Дмитрий, создатель и лучший друг. "
+                "Крипта только Bybit. Нет факта — не выдумываю. Домашний сосед, не дворецкий."
             )
 
         # Долговременная память о пользователе
@@ -747,6 +748,21 @@ class AIChatSkill(BaseSkill):
         )
 
         # Формат выдачи в зависимости от канала
+        how_are_you = False
+        today_ask = False
+        all_time_ask = False
+        iron_pace = False
+        try:
+            import conky_markets
+
+            how_are_you = conky_markets.is_how_are_you(text)
+            today_ask = conky_markets.is_today_clarification(text)
+            all_time_ask = conky_markets.is_all_time_ask(text)
+            iron_pace = conky_markets.is_iron_pace_talk(text)
+        except Exception:
+            pass
+        mood_thread = how_are_you or today_ask or all_time_ask or iron_pace
+
         if channel == "voice":
             extra += (
                 "\n[Канал: Голосовой ассистент]. Ответ озвучит синтез речи. "
@@ -766,6 +782,13 @@ class AIChatSkill(BaseSkill):
                 "ссылки и эмодзи при необходимости."
             )
             max_tokens = 750
+        if mood_thread:
+            # И в чате «как дела» / уточнения — коротко, как вживую.
+            extra += (
+                " Сейчас короткий разговор про дела и рынки: одно-два коротких предложения, "
+                "без списков и без развёрнутого отчёта."
+            )
+            max_tokens = min(max_tokens, 240)
 
         # Подмешивание реального состояния брокерского фонда при вопросе о сводке
         market_markers = (
@@ -800,6 +823,45 @@ class AIChatSkill(BaseSkill):
                         extra += f"\n[Реальное состояние твоего фонда на этот момент]: {broker_report}"
             except Exception as exc:
                 logging.warning(f"[Groq] Не удалось получить сводку брокера: {exc}")
+        elif all_time_ask:
+            try:
+                import conky_markets
+
+                extra += conky_markets.lifetime_briefing()
+            except Exception as exc:
+                logging.warning(f"[Groq] Не удалось получить рынки с покупки: {exc}")
+                extra += (
+                    "\n[Рынки с покупки]: цифр нет. Скажи коротко, что цифр сейчас нет, не выдумывай."
+                )
+        elif today_ask:
+            try:
+                import conky_markets
+
+                extra += conky_markets.today_clarification_briefing()
+            except Exception:
+                extra += (
+                    "\n[День рынков]: да, те цифры были за сегодня. Ответь коротко «да»."
+                )
+        elif iron_pace:
+            try:
+                import conky_markets
+
+                extra += conky_markets.iron_pace_briefing()
+            except Exception:
+                extra += (
+                    "\n[Железо]: коротко про темпы фонда, можно «ради того и тружусь», без сроков."
+                )
+        elif how_are_you:
+            try:
+                import conky_markets
+
+                extra += conky_markets.mood_briefing()
+            except Exception as exc:
+                logging.warning(f"[Groq] Не удалось получить день рынков: {exc}")
+                extra += (
+                    "\n[День рынков]: цифр нет. На «как дела» ответь коротко вроде «нормально», "
+                    "без выдуманного плюса и минуса."
+                )
         elif mentions_market or any(w in text_lower for w in ("торг", "токен", "айди", "закину", "кэш")):
             extra += (
                 " Хозяин говорит про фонд или планы торговли, сводку не просил. "
