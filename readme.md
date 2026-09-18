@@ -1,344 +1,194 @@
-# Голосовой ассистент «Джарвис» (Manjaro GNOME)
+# Джарвис — голосовой ассистент для Manjaro GNOME
 
-Локальный голосовой ассистент **Джарвис** для **Manjaro Linux** с сессией **GNOME**: гибридное распознавание речи (**Vosk** для мгновенных wake-words/стоп-слов + **Groq Whisper Turbo** для точного понимания реплик и слотов), качественный мужской синтез речи **Piper TTS (Dmitri)** с системой мгновенного кэширования, диалоговые способности в живом и сообразительном стиле, интерактивные многошаговые сценарии, консольный режим (CLI), интерактивный виджет-сфера на **PySide6**, плеер **Audacious**, локальный NLU и облачный диалоговый интеллект через **Groq**.
+Локальный ассистент под **Manjaro + GNOME** (Wayland / PipeWire): wake-words и стоп через **Vosk**, уточнение фраз через **Groq Whisper**, речь — **Piper (Dmitri)**, диалог — **Groq**, навыки — музыка, окна, биржа, крипта, умный дом, Telegram.
 
 Точки входа:
-- `assistant.py` — полный запуск (микрофон + Vosk + Piper + GUI сфера + Telegram-слушатель).
-- `cli.py` — консольный текстовый режим для работы в терминале, тестирования и SSH-сессий (с возможностью озвучки через динамики или без звука).
 
-**Среда разработки и поддержки:** Manjaro Linux, GNOME (Wayland / XWayland). Пакеты — `pacman` или `pamac`. Звук — PipeWire (`wpctl`). Служба — `systemd --user`. Установщик (`setup.sh`) полностью настраивает всё окружение.
+| Команда | Назначение |
+|---------|------------|
+| `python assistant.py` | Микрофон, Vosk, Piper, сфера, Telegram |
+| `python assistant.py --no-gui` | То же без виджета |
+| `python cli.py` | Текст в терминале (с озвучкой) |
+| `python cli.py --mute` | Только текст |
+| `python cli.py "какая погода"` | Одна команда и выход |
 
----
+Служба пользователя: `voice-assistant.service` (ставит `setup.sh`).
 
-## 🌟 Ключевые возможности
-
-- **Личность и выбор характера:** Мужской голос Piper (`ru_RU-dmitri-medium.onnx`), активация по имени «Джарвис», «Умник», «Гаврила» или «Гаврюша», общение в мужском роде («рад», «понял», «сделал», «готов»). Выбор пресета характера прямо из GUI настроек или голосом:
-  * **Джарвис (Классический)** — сдержанный, тактичный и уверенный тон.
-  * **Саркастичный (Ироничный)** — острый на язык, с тонкой иронией и дружескими подколками.
-  * **Брутальный (Без цензуры)** — дерзкий, прямолинейный, без морализаторства, с крепким юмором и русским матом к месту.
-  * **Свой парень (Бро)** — простой, открытый, разговорный стиль на «ты», как со старым проверенным другом.
-  * **Пользовательский** — произвольный системный промпт из `skills/persona_config.json`.
-- **TTS-кэширование и очередь речи:** системные отклики прогреваются в `.tts_cache/`; ответ Groq озвучивается по предложениям, следующий кусок синтезируется, пока играет текущий.
-- **Управление состоянием диалога (State Management & FSM):** стек интерактивных контекстов (FSM Stack) с поддержкой вложенных шагов и подтверждений, декларативный `FSMHandler`, сессионное состояние `session_data` (в стиле Alice SDK / Yandex Dialogs) и graceful fallback к LLM во время пауз в сценарии.
-- **Интерактивный диалоговый контекст:** многошаговые сценарии (игра «Больше — Меньше»). Пока партия идёт, «стоп» / «сдаюсь» / «хватит» выходят из игры и не глушат плеер. Сон сессии сбрасывает контекст.
-- **Консольный режим (CLI):** `cli.py` — текстовый диалог в терминале (с озвучкой или `--mute`). Озвучка идёт очередью и не блокирует ответ модели.
-- **Сессия внимания (Attention Timeout):** После обращения ассистент слушает последующие команды без повторения имени (тайм-аут из `.env`, по умолчанию 12 с, при музыке 5 с).
-- **Живой диалог и Full-Duplex Resumption:** паузы «мм» / «секунду» / «так-так» не срывают сессию; «что?» / «не понял» повторяет последнюю мысль; «продолжай» / «договори» возобновляет недочитанную речь после перебивания; уточнение вариантов (disambiguation); каша STT — до трёх уточнений, без «перефразируй». Голый глагол («включи») спрашивает объект и ждёт «музыку». «замолчи» гасит только речь, задачу навыка не отменяет.
-- **Barge-in (Мгновенное перебивание):** имя «Джарвис» или «стоп» / «замолчи» / «спать» гасит колонку и обрывает недочитанный ответ Groq.
-- **Погода (Open-Meteo):** прогноз на сегодня и завтра. Без города — точка `DEFAULT_LAT`/`DEFAULT_LON` (озвучка «здесь», если `DEFAULT_CITY` пуст) либо геокодинг `DEFAULT_CITY`. «Что надеть» / «чемодан» — короткий совет по одежде.
-- **Биржа и портфель (Т-Инвест):** котировки Мосбиржи, сводка счёта. Сделки голосом («купи», «продай», «поторгуй») — тумблер «Сделки голосом» в настройках (по умолчанию выкл, пишет `stocks_voice_trade`) или `TINKOFF_VOICE_TRADE=true`; без числа — один лот, «все / целиком» — максимум. Фоновая авто-ребалансировка — тумблер «Автоторговля» (пишет `skills_enabled.json`) или `TINKOFF_AUTO_TRADE=true`; пустой флаг и нет ключа в JSON — только песочница. Без токена — публичные котировки ISS и ручная книжка `quiet_book.json`. **При включённых сделках живой токен с правом торговли выставляет реальные заявки**; для тестов `TINKOFF_SANDBOX=true`. Сертификат Минцифры: `certs/russian_trusted_root_ca.pem` или `TINKOFF_CA_BUNDLE`.
-- **Крипта (Bybit спот):** курс без ключа; сводка счёта с `BYBIT_API_KEY` / `BYBIT_API_SECRET`. Сделки голосом — отдельный тумблер (по умолчанию выкл) или `CRYPTO_VOICE_TRADE=true`. Без суммы — минимум биржи (~5 USDT), «на 20 долларов» — сумма, «все / весь» — максимум. Автоторговля — свой тумблер / `CRYPTO_AUTO_TRADE`; пустой флаг — авто только на тестнете. ИИ выбирает доли монет из ленты Bybit, без плеча. Тумблеры акций на крипту не действуют. «Что такое биткоин» — Википедия. Тестнет: `BYBIT_TESTNET=true`.
-- **Conky рынков:** правый нижний угол, дневной +/- Т-Инвест (₽) и Bybit ($). Плюс светло-серый, минус темнее. После сделки сразу, иначе раз в 90 мин. Ставит `setup.sh` в `~/.conky/conky_markets.conf`.
-- **Таймеры:** Фоновый отсчет («поставь таймер на 5 минут», «сколько осталось»). Ответ с деталью: «Поставил на 5 минут.» Без длительности — «На сколько?»
-- **Быстрый калькулятор:** Мгновенный расчет математических выражений, корней, степеней, процентов и словесных чисел без задержки на LLM.
-- **Игры и рандомайзер:** «Больше — Меньше», кубики d6/d20, случайное число, выбор из вариантов. Тумблер в окне настроек.
-- **Развлечения:** Анекдоты, интересные факты, тосты, сказки, мудрые цитаты и комплименты.
-- **Фильмы, сериалы и ВК Видео:** Полноэкранный просмотр видео через ВК Видео и плеер MPV с аппаратным ускорением; голосовое управление (пауза, перемотка вперед/назад, закрытие); поиск в браузере; автоматическая пауза музыки.
-- **Музыка, радио и звуки природы:** Радиостанции (Рекорд, Европа Плюс, Дорожное, Наше и др.), звуки природы (дождь, костер, лес, море, белый шум), локальные папки и `.m3u` из `~/Музыка`; голое «включи музыку» играет `~/Музыка/Jarvis` (скачанные треки); станция называется вслух («Включаю Радио Рекорд»); поиск и скачивание песни через `yt-dlp`; приглушение плеера (ducking до 8%) на время диалога.
-- **Составные быстрые команды:** «следующий трек и сделай громче» выполняется целиком: и переключение трека, и громкость плеера.
-- **Фильтр утечки колонок:** тихий звук колонок без имени активации отсекается; при играющей музыке сессия короче (`ATTENTION_TIMEOUT_MUSIC`).
-- **Поиск и карты:** Яндекс / Google Поиск, Яндекс / Google Карты и маршруты. «Построй маршрут» без места — «Куда?»
-- **Картинки:** «нарисуй рыжего кота» — Cloudflare Workers AI (**FLUX.1 schnell**), файл в `~/Изображения/Jarvis` и в Telegram. Нужны `CLOUDFLARE_ACCOUNT_ID` и `CLOUDFLARE_API_TOKEN` (тумблер «Картинки»).
-- **Охрана:** Веб-камера (`CAMERA_INDEX` в `.env`, по умолчанию `/dev/video0`), гашение экрана, детекция движения через OpenCV, снимки тревоги в Telegram.
-- **Умный дом:** Лампы Xiaomi / Yeelight; Home Assistant (`HA_URL`, `HA_TOKEN`) — устройства и сцены по имени, тумблер в настройках.
-- **Системное управление:** Регулировка громкости PipeWire (`wpctl`), запуск/закрытие утилит (`htop`, `neofetch`, `gnome-system-monitor`), окна GNOME (свернуть все, закрыть окно / все окна), статьи Википедии.
-- **Диалог с памятью (Groq):** Свободное общение на 1–2 коротких предложения, с деталью из реплики; не хватает слота — один уточняющий вопрос. История беседы, профиль («запомни, что…», «что ты обо мне знаешь»). Голосовой ответ стримится по предложениям.
-- **Настройки навыков и режимов:** правый клик по сфере или «открой настройки» / «настройки ассистента» — выбор режима распознавания речи (гибридный Vosk + Groq Whisper Turbo или только оффлайн Vosk), модели диалога (быстрая GPT-OSS 20B по умолчанию; сильная GPT-OSS 120B включается, когда Cursor закрыт), выбор характера ассистента (Джарвис, Саркастичный, Брутальный, Свой парень, Пользовательский) и тумблеры навыков (свет, Home Assistant, кино, музыка, погода, биржа, крипта, картинки, таймеры и др.). У биржи и у крипты отдельно: «Сделки голосом» (по умолчанию выкл) и «Автоторговля». «Открой системные настройки» — параметры GNOME. Перезапуск службы не требуется.
+Полный список фраз — в [`commands.txt`](commands.txt).
 
 ---
 
-## 📁 Структура проекта
+## Возможности (кратко)
 
-```
-VoiceAssistant/
-├── assistant.py              # Основной оркестратор: Vosk, Piper, сессия, GUI
-├── stt.py                    # Гибридное STT: буфер звука, Groq Whisper Turbo, оффлайн Vosk
-├── runtime_state.py          # Поколение речи для barge-in и отмены стрима Groq
-├── cli.py                    # Консольный текстовый интерфейс (CLI)
-├── tts_cache.py              # Кэширование аудио для мгновенного отклика TTS
-├── context_manager.py        # Диалоговые контексты (игры, подтверждения)
-├── telegram_listener.py      # Входящие команды Telegram Bot API
-├── commands.py               # Маршрутизатор по цепочке навыков
-├── dialogue_repair.py        # Паузы, «что?», голые глаголы, три уточнения
-├── triggers.py               # Общие триггеры: стоп / замолчи / спать / тишина
-├── player_control.py         # Старт/стоп Audacious и Glava, авария «стоп»
-├── music_library.py          # Папки, плейлисты, каталог ~/Музыка/Jarvis
-├── window_control.py         # Окна GNOME: свернуть все, закрыть окно / все
-├── gnome/                    # Расширение Shell для сворачивания/закрытия окон
-├── browser.py                # Открытие URL (Chrome, иначе xdg-open)
-├── volume_control.py         # Ducking громкости Audacious (кэш на диске)
-├── indicator.py              # Интерактивная сфера статусов на PySide6
-├── settings_ui.py            # Графическое окно тумблеров навыков
-├── skill_settings.py         # Вкл/выкл навыков без перезапуска службы
-├── nlu.py                    # Прощание и монетка: точное и нечёткое совпадение фраз
-├── intents.json              # Базовые интенты (прощания, монетка)
-├── signal_advisor.py         # Советник: сигналы Т-Инвест + моментум 10д → Telegram
-├── crypto_advisor.py         # Советник: ИИ выбирает спот Bybit, заявки не ставит
-├── conky_markets.py          # Строки +/- для Conky (биржа ₽, крипта $)
-├── conky/                    # Шаблон виджета и иконки Tinkoff / Bitcoin
-├── setup.sh                  # Скрипт полной автоустановки окружения и systemd
-├── setup_echo_cancel.sh      # Настройка PipeWire WebRTC AEC (эхоподавление)
-├── commands.txt              # Подробная документация всех поддерживаемых команд
-├── requirements.txt          # Python-зависимости
-├── .env.example              # Шаблон переменных окружения
-├── .env                      # Конфигурация и API-ключи (не в git)
-├── model/                    # Модель распознавания Vosk (не в git)
-├── piper/                    # Бинарник Piper и .onnx модели (не в git)
-└── skills/
-    ├── __init__.py           # Регистрация и приоритет навыков
-    ├── groq_client.py        # Общий клиент Groq и цепочка моделей
-    ├── weather.py            # Погода и прогноз (Open-Meteo)
-    ├── stocks.py             # Биржа, портфель Т-Инвест, авто-ребалансировка
-    ├── crypto.py             # Спот Bybit: курс, портфель, сделки, ИИ выбирает монеты
-    ├── image_gen.py          # Картинки: Cloudflare Flux schnell и sendPhoto в Telegram
-    ├── timer.py              # Таймеры и будильники
-    ├── calculator.py         # Быстрый калькулятор и математика
-    ├── jokes_facts.py        # Анекдоты, факты, тосты, сказки, комплименты
-    ├── games.py              # Игра «Больше-Меньше», кубики d6/d20, рандомайзер
-    ├── datetime_skill.py     # Дата, время, день недели
-    ├── movie_skill.py        # Фильмы, сериалы, ВК Видео и плеер MPV
-    ├── music_search.py       # Поиск и скачивание песни в ~/Музыка/Jarvis
-    ├── audacious.py          # Музыка, радио, папки, плейлисты и звуки природы
-    ├── web_search.py         # Поиск в интернете (Яндекс / Google)
-    ├── maps_search.py        # Карты и маршруты (Яндекс / Google Карты)
-    ├── xiaomi_bulb.py        # Умная лампа Xiaomi / Yeelight
-    ├── home_assistant.py     # Home Assistant: устройства и сцены
-    ├── security.py           # Видеонаблюдение и тревожные снимки
-    ├── system.py             # Системные команды и утилиты
-    ├── restart.py            # Перезапуск службы
-    ├── assistant_settings.py # «Открой настройки ассистента» и смена характера
-    ├── pentagon.py           # Анимация cmatrix («пентагон» / «матрица»)
-    ├── telegram.py           # Запуск Telegram Desktop
-    ├── persona.py            # Пресеты характера: Джарвис, саркастичный, брутальный, бро
-    ├── local_nlu.py          # Локальные быстрые ответы
-    └── ai_chat.py            # Groq (свободный диалог с контекстом)
-```
+- **Сессия:** имена «джарвис / умник / гаврила / гаврюша», тайм-аут внимания, barge-in («стоп», «замолчи», имя), ремонт диалога («что?», «продолжай»), ducking Audacious.
+- **STT:** `hybrid` (Vosk + Whisper в фоне) или `vosk`; режим в настройках сферы.
+- **Характер:** пресеты в GUI / голосом (классический, саркастичный, брутальный, бро, свой промпт).
+- **Навыки:** погода, таймеры, калькулятор, музыка и радио, фильмы (MPV), поиск и карты, картинки (Cloudflare Flux), охрана с камерой, Xiaomi / Home Assistant, окна GNOME, Википедия.
+- **Биржа (Т-Инвест) и крипта (Bybit):** котировки, сводка, сделки голосом и автостол — отдельные тумблеры; по умолчанию сделки выкл. Conky в правом нижнем углу — дневной +/-.
+- **Каналы:** один маршрутизатор для голоса, CLI и Telegram.
 
 ---
 
-## 🛠️ Установка и первый запуск
+## Установка
 
-На новой машине **не копируют `.venv`**. С GitHub — исходник, виртуалка собирается заново.
+На новой машине **не копируют `.venv`**. С GitHub — исходник, окружение собирается заново.
 
 ```bash
 git clone https://github.com/dmtrbk/VoiceAssistant.git
 cd VoiceAssistant
+git checkout experimental   # актуальная ветка разработки
 chmod +x setup.sh setup_echo_cancel.sh
 ./setup.sh
 ```
 
-Скрипт:
-1. Поставит пакеты через `pacman` (Manjaro / GNOME).
-2. Создаст `.venv` и поставит Python-зависимости из `requirements.txt`.
-3. Скачает **Vosk** (`vosk-model-small-ru-0.22`) в `model/`.
-4. Скачает **Piper TTS** и голос Дмитрия в `piper/`.
-5. Создаст `.env` из `.env.example`, если файла ещё нет.
-6. Поставит виджет Conky рынков в `~/.conky` (и допишет `conky-startup.sh`, если он уже есть).
-7. Включит пользовательскую службу `voice-assistant.service`.
+Что делает `setup.sh`:
 
-Дальше впиши ключи в `.env` (`GROQ_API_KEY`, для акций `TINKOFF_TOKEN`, для крипты `BYBIT_API_KEY` / `BYBIT_API_SECRET`, картинки — Cloudflare, Telegram). Сделки голосом по умолчанию выключены и у акций, и у крипты. Живой фон акций — `TINKOFF_AUTO_TRADE=true` или тумблер. Крипта: `CRYPTO_AUTO_TRADE` или тумблер; пустой флаг включает авто только при `BYBIT_TESTNET=true`.
+1. Пакеты через `pacman` (PipeWire, Audacious, MPV, yt-dlp, Conky и др.).
+2. Создаёт `.venv` и ставит зависимости из `requirements.txt`.
+3. Скачивает Vosk (`model/`) и Piper (`piper/`).
+4. Создаёт `.env` из `.env.example`, если файла ещё нет, и ставит права **`chmod 600`**.
+5. Кладёт виджет рынков в `~/.conky`.
+6. Включает `~/.config/systemd/user/voice-assistant.service`.
 
-### Переезд на новое железо
+Дальше заполните `.env` (минимум `GROQ_API_KEY`). Остальное — по желанию: Telegram, Т-Инвест, Bybit, Cloudflare, HA, лампа.
 
-Со старой машины перенести **только секреты и память**, не `.venv`:
+### Переезд на другое железо
+
+Со старой машины — только секреты и память, не `.venv`:
 
 ```bash
-# на новой машине, после clone + ./setup.sh
-scp старый-хост:~/VoiceAssistant/.env ~/VoiceAssistant/.env
-scp старый-хост:~/VoiceAssistant/skills_enabled.json ~/VoiceAssistant/skills_enabled.json
-scp старый-хост:~/VoiceAssistant/jarvis_holds.json \
-    старый-хост:~/VoiceAssistant/jarvis_bought.json \
-    старый-хост:~/VoiceAssistant/jarvis_trades.json \
-    старый-хост:~/VoiceAssistant/jarvis_crypto_holds.json \
-    старый-хост:~/VoiceAssistant/jarvis_crypto_bought.json \
-    старый-хост:~/VoiceAssistant/jarvis_crypto_trades.json \
+# после clone + ./setup.sh на новой
+scp старый:~/VoiceAssistant/.env ~/VoiceAssistant/.env
+chmod 600 ~/VoiceAssistant/.env
+scp старый:~/VoiceAssistant/skills_enabled.json ~/VoiceAssistant/
+scp старый:~/VoiceAssistant/jarvis_{holds,bought,trades}.json \
+    старый:~/VoiceAssistant/jarvis_crypto_{holds,bought,trades}.json \
     ~/VoiceAssistant/
+systemctl --user restart voice-assistant.service
 ```
 
-`jarvis_*.json` — какие бумаги и монеты купил сам, что купил стол, дневник сделок. Без них Джарвис на новом ПК не вспомнит Норникель и биткоин. `skills_enabled.json` — тумблеры навыков. `.env` — ключи. После копирования: `systemctl --user restart voice-assistant.service`.
-
----
-
-## ⚙️ Настройка `.env`
-
-Отредактируйте файл `.env`:
-
-```ini
-# Groq — облачный диалог и гибридное STT Groq Whisper Turbo
-GROQ_API_KEY=ваш_ключ_groq
-GROQ_MODEL=openai/gpt-oss-20b
-# Режим распознавания речи: hybrid (Vosk + Groq Whisper) или vosk (только оффлайн)
-STT_MODE=hybrid
-# Характер ассистента: jarvis, sarcastic, brutal, buddy, custom
-PERSONA_PRESET=jarvis
-
-# T-Invest — навык «Биржа и портфель» (опционально)
-# Сделки голосом по умолчанию выкл (тумблер или TINKOFF_VOICE_TRADE=true).
-# Без числа — 1 лот; «все» — максимум.
-# Фон ~раз в 45 мин: тумблер в настройках (skills_enabled.json) или TINKOFF_AUTO_TRADE=true.
-# Пустой флаг и нет ключа в JSON — автоторговля лишь в песочнице.
-# TINKOFF_INVEST_TOKEN — алиас токена. TINKOFF_CA_BUNDLE — свой PEM (иначе certs/ в репо).
-TINKOFF_TOKEN=
-TINKOFF_ACCOUNT_ID=
-TINKOFF_SANDBOX=false
-TINKOFF_VOICE_TRADE=
-TINKOFF_AUTO_TRADE=
-TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
-# Крипта — спот Bybit (не Т-Инвест). Ключ не нужен для курса.
-# Сделки: тумблер у навыка Крипта или CRYPTO_VOICE_TRADE=true.
-# Авто: CRYPTO_AUTO_TRADE=true (пустое — только тестнет).
-BYBIT_API_KEY=
-BYBIT_API_SECRET=
-BYBIT_TESTNET=false
-CRYPTO_VOICE_TRADE=
-CRYPTO_AUTO_TRADE=
-CRYPTO_WATCHLIST=BTC,ETH,SOL
-
-# Cloudflare Workers AI — картинки (FLUX.1 schnell)
-CLOUDFLARE_ACCOUNT_ID=
-CLOUDFLARE_API_TOKEN=
-
-# Telegram-бот: управление и фото охраны (опционально)
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
-
-# Охрана: камера (0 = /dev/video0)
-# CAMERA_INDEX=0
-
-# Голос синтеза Piper TTS и скорость
-PIPER_MODEL=ru_RU-dmitri-medium.onnx
-VOICE_SPEED=1.0
-
-# Погода по умолчанию
-# Если заданы DEFAULT_LAT и DEFAULT_LON, фраза «какая погода» без города
-# идёт в эту точку. DEFAULT_CITY тогда только имя вслух; пустое — «здесь».
-DEFAULT_CITY=Москва
-# DEFAULT_LAT=55.7558
-# DEFAULT_LON=37.6173
-
-# Лампа Xiaomi / Yeelight (опционально)
-XIAOMI_BULB_IP=
-XIAOMI_BULB_TOKEN=
-
-# Home Assistant (опционально)
-HA_URL=http://127.0.0.1:8123
-HA_TOKEN=
-
-# Сессия внимания (в секундах) в тишине и при музыке
-ATTENTION_TIMEOUT=12
-ATTENTION_TIMEOUT_MUSIC=5
-
-# Настройки приглушения музыки (Ducking)
-DUCKING_VOLUME=8
-DUCKING_MODE=duck
-MIN_SPEECH_RMS=200
-
-# Поисковик и карты: yandex или google
-SEARCH_PROVIDER=yandex
-MAPS_PROVIDER=yandex
-AI_PROVIDER=yandex
-
-# Консольный режим и отображение сферы
-CONSOLE_MODE=false
-GUI_ENABLED=true
-```
-
----
-
-## 💻 Использование консольного режима (CLI)
-
-Для быстрого тестирования навыков, работы без микрофона или по SSH используйте `cli.py`:
-
-```bash
-# 1. Интерактивный диалог в терминале (с озвучкой через динамики)
-python cli.py
-
-# 2. Интерактивный режим БЕЗ звука (только текст)
-python cli.py --mute
-
-# 3. Разовая команда напрямую из командной строки
-python cli.py "сколько будет 25 умножить на 4"
-python cli.py "какая погода в москве"
-python cli.py "как там портфель"
-
-# 4. Запуск голосового ассистента без графической сферы
-python assistant.py --no-gui
-
-# Текстовый режим удобнее через cli.py: python assistant.py --cli
-# всё равно поднимает Telegram-слушатель и модели Vosk при импорте.
-```
-
----
-
-## 🎧 Аппаратное эхоподавление (PipeWire WebRTC AEC)
-
-Чтобы микрофон не улавливал музыку и речь ассистента из колонок, включите аппаратное эхоподавление:
+### Эхоподавление
 
 ```bash
 ./setup_echo_cancel.sh
 ```
 
-Скрипт ставит этот микрофон источником по умолчанию. Опорный сигнал AEC берётся с **текущего** выхода — встроенные колонки, HDMI или Bluetooth, что выбрано в GNOME. Выход менять не нужно. Автопереключение Bluetooth в гарнитуру (HSP/HFP) выключается, чтобы музыка не падала в моно.
+Ставит микрофон с WebRTC AEC по умолчанию. Опорный сигнал — текущий выход колонок / HDMI / Bluetooth.
 
----
-
-## 🚦 Управление фоновой службой `systemd`
-
-Пользовательский юнит (не system-wide) пишет `setup.sh`:
-
-`~/.config/systemd/user/voice-assistant.service`
-
-Имя службы: `voice-assistant.service`. После ручной правки файла: `systemctl --user daemon-reload`.
-
-Что внутри юнита (пути подставляет установщик):
-
-- `ExecStart` — `.venv/bin/python assistant.py` из каталога проекта
-- `Restart=always`, `RestartSec=3`
-- `TimeoutStopSec=5` — SIGTERM сразу `os._exit`; иначе systemd шлёт SIGKILL
-- `After=` сеть, PipeWire, `graphical-session`
-- `WantedBy=default.target`
+### Служба
 
 ```bash
-# Запуск / Перезапуск / Остановка
-systemctl --user start voice-assistant.service
-systemctl --user restart voice-assistant.service
-systemctl --user stop voice-assistant.service
-systemctl --user enable voice-assistant.service
-
-# Проверка статуса и просмотр логов в реальном времени
 systemctl --user status voice-assistant.service
+systemctl --user restart voice-assistant.service
 journalctl --user -u voice-assistant.service -f
 ```
 
-Перезапуск голосом: *«перезагрузись»*, *«перезапустись»*, *«рестарт»*, *«перезагрузи ассистента»*, *«перезапусти ассистента»*.
+Голосом: «перезапустись», «рестарт», «перезапусти ассистента».
 
 ---
 
-## 🔍 Проверки кода на GitHub
+## Настройка `.env`
 
-После пуша в `experimental` или `main` GitHub сам прогоняет тесты и смотрит код. Ничего ставить на компьютер не нужно.
+Шаблон — [`.env.example`](.env.example). Файл `.env` в git не попадает; после создания права должны быть `600`.
 
-**Куда смотреть**
+Главное:
 
-1. Репозиторий на GitHub → вкладка **Actions**. Там два сценария:
-   - **Tests** — те же unit-тесты, что локально (`python -m unittest discover -s tests -t .`). Красный крест = что-то сломалось, открыть job и читать лог. Флаг `-t .` не убирать: без него не подхватится `tests/__init__.py`, который запрещает тестам ходить в сеть.
-   - **CodeQL** — поиск типичных дыр (секреты в коде, опасные вызовы). Находки: вкладка **Security** → **Code scanning**.
-2. В **Pull Request** те же проверки висят внизу как галочки. Пока Tests красный — лучше не сливать.
-3. **Dependabot** раз в неделю сам откроет PR вида `Bump requests from …`, если вышла уязвимая библиотека. Открыть PR → посмотреть diff → **Merge**, если тесты зелёные.
+```ini
+GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-20b
+STT_MODE=hybrid          # hybrid | vosk
+PERSONA_PRESET=jarvis    # jarvis | sarcastic | brutal | buddy | custom
 
-**Один раз руками в настройках репозитория**
+# Биржа (опционально). Сделки голосом по умолчанию выкл.
+TINKOFF_TOKEN=
+TINKOFF_SANDBOX=false
+TINKOFF_VOICE_TRADE=
+TINKOFF_AUTO_TRADE=
+TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
 
-GitHub → **Settings** → **Code security and analysis** (или **Advanced Security**):
+# Крипта Bybit (опционально)
+BYBIT_API_KEY=
+BYBIT_API_SECRET=
+BYBIT_TESTNET=false
+CRYPTO_VOICE_TRADE=
+CRYPTO_AUTO_TRADE=
 
-- **Secret scanning** — включить. GitHub будет писать, если в коммит попал токен (`GROQ_API_KEY`, `TINKOFF_*`, Telegram).
-- **Dependabot alerts** и **Dependabot security updates** — включить, если ещё не горят.
-- Если репозиторий **приватный** и CodeQL в Actions падает с ошибкой про Advanced Security — включить **GitHub Advanced Security** / **Code scanning** на той же странице. Для публичного репо это бесплатно.
+# Картинки Cloudflare Workers AI
+CLOUDFLARE_ACCOUNT_ID=
+CLOUDFLARE_API_TOKEN=
 
-**ИИ-ревью пул-реквестов (по желанию)**
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
 
-Это не файл в репозитории, а приложение к GitHub:
+ATTENTION_TIMEOUT=12
+ATTENTION_TIMEOUT_MUSIC=5
+DUCKING_VOLUME=8
+DUCKING_MODE=duck
+SEARCH_PROVIDER=yandex
+MAPS_PROVIDER=yandex
+```
 
-1. Открыть [CodeRabbit](https://github.com/apps/coderabbitai) → **Install** → выбрать этот репозиторий.
-2. Дальше в каждом PR появится комментарий-ревью. Отвечать боту можно в треде, как обычному ревьюеру.
+Живой токен Т-Инвест с правом торговли при включённых сделках выставляет **реальные** заявки. Для отладки — `TINKOFF_SANDBOX=true`. То же для крипты: на боевом Bybit осторожно; безопаснее сначала `BYBIT_TESTNET=true`.
 
-То же для [Cursor Bugbot](https://github.com/apps/cursor-bugbot), если пользуетесь Cursor. Можно поставить позже, когда освоитесь с Actions.
+Тумблеры в GUI (правый клик по сфере или «открой настройки») пишут `skills_enabled.json` и важнее пустых флагов в `.env` после рестарта процесса.
+
+---
+
+## Структура репозитория
+
+```
+VoiceAssistant/
+├── assistant.py           # Оркестратор: Vosk, Piper, сессия, уточнение STT в фоне
+├── stt.py                 # Буфер фразы, Whisper, fallback на Vosk
+├── cli.py                 # Текстовый режим
+├── commands.py            # Маршрутизатор навыков
+├── dialogue_repair.py     # Паузы, «что?», голые глаголы
+├── context_manager.py     # FSM / подтверждения (в т.ч. выключение ПК)
+├── telegram_listener.py
+├── tts_cache.py
+├── volume_control.py      # Ducking Audacious
+├── window_control.py      # Окна GNOME
+├── indicator.py / settings_ui.py / skill_settings.py
+├── signal_advisor.py / crypto_advisor.py / conky_markets.py
+├── setup.sh / setup_echo_cancel.sh
+├── commands.txt           # Справочник фраз
+├── requirements.txt / .env.example
+├── certs/                 # Корневой CA Минцифры для Т-Инвест
+├── gnome/                 # Расширение Shell для окон
+├── conky/                 # Шаблон виджета рынков
+├── tests/                 # Unit-тесты (сеть из тестов запрещена)
+└── skills/
+    ├── stocks/            # Т-Инвест: quotes, trades, desk, journal
+    ├── crypto/            # Bybit: то же разбиение
+    ├── ai_chat.py         # Groq-диалог
+    ├── persona.py         # Характеры
+    └── …                  # Погода, музыка, охрана, HA, …
+```
+
+Каталоги `model/` и `piper/` в git не лежат — их качает установщик.
+
+---
+
+## Тесты и CI
+
+Локально (обязательно с `-t .`, иначе не подхватится запрет сети в `tests/__init__.py`):
+
+```bash
+source .venv/bin/activate
+python -m unittest discover -s tests -t .
+```
+
+Намеренный выход в сеть из тестов: `ALLOW_TEST_NETWORK=1`.
+
+На GitHub (ветки `main` и `experimental`): **Tests** и **CodeQL**. В Actions для тестов ставятся PortAudio и OpenGL — без них падает импорт `assistant` / PySide6.
+
+CodeQL может пометить HMAC-SHA256 подписи Bybit как «слабый хеш пароля» — это ложное срабатывание: так требует протокол биржи, не хранение паролей.
+
+---
+
+## Безопасность (кратко)
+
+- `.env` — только владелец (`chmod 600`), не коммитить.
+- Сделки голосом и автоторговля — отдельные тумблеры, по умолчанию выкл.
+- «Выключи компьютер» сначала спрашивает подтверждение («Точно выключить компьютер?»).
+- Снимки охраны пишутся в `surveillance_snaps/` и уходят в Telegram — следите за диском и чатом.
