@@ -1,10 +1,11 @@
 import unittest
 from unittest.mock import patch
 
+from context_manager import clear_active_context, handle_context_input, is_in_context
 from skills.base import RequestContext
 from skills.home_assistant import HomeAssistantSkill
 from skills.movie_skill import MovieSkill, _is_close_command
-from skills.system import SystemSkill, detect_display_power_action
+from skills.system import SystemSkill, detect_display_power_action, is_shutdown_text
 
 
 class TestDisplayPowerCommand(unittest.TestCase):
@@ -106,6 +107,74 @@ class TestDisplayPowerCommand(unittest.TestCase):
         with patch("skills.movie_skill._player_alive", return_value=True):
             self.assertFalse(_is_close_command("выключи экран"))
             self.assertFalse(MovieSkill().can_handle(RequestContext(raw_text="выключи экран")))
+
+
+class TestShutdownConfirmation(unittest.TestCase):
+    def setUp(self):
+        self.skill = SystemSkill()
+        self.spoken = []
+        clear_active_context()
+
+    def tearDown(self):
+        clear_active_context()
+
+    def _ask_shutdown(self, popen):
+        self.skill.execute(
+            RequestContext(raw_text="выключи компьютер", speak=self.spoken.append)
+        )
+        self.assertEqual(self.spoken, ["Точно выключить компьютер?"])
+        popen.assert_not_called()
+        self.assertTrue(is_in_context())
+
+    def test_detects_only_pc_shutdown(self):
+        self.assertTrue(is_shutdown_text("выключи компьютер"))
+        self.assertTrue(is_shutdown_text("отключи пк"))
+        self.assertFalse(is_shutdown_text("выключи экран"))
+        self.assertFalse(is_shutdown_text("выключи свет"))
+
+    def test_asks_before_shutdown(self):
+        with patch("skills.system.subprocess.Popen") as popen:
+            self._ask_shutdown(popen)
+
+    def test_yes_shuts_down(self):
+        with (
+            patch("skills.system.time.sleep"),
+            patch("skills.system.subprocess.Popen") as popen,
+        ):
+            self._ask_shutdown(popen)
+            handled, _sleep = handle_context_input("да", self.spoken.append)
+
+        self.assertTrue(handled)
+        popen.assert_called_once_with(["shutdown", "now"])
+        self.assertEqual(self.spoken[-1], "Выключаю.")
+        self.assertFalse(is_in_context())
+
+    def test_no_cancels(self):
+        with (
+            patch("skills.system.time.sleep"),
+            patch("skills.system.subprocess.Popen") as popen,
+        ):
+            self._ask_shutdown(popen)
+            handled, _sleep = handle_context_input("нет", self.spoken.append)
+
+        self.assertTrue(handled)
+        popen.assert_not_called()
+        self.assertEqual(self.spoken[-1], "Отменил.")
+        self.assertFalse(is_in_context())
+
+    def test_other_command_cancels_and_goes_to_skills(self):
+        with (
+            patch("skills.system.time.sleep"),
+            patch("skills.system.subprocess.Popen") as popen,
+        ):
+            self._ask_shutdown(popen)
+            handled, _sleep = handle_context_input("включи свет", self.spoken.append)
+
+        popen.assert_not_called()
+        self.assertEqual(self.spoken[-1], "Отменил.")
+        # handled=False — фразу должен добрать обычный маршрутизатор.
+        self.assertFalse(handled)
+        self.assertFalse(is_in_context())
 
 
 if __name__ == "__main__":

@@ -6,8 +6,10 @@ import re
 import subprocess
 import shutil
 import time
+from context_manager import push_context
 from skills.base import BaseSkill, RequestContext
 from skills.security import set_display_power
+from skills.text_utils import has_any_word
 from window_control import (
     close_all_windows,
     close_focused_window,
@@ -31,6 +33,35 @@ _DISPLAY_ON_RE = re.compile(
     rf"(?:{_DISPLAY_ON_VERB}(?:\s+пожалуйста)?\s+{_DISPLAY_NOUN}"
     rf"|{_DISPLAY_NOUN}\s+{_DISPLAY_ON_VERB})"
 )
+
+
+_SHUTDOWN_YES = ("да", "ага", "давай", "выключай", "подтверждаю", "точно", "конечно", "верно")
+_SHUTDOWN_NO = ("нет", "не", "отставить", "погоди", "подожди")
+
+
+def is_shutdown_text(text: str) -> bool:
+    """«Выключи компьютер» — не экран, не свет, не музыка."""
+    lowered = (text or "").lower()
+    return any(w in lowered for w in ("выключ", "отключ")) and any(
+        w in lowered for w in ("компьютер", "пк")
+    )
+
+
+def confirm_shutdown(text: str, speak) -> tuple[bool, bool]:
+    """Ответ на «Точно выключить компьютер?». Гасим машину только по явному «да»."""
+    if has_any_word(text, _SHUTDOWN_YES):
+        logging.info("[Система] Выключение подтверждено.")
+        speak("Выключаю.")
+        time.sleep(1)
+        subprocess.Popen(["shutdown", "now"])
+        return True, True
+
+    logging.info("[Система] Выключение отменено: '%s'", text)
+    speak("Отменил.")
+    if has_any_word(text, _SHUTDOWN_NO):
+        return True, True
+    # Сказали не «нет», а новую команду — отдаём её навыкам, а не съедаем.
+    return False, True
 
 
 def detect_display_power_action(text: str) -> str | None:
@@ -62,10 +93,9 @@ class SystemSkill(BaseSkill):
             "громче", "громкость плюс", "тише", "громкость минус",
             "системный монитор", "шахматы", "chess",
         ]
-        is_shutdown = any(w in text for w in ["выключ", "отключ"]) and any(w in text for w in ["компьютер", "пк"])
         return (
             any(w in text for w in triggers)
-            or is_shutdown
+            or is_shutdown_text(text)
             or detect_display_power_action(text) is not None
             or is_close_browser_text(text)
             or detect_window_action(text) is not None
@@ -195,8 +225,14 @@ class SystemSkill(BaseSkill):
             context.speak(random.choice(SUCCESS_RESPONSES))
             return
 
-        if any(w in text for w in ["выключ", "отключ"]) and any(w in text for w in ["компьютер", "пк"]):
-            context.speak("Выключаю.")
-            time.sleep(1)
-            subprocess.Popen(["shutdown", "now"])
+        if is_shutdown_text(text):
+            # Необратимо, а «выключ» + «пк» легко поймать на оговорке или чужой речи.
+            push_context(
+                name="system_shutdown_confirm",
+                handler=confirm_shutdown,
+                timeout_sec=20.0,
+                on_exit=lambda speak: speak("Отменил."),
+                expire_speak=context.alert_speak or context.speak,
+            )
+            context.speak("Точно выключить компьютер?")
             return
