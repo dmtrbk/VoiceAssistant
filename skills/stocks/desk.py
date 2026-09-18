@@ -12,6 +12,7 @@ from typing import Any
 from . import common
 from .common import (
     _API_BUY_BLOCKED,
+    _DESK_PERIOD_SEC,
     _MOEX,
     _MOEX_BOARDS,
     _SIGNAL_MAX_NAMES,

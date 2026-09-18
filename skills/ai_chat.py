@@ -467,7 +467,7 @@ class AIChatSkill(BaseSkill):
         text = re.sub(r"(\d+(?:[.,]\d+)?)\s*(?:[$]|USD)", r"\1 долларов", text)
         text = re.sub(r"(?:[€]|EUR\s*)(\d+(?:[.,]\d+)?)", r"\1 евро", text)
         text = re.sub(r"(\d+(?:[.,]\d+)?)\s*(?:[€]|EUR)", r"\1 евро", text)
-        text = re.sub(r"(\d+(?:[.,]\d+)?)\s*(?:₽|руб\.?|р\.)", r"\1 рублей", text)
+        text = re.sub(r"(\d+(?:[.,]\d+)?)\s*(?:₽|руб\.|руб(?![а-яё])|р\.)", r"\1 рублей", text)
 
         # 6. Скорость и физические единицы
         text = re.sub(r"(?i)\b(\d+)\s*км/ч\b", r"\1 километров в час", text)
