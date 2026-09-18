@@ -22,6 +22,7 @@ jarvis_trades.json
 jarvis_crypto_holds.json
 jarvis_crypto_bought.json
 jarvis_crypto_trades.json
+jarvis_crypto_daily.json
 .conky_markets.cache
 .conky_markets.cache.lock
 .conky_markets.pnl.json

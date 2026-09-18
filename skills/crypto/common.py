@@ -26,7 +26,7 @@ _API_PROD = "https://api.bybit.com"
 _API_TEST = "https://api-testnet.bybit.com"
 _QUOTE = "USDT"
 _CACHE_SEC = 25.0
-_DESK_PERIOD_SEC = 45 * 60
+_DESK_PERIOD_SEC = 3 * 60 * 60  # спот: реже, меньше шума и комиссий
 _DEFAULT_WATCH = ("BTC", "ETH", "SOL")
 _STABLES = frozenset({"USDT", "USDC", "DAI", "FDUSD", "USDE"})
 _MIN_QUOTE = 5.0
@@ -37,6 +37,7 @@ _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 _HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_holds.json")
 _BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_bought.json")
 _TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trades.json")
+_DAILY_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_daily.json")
 
 _ENCYCLOPEDIA = (
     "что такое", "что значит", "кто такой", "кто такая",

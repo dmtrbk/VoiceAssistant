@@ -6,7 +6,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,7 @@ from .common import _JOURNAL_HINTS, _format_usd
 logger = logging.getLogger(__name__)
 
 _KEEP = object()
+_MSK = ZoneInfo("Europe/Moscow")
 
 
 def _wants_journal(text: str) -> bool:
@@ -208,8 +210,10 @@ class CryptoJournalMixin:
         return text
 
     def _journal_trade(self, ticker: str, side: str, quote: float, price: float, spoken: str) -> None:
+        now = datetime.now(_MSK)
         entry = {
-            "ts": datetime.now(ZoneInfo("Europe/Moscow")).strftime("%d.%m %H:%M"),
+            "ts": now.strftime("%d.%m %H:%M"),
+            "ts_epoch": int(now.timestamp()),
             "ticker": ticker,
             "name": spoken,
             "side": "buy" if side == "Buy" else "sell",
@@ -232,3 +236,170 @@ class CryptoJournalMixin:
         logger.info("[Крипта] %s", line)
         if common.telegram_configured():
             common.send_telegram_notification(line, background=True)
+
+
+def _entry_epoch(entry: dict[str, Any]) -> float | None:
+    raw = entry.get("ts_epoch")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    ts = str(entry.get("ts") or "").strip()
+    if not ts:
+        return None
+    # Старый формат «дд.мм ЧЧ:ММ» — считаем текущий год МСК.
+    try:
+        now = datetime.now(_MSK)
+        parsed = datetime.strptime(f"{ts} {now.year}", "%d.%m %H:%M %Y").replace(tzinfo=_MSK)
+        if parsed > now + timedelta(days=1):
+            parsed = parsed.replace(year=now.year - 1)
+        return parsed.timestamp()
+    except ValueError:
+        return None
+
+
+def cooldown_tickers(
+    hours: float = 12.0,
+    trades: list[dict[str, Any]] | None = None,
+    *,
+    now: float | None = None,
+) -> set[str]:
+    """Тикеры с убыточной продажей за последние hours — не докупать автостолом."""
+    rows = trades if trades is not None else _read_trades()
+    cutoff = (now if now is not None else time.time()) - max(0.0, hours) * 3600.0
+    lots: dict[str, dict[str, float]] = {}
+    cool: set[str] = set()
+    for entry in rows:
+        ticker = str(entry.get("ticker") or "").upper()
+        side = str(entry.get("side") or "").lower()
+        quote = float(entry.get("quote") or 0)
+        price = float(entry.get("price") or 0)
+        if not ticker or price <= 0 or quote <= 0:
+            continue
+        qty = quote / price
+        lot = lots.setdefault(ticker, {"qty": 0.0, "cost": 0.0})
+        if side == "buy":
+            lot["qty"] += qty
+            lot["cost"] += quote
+            continue
+        if side != "sell" or lot["qty"] <= 0:
+            continue
+        sell_qty = min(qty, lot["qty"])
+        avg = lot["cost"] / lot["qty"]
+        cost_sold = avg * sell_qty
+        proceeds = quote * (sell_qty / qty)
+        epoch = _entry_epoch(entry)
+        if epoch is not None and epoch >= cutoff and proceeds < cost_sold:
+            cool.add(ticker)
+        lot["qty"] -= sell_qty
+        lot["cost"] -= cost_sold
+        if lot["qty"] < 1e-12:
+            lot["qty"] = 0.0
+            lot["cost"] = 0.0
+    return cool
+
+
+def recently_bought(
+    hours: float = 12.0,
+    trades: list[dict[str, Any]] | None = None,
+    *,
+    now: float | None = None,
+) -> set[str]:
+    rows = trades if trades is not None else _read_trades()
+    cutoff = (now if now is not None else time.time()) - max(0.0, hours) * 3600.0
+    out: set[str] = set()
+    for entry in rows:
+        if str(entry.get("side") or "").lower() != "buy":
+            continue
+        epoch = _entry_epoch(entry)
+        if epoch is None or epoch < cutoff:
+            continue
+        ticker = str(entry.get("ticker") or "").upper()
+        if ticker:
+            out.add(ticker)
+    return out
+
+
+def trades_on_msk_day(
+    day: datetime | None = None,
+    trades: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    day = day or datetime.now(_MSK)
+    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    rows = trades if trades is not None else _read_trades()
+    out: list[dict[str, Any]] = []
+    for entry in rows:
+        epoch = _entry_epoch(entry)
+        if epoch is None:
+            continue
+        if start.timestamp() <= epoch < end.timestamp():
+            out.append(entry)
+    return out
+
+
+def format_daily_pnl_report(
+    trades: list[dict[str, Any]] | None = None,
+    lifetime: float | None = None,
+    *,
+    day: datetime | None = None,
+) -> str:
+    day = day or datetime.now(_MSK)
+    day_trades = trades_on_msk_day(day, trades)
+    buys = sum(1 for t in day_trades if str(t.get("side")) == "buy")
+    sells = sum(1 for t in day_trades if str(t.get("side")) == "sell")
+    volume = sum(float(t.get("quote") or 0) for t in day_trades)
+    life = lifetime if lifetime is not None else read_lifetime_pnl()
+    lines = [
+        f"Крипта за {day.strftime('%d.%m')}: сделок {len(day_trades)} "
+        f"(покупок {buys}, продаж {sells}), оборот {_format_usd(volume)}.",
+    ]
+    if life is not None:
+        lines.append(f"Lifetime: {_format_usd(life, signed=True)}.")
+    if day_trades:
+        lines.append("Последние:")
+        lines.extend(format_trade_line(item) for item in day_trades[-5:])
+    else:
+        lines.append("Сегодня сделок не было.")
+    return "\n".join(lines)
+
+
+def _read_daily_meta(path: str | None = None) -> dict[str, Any]:
+    path = path or common._DAILY_PATH
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_daily_meta(payload: dict[str, Any], path: str | None = None) -> None:
+    path = path or common._DAILY_PATH
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал daily meta: %s", exc)
+
+
+def should_send_daily_report(*, now: datetime | None = None, path: str | None = None) -> bool:
+    """Один отчёт в календарный день МСК после 21:00."""
+    now = now or datetime.now(_MSK)
+    if now.hour < 21:
+        return False
+    key = now.strftime("%Y-%m-%d")
+    meta = _read_daily_meta(path)
+    return meta.get("last_report_day") != key
+
+
+def mark_daily_report_sent(*, now: datetime | None = None, path: str | None = None) -> None:
+    now = now or datetime.now(_MSK)
+    meta = _read_daily_meta(path)
+    meta["last_report_day"] = now.strftime("%Y-%m-%d")
+    _write_daily_meta(meta, path)

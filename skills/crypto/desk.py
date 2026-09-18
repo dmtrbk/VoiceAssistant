@@ -1,5 +1,6 @@
 # skills/crypto/desk.py
-# ИИ-выбор монет, ребаланс и фоновый стол.
+# Автостол: режим BTC, скор без Groq, коридор ребаланса.
+# Советник (crypto_advisor) по-прежнему зовёт ai_pick_alloc / Groq.
 
 from __future__ import annotations
 
@@ -20,6 +21,16 @@ from .common import (
     _write_ticker_set,
     parse_ai_alloc,
 )
+from .desk_policy import (
+    CHURN_COOLDOWN_HOURS,
+    DESK_CORE,
+    REBALANCE_BAND_PCT,
+    filter_auto_candidates,
+    is_risk_off,
+    score_alloc,
+    should_rebalance_leg,
+)
+from . import journal as crypto_journal
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +61,7 @@ class CryptoDeskMixin:
 
     def start_background(self) -> None:
         self._ensure_desk_loop()
+
     def _run_advisor(self, channel: str = "voice") -> str:
         import crypto_advisor
 
@@ -60,6 +72,7 @@ class CryptoDeskMixin:
         if common.telegram_configured():
             return "Отправил совет по крипте в телеграм."
         return text
+
     def _bust_private_cache(self) -> None:
         self._cache = {
             key: value
@@ -132,9 +145,66 @@ class CryptoDeskMixin:
             add(row)
         return chosen
 
+    def _btc_regime(self) -> tuple[float | None, float | None]:
+        chg7 = None
+        chg_day = None
+        try:
+            mom = self._momentum("BTC")
+            chg7 = mom.get("chg_7")
+            if chg7 is not None:
+                chg7 = float(chg7)
+        except Exception:
+            pass
+        try:
+            px = self._ticker("BTC")
+            chg_day = float(px.get("chg") or 0)
+        except Exception:
+            pass
+        return chg7, chg_day
+
+    def desk_auto_candidates(self) -> list[dict[str, Any]]:
+        """Кандидаты только для автостола (whitelist + фильтры + анти-чёрн)."""
+        rows = self.desk_candidates()
+        held: set[str] = set()
+        for row in rows:
+            if float(row.get("held") or 0) > 0:
+                held.add(str(row.get("ticker") or "").upper())
+        cool = crypto_journal.cooldown_tickers(CHURN_COOLDOWN_HOURS)
+        recent = crypto_journal.recently_bought(CHURN_COOLDOWN_HOURS)
+        # Недавняя покупка не блок на ребаланс уже держанного, но не даём набирать новую с нуля.
+        cool |= {t for t in recent if t not in held}
+        return filter_auto_candidates(
+            rows,
+            held=held,
+            watchlist=list(self._watchlist) + list(DESK_CORE),
+            cooldown=cool,
+        )
+
+    def desk_score_alloc(self, candidates: list[dict[str, Any]] | None = None) -> tuple[dict[str, float], str]:
+        btc7, btc_day = self._btc_regime()
+        if is_risk_off(btc_chg_7=btc7, btc_chg_day=btc_day):
+            why = (
+                f"Риск-офф по BTC (7д {btc7:+.1f}%, сутки {btc_day:+.1f}%) — кэш."
+                if btc7 is not None and btc_day is not None
+                else "Риск-офф по BTC — держу кэш."
+            )
+            return {}, why
+        rows = candidates if candidates is not None else self.desk_auto_candidates()
+        if not rows:
+            return {}, "Нет кандидатов для автостола."
+        return score_alloc(rows)
+
     def ai_pick_alloc(self, candidates: list[dict[str, Any]]) -> tuple[dict[str, float], str]:
+        """Только для советника / голоса «посоветуй». Автостол сюда не ходит."""
         allowed = {str(row.get("ticker") or "").upper() for row in candidates if row.get("ticker")}
         facts = self._alloc_facts(candidates)
+        btc7, btc_day = self._btc_regime()
+        if is_risk_off(btc_chg_7=btc7, btc_chg_day=btc_day):
+            return {}, (
+                f"Риск-офф по BTC (7д {btc7:+.1f}%) — лучше кэш."
+                if btc7 is not None
+                else "Риск-офф по BTC — лучше кэш."
+            )
         try:
             from skill_settings import get_effective_groq_model
             from skills.groq_client import complete
@@ -163,7 +233,7 @@ class CryptoDeskMixin:
                 return alloc, why
         except Exception as exc:
             logger.warning("[Крипта] ИИ-выбор: %s", exc)
-        return self._fallback_alloc(candidates), "ИИ смолчал, держу простые доли."
+        return score_alloc(candidates)
 
     def _alloc_facts(self, candidates: list[dict[str, Any]]) -> str:
         cash = 0.0
@@ -177,7 +247,10 @@ class CryptoDeskMixin:
                 book = "; ".join(parts)
             except Exception:
                 book = "счёт недоступен"
+        cool = crypto_journal.cooldown_tickers(CHURN_COOLDOWN_HOURS)
         lines = [f"Портфель: {book}", "Кандидаты спот USDT:"]
+        if cool:
+            lines.append("Недавно убыточные продажи (не рекомендуй): " + ", ".join(sorted(cool)))
         for row in candidates[:12]:
             mom = row.get("chg_7")
             mom_s = f", 7д {mom:+.1f}%" if mom is not None else ""
@@ -188,33 +261,16 @@ class CryptoDeskMixin:
             )
         return "\n".join(lines)
 
-    def _fallback_alloc(self, candidates: list[dict[str, Any]]) -> dict[str, float]:
-        picked = [
-            str(row.get("ticker") or "").upper()
-            for row in candidates
-            if row.get("ticker")
-            and str(row.get("ticker")).upper() not in _STABLES
-            and (row.get("chg_7") is None or float(row.get("chg_7") or 0) >= 0)
-        ][:2]
-        if not picked:
-            watch = [ticker for ticker in self._watchlist if ticker not in _STABLES]
-            picked = watch[:1]
-        if not picked:
-            return {}
-        share = round(100.0 / len(picked), 1)
-        return {ticker: share for ticker in picked}
-
     def _trade_auto(self, silent: bool = False) -> str:
         with common._TRADE_LOCK:
             return self._trade_auto_locked(silent)
 
     def _trade_auto_locked(self, silent: bool = False) -> str:
-        candidates = self.desk_candidates()
-        if not candidates:
-            return "Нечего решать: лента пуста."
-        alloc, why = self.ai_pick_alloc(candidates)
+        # Авто и «поторгуй» — скор + режим BTC, без Groq.
+        candidates = self.desk_auto_candidates()
+        alloc, why = self.desk_score_alloc(candidates)
         if not alloc:
-            result = why or "ИИ оставил кэш."
+            result = why or "Стол оставил кэш."
             if silent:
                 logger.info("[Крипта] авто: %s", result)
             return result
@@ -250,7 +306,14 @@ class CryptoDeskMixin:
         sells = [
             (ticker, current_values[ticker] - target_values[ticker])
             for ticker in relevant
-            if current_values[ticker] - target_values[ticker] >= min_trade
+            if should_rebalance_leg(
+                current_value=current_values[ticker],
+                target_value=target_values[ticker],
+                equity=equity,
+                band_pct=REBALANCE_BAND_PCT,
+                min_trade_usd=min_trade,
+            )
+            and current_values[ticker] > target_values[ticker]
         ]
         sells.sort(key=lambda item: item[1], reverse=True)
         for ticker, excess in sells:
@@ -276,7 +339,14 @@ class CryptoDeskMixin:
         buys = [
             (ticker, target_values.get(ticker, 0) - current_values.get(ticker, 0))
             for ticker in target_alloc
-            if target_values.get(ticker, 0) - current_values.get(ticker, 0) >= min_trade
+            if should_rebalance_leg(
+                current_value=current_values.get(ticker, 0),
+                target_value=target_values.get(ticker, 0),
+                equity=equity,
+                band_pct=REBALANCE_BAND_PCT,
+                min_trade_usd=min_trade,
+            )
+            and target_values.get(ticker, 0) > current_values.get(ticker, 0)
         ]
         buys.sort(key=lambda item: item[1], reverse=True)
         for ticker, need in buys:
@@ -290,7 +360,7 @@ class CryptoDeskMixin:
             except Exception as exc:
                 logger.warning("[Крипта] покупка %s: %s", ticker, exc)
         if not parts:
-            return "Портфель уже близко к цели."
+            return "Портфель уже в коридоре цели."
         return " ".join(parts)
 
     def _desk_ready(self) -> bool:
@@ -306,6 +376,19 @@ class CryptoDeskMixin:
         except Exception:
             pass
         return True
+
+    def _maybe_daily_report(self) -> None:
+        if not common.telegram_configured():
+            return
+        if not crypto_journal.should_send_daily_report():
+            return
+        try:
+            text = crypto_journal.format_daily_pnl_report()
+            common.send_telegram_notification(text, background=False)
+            crypto_journal.mark_daily_report_sent()
+            logger.info("[Крипта] дневной отчёт отправлен.")
+        except Exception as exc:
+            logger.warning("[Крипта] дневной отчёт: %s", exc)
 
     def _desk_loop(self) -> None:
         self._desk_stop.wait(90)
@@ -330,5 +413,6 @@ class CryptoDeskMixin:
             try:
                 self._reload_env()
                 self._trade_auto(silent=True)
+                self._maybe_daily_report()
             except Exception as exc:
                 logger.warning("[Крипта] фоновый цикл: %s", exc)
