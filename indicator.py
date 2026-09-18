@@ -6,9 +6,10 @@ os.environ["QT_QPA_PLATFORM"] = "xcb"
 import queue
 import sys
 from PySide6.QtCore import QSocketNotifier, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter, QRadialGradient, QGuiApplication
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtGui import QAction, QColor, QCursor, QPainter, QRadialGradient, QGuiApplication
+from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
+from chat_ui import ChatWindow
 from settings_ui import SettingsWindow
 from skill_settings import settings_events
 
@@ -72,8 +73,10 @@ class OrbWidget(QWidget):
         self.pulse_direction = 1
         self.state = "idle"
         self.drag_position = None
+        self._dragged = False
         self.settings_window = None
-        
+        self.chat_window = None
+
         # Пульс: ~25 fps в диалоге, в простое реже, чтобы не крутить Qt вхолостую.
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_pulse)
@@ -163,25 +166,66 @@ class OrbWidget(QWidget):
         self.settings_window.raise_()
         self.settings_window.activateWindow()
 
-    # --- Перетаскивание левой кнопкой; правая открывает настройки ---
+    def open_chat(self):
+        """Двойной клик: скрыть сферу, показать чат. Закрытие чата вернёт сферу."""
+        if self.chat_window is None:
+            self.chat_window = ChatWindow()
+            self.chat_window.closed.connect(self._on_chat_closed)
+        else:
+            self.chat_window.prepare_reopen()
+        self.hide()
+        self.chat_window.show()
+        self.chat_window.raise_()
+        self.chat_window.activateWindow()
+        self.chat_window.focus_input()
+
+    def _on_chat_closed(self):
+        self.show()
+
+    def _quit_app(self):
+        request_gui_quit()
+
+    def _show_context_menu(self):
+        menu = QMenu(self)
+        settings_action = QAction("Настройки", menu)
+        settings_action.triggered.connect(self.open_settings)
+        quit_action = QAction("Выход", menu)
+        quit_action.triggered.connect(self._quit_app)
+        menu.addAction(settings_action)
+        menu.addSeparator()
+        menu.addAction(quit_action)
+        menu.exec(QCursor.pos())
+
+    # --- ЛКМ: drag; двойной клик: чат; ПКМ: меню ---
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.RightButton:
-            self.open_settings()
+            self._show_context_menu()
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            self._dragged = False
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.MouseButton.LeftButton and self.drag_position is not None:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
+            pos = event.globalPosition().toPoint() - self.drag_position
+            if (pos - self.pos()).manhattanLength() > 3:
+                self._dragged = True
+            self.move(pos)
             event.accept()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_position = None
             event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and not self._dragged:
+            self.open_chat()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 def create_orb_gui():
     """Создает QApplication и сферу. Очереди читает таймер виджета."""
