@@ -9,11 +9,19 @@ from typing import Any
 DESK_CORE = frozenset({"BTC", "ETH", "SOL"})
 DESK_MAX_NAMES = 3
 DESK_CASH_FLOOR_PCT = 25.0
+DESK_CASH_FLOOR_BULL_PCT = 8.0
 REBALANCE_BAND_PCT = 6.0
+REBALANCE_BAND_CORE_PCT = 4.0
+REBALANCE_BAND_ALT_PCT = 8.0
 BTC_RISK_OFF_7D = -5.0
 BTC_RISK_OFF_DAY = -3.0
+BTC_BULL_7D = 5.0
+# Ядро: лёгкий mean-reversion на откате 7д; альты — только неотрицательный импульс.
+CORE_CHG7_FLOOR = -8.0
 MIN_TURNOVER_USD = 5_000_000.0
 MAX_DAY_PUMP_PCT = 25.0
+# Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
+TAKE_PROFIT_DAY_PCT = 18.0
 CHURN_COOLDOWN_HOURS = 12.0
 
 
@@ -29,6 +37,30 @@ def is_risk_off(*, btc_chg_7: float | None, btc_chg_day: float | None) -> bool:
     ):
         return True
     return False
+
+
+def cash_floor_pct(*, btc_chg_7: float | None, btc_chg_day: float | None) -> float:
+    """Доля кэша: bull ниже, норма 25%, risk-off — 100% (вызывающий обычно уже в кэш)."""
+    if is_risk_off(btc_chg_7=btc_chg_7, btc_chg_day=btc_chg_day):
+        return 100.0
+    if btc_chg_7 is not None and btc_chg_7 >= BTC_BULL_7D:
+        if btc_chg_day is None or btc_chg_day > -1.0:
+            return DESK_CASH_FLOOR_BULL_PCT
+    return DESK_CASH_FLOOR_PCT
+
+
+def band_pct_for(ticker: str) -> float:
+    """Уже коридор для ядра, шире для альтов — меньше шума по TON и т.п."""
+    if str(ticker or "").upper() in DESK_CORE:
+        return REBALANCE_BAND_CORE_PCT
+    return REBALANCE_BAND_ALT_PCT
+
+
+def _chg7_allowed(ticker: str, chg7: Any) -> bool:
+    if chg7 is None:
+        return True
+    floor = CORE_CHG7_FLOOR if str(ticker or "").upper() in DESK_CORE else 0.0
+    return float(chg7) >= floor
 
 
 def filter_auto_candidates(
@@ -85,29 +117,34 @@ def score_alloc(
     cash_floor_pct: float = DESK_CASH_FLOOR_PCT,
 ) -> tuple[dict[str, float], str]:
     """Доли без LLM. Пустой alloc = кэш. Сумма долей ≤ 100 − cash_floor."""
+    floor = max(0.0, min(100.0, float(cash_floor_pct)))
+    if floor >= 100.0:
+        return {}, "Рынок слабый — держу кэш в тетере."
     ranked = sorted(
         (
             row
             for row in candidates
             if str(row.get("ticker") or "").upper()
-            and (row.get("chg_7") is None or float(row.get("chg_7") or 0) >= 0)
+            and _chg7_allowed(str(row.get("ticker") or ""), row.get("chg_7"))
         ),
         key=_row_score,
         reverse=True,
     )
     picked = ranked[: max(1, int(max_names))]
-    # Только положительный скор или ядро с неотрицательным 7д.
+    # Только положительный скор или ядро в допустимом 7д-окне (в т.ч. лёгкий откат).
     usable: list[dict[str, Any]] = []
     for row in picked:
         score = _row_score(row)
         ticker = str(row.get("ticker") or "").upper()
         chg7 = row.get("chg_7")
-        if score <= 0 and not (ticker in DESK_CORE and (chg7 is None or float(chg7) >= 0)):
+        if score > 0:
+            usable.append(row)
             continue
-        usable.append(row)
+        if ticker in DESK_CORE and _chg7_allowed(ticker, chg7):
+            usable.append(row)
     if not usable:
         return {}, "Рынок слабый — держу кэш в тетере."
-    invest_pct = max(0.0, 100.0 - float(cash_floor_pct))
+    invest_pct = max(0.0, 100.0 - floor)
     weights = [max(_row_score(row), 0.5) for row in usable]
     total_w = sum(weights) or 1.0
     alloc = {
@@ -119,7 +156,7 @@ def score_alloc(
     if s > 0 and abs(s - invest_pct) > 0.2:
         alloc = {k: round(v * invest_pct / s, 1) for k, v in alloc.items()}
     names = ", ".join(f"{k} {int(round(v))}%" for k, v in alloc.items())
-    return alloc, f"Скор-стол: {names}, кэш ≥ {int(cash_floor_pct)}%."
+    return alloc, f"Скор-стол: {names}, кэш ≥ {int(floor)}%."
 
 
 def drift_usd(current: float, target: float) -> float:
@@ -133,8 +170,19 @@ def should_rebalance_leg(
     equity: float,
     band_pct: float = REBALANCE_BAND_PCT,
     min_trade_usd: float,
+    day_chg: float | None = None,
 ) -> bool:
-    """Коридор: не трогаем ногу, пока отклонение меньше max(band% equity, min_trade)."""
+    """Коридор: не трогаем ногу, пока отклонение меньше max(band% equity, min_trade).
+
+    Take-profit: сильный дневной памп при избытке над целью — фиксируем даже внутри band.
+    """
+    excess = float(current_value) - float(target_value)
+    if (
+        day_chg is not None
+        and float(day_chg) >= TAKE_PROFIT_DAY_PCT
+        and excess >= float(min_trade_usd)
+    ):
+        return True
     equity = max(float(equity), 1.0)
     band = max(equity * (band_pct / 100.0), float(min_trade_usd))
     return drift_usd(current_value, target_value) >= band

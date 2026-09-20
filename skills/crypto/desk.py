@@ -24,7 +24,8 @@ from .common import (
 from .desk_policy import (
     CHURN_COOLDOWN_HOURS,
     DESK_CORE,
-    REBALANCE_BAND_PCT,
+    band_pct_for,
+    cash_floor_pct,
     filter_auto_candidates,
     is_risk_off,
     score_alloc,
@@ -87,11 +88,18 @@ class CryptoDeskMixin:
         _write_ticker_set(common._BOUGHT_PATH, self._desk_bought)
 
     def _ensure_desk_bought(self, held: set[str]) -> None:
+        """Если bought.json нет — не зачисляем держанное в стол (иначе продадим ручное)."""
         if self._desk_bought_ready:
             return
-        self._desk_bought = {ticker for ticker in held if ticker not in self._manual_holds}
+        # Пустой список стола: всё на балансе считается чужим, пока стол сам не купит.
+        self._desk_bought = set()
         self._desk_bought_ready = True
         _write_ticker_set(common._BOUGHT_PATH, self._desk_bought)
+        if held:
+            logger.info(
+                "[Крипта] нет bought.json — %d позиций на балансе не трогаю как чужие",
+                len(held),
+            )
 
     def _is_owner_position(self, ticker: str) -> bool:
         ticker = ticker.upper()
@@ -192,7 +200,8 @@ class CryptoDeskMixin:
         rows = candidates if candidates is not None else self.desk_auto_candidates()
         if not rows:
             return {}, "Нет кандидатов для автостола."
-        return score_alloc(rows)
+        floor = cash_floor_pct(btc_chg_7=btc7, btc_chg_day=btc_day)
+        return score_alloc(rows, cash_floor_pct=floor)
 
     def ai_pick_alloc(self, candidates: list[dict[str, Any]]) -> tuple[dict[str, float], str]:
         """Только для советника / голоса «посоветуй». Автостол сюда не ходит."""
@@ -233,7 +242,8 @@ class CryptoDeskMixin:
                 return alloc, why
         except Exception as exc:
             logger.warning("[Крипта] ИИ-выбор: %s", exc)
-        return score_alloc(candidates)
+        floor = cash_floor_pct(btc_chg_7=btc7, btc_chg_day=btc_day)
+        return score_alloc(candidates, cash_floor_pct=floor)
 
     def _alloc_facts(self, candidates: list[dict[str, Any]]) -> str:
         cash = 0.0
@@ -290,12 +300,18 @@ class CryptoDeskMixin:
         equity = max(cash + sum(item["value"] for item in positions_list), 1.0)
         min_trade = _min_trade_usd(equity)
         prices = {item["ticker"]: float(item["price"] or 0) for item in positions_list}
+        day_chgs: dict[str, float | None] = {}
         for ticker in set(target_alloc) | set(positions):
-            if ticker not in prices or prices[ticker] <= 0:
-                try:
-                    prices[ticker] = self._ticker(ticker)["price"]
-                except Exception:
+            need_px = ticker not in prices or prices[ticker] <= 0
+            try:
+                px = self._ticker(ticker)
+                if need_px:
+                    prices[ticker] = float(px.get("price") or 0)
+                day_chgs[ticker] = float(px.get("chg") or 0)
+            except Exception:
+                if need_px:
                     prices[ticker] = 0.0
+                day_chgs[ticker] = None
         relevant = set(positions) | set(target_alloc)
         target_values = {ticker: equity * (target_alloc.get(ticker, 0.0) / 100.0) for ticker in relevant}
         current_values = {
@@ -310,8 +326,9 @@ class CryptoDeskMixin:
                 current_value=current_values[ticker],
                 target_value=target_values[ticker],
                 equity=equity,
-                band_pct=REBALANCE_BAND_PCT,
+                band_pct=band_pct_for(ticker),
                 min_trade_usd=min_trade,
+                day_chg=day_chgs.get(ticker),
             )
             and current_values[ticker] > target_values[ticker]
         ]
@@ -336,6 +353,8 @@ class CryptoDeskMixin:
         time.sleep(0.3)
         self._bust_private_cache()
         cash, _pos = self._cash_and_held()
+        budget = cash * common._BUY_CASH_BUFFER
+        cash = budget
         buys = [
             (ticker, target_values.get(ticker, 0) - current_values.get(ticker, 0))
             for ticker in target_alloc
@@ -343,14 +362,23 @@ class CryptoDeskMixin:
                 current_value=current_values.get(ticker, 0),
                 target_value=target_values.get(ticker, 0),
                 equity=equity,
-                band_pct=REBALANCE_BAND_PCT,
+                band_pct=band_pct_for(ticker),
                 min_trade_usd=min_trade,
+                day_chg=day_chgs.get(ticker),
             )
             and target_values.get(ticker, 0) > current_values.get(ticker, 0)
         ]
+        buys = [(t, n) for t, n in buys if n > 0]
         buys.sort(key=lambda item: item[1], reverse=True)
+        need_sum = sum(need for _ticker, need in buys)
         for ticker, need in buys:
-            quote = min(need, cash)
+            if cash < _MIN_QUOTE:
+                break
+            if need_sum > budget + 1e-9:
+                quote = budget * (need / need_sum)
+            else:
+                quote = need
+            quote = min(quote, cash, need)
             if quote < _MIN_QUOTE:
                 continue
             try:

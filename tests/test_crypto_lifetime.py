@@ -74,6 +74,17 @@ class TestCryptoLifetime(unittest.TestCase):
         crypto_journal._write_trades(trades, path=self.path)  # KEEP lifetime
         self.assertEqual(crypto_journal.read_lifetime_pnl(self.path), 7.5)
 
+    def test_keeps_more_than_two_hundred_trades(self):
+        from skills.crypto import common as crypto_common
+
+        self.assertGreaterEqual(crypto_common._TRADE_HISTORY_KEEP, 5000)
+        trades = [
+            {"ticker": "BTC", "side": "buy", "quote": 1.0, "price": 1.0}
+            for _ in range(250)
+        ]
+        crypto_journal._write_trades(trades, path=self.path)
+        self.assertEqual(len(crypto_journal._read_trades(self.path)), 250)
+
 
 if __name__ == "__main__":
     unittest.main()

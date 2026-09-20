@@ -77,7 +77,8 @@ def _write_trades(
                 life = round(float(life), 2)
             except (TypeError, ValueError):
                 life = None
-    payload = {"trades": trades[-200:], "lifetime_pnl_usd": life}
+    keep = max(200, int(getattr(common, "_TRADE_HISTORY_KEEP", 5000) or 5000))
+    payload = {"trades": trades[-keep:], "lifetime_pnl_usd": life}
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:

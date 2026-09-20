@@ -103,12 +103,12 @@ class CryptoTradesMixin:
         filters = self._filters(ticker)
         min_amt = max(filters["min_amt"], _MIN_QUOTE)
         if amount is None:
-            quote = cash
+            quote = cash * common._BUY_CASH_BUFFER
         elif amount <= 0:
             quote = min_amt
         else:
             quote = amount
-        quote = min(quote, cash)
+        quote = min(quote, cash * common._BUY_CASH_BUFFER)
         if quote + 1e-9 < min_amt:
             raise RuntimeError("no lots")
         return self._place_order(ticker, "Buy", quote_usdt=quote)

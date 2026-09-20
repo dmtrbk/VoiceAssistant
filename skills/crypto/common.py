@@ -26,13 +26,16 @@ _API_PROD = "https://api.bybit.com"
 _API_TEST = "https://api-testnet.bybit.com"
 _QUOTE = "USDT"
 _CACHE_SEC = 25.0
-_DESK_PERIOD_SEC = 3 * 60 * 60  # спот: реже, меньше шума и комиссий
+_DESK_PERIOD_SEC = 6 * 60 * 60  # спот: реже цикл — меньше комиссий и шума
 _DEFAULT_WATCH = ("BTC", "ETH", "SOL")
 _STABLES = frozenset({"USDT", "USDC", "DAI", "FDUSD", "USDE"})
 _MIN_QUOTE = 5.0
 _MIN_TRADE_PCT = 0.02
 _SMALL_EQUITY = 50.0
 _AI_MAX_NAMES = 4
+# Запас под комиссию/пыль при market buy «на весь кэш» или хвост ребаланса.
+_BUY_CASH_BUFFER = 0.998
+_TRADE_HISTORY_KEEP = 5000
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_holds.json")
 _BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_bought.json")

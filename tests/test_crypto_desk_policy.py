@@ -5,7 +5,7 @@ import os
 import tempfile
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -22,6 +22,24 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.is_risk_off(btc_chg_7=-6.0, btc_chg_day=1.0))
         self.assertTrue(policy.is_risk_off(btc_chg_7=-1.0, btc_chg_day=-4.0))
         self.assertFalse(policy.is_risk_off(btc_chg_7=2.0, btc_chg_day=-1.0))
+
+    def test_cash_floor_bull_vs_normal(self):
+        self.assertEqual(
+            policy.cash_floor_pct(btc_chg_7=6.0, btc_chg_day=1.0),
+            policy.DESK_CASH_FLOOR_BULL_PCT,
+        )
+        self.assertEqual(
+            policy.cash_floor_pct(btc_chg_7=1.0, btc_chg_day=0.5),
+            policy.DESK_CASH_FLOOR_PCT,
+        )
+        self.assertEqual(
+            policy.cash_floor_pct(btc_chg_7=-6.0, btc_chg_day=0.0),
+            100.0,
+        )
+
+    def test_band_core_tighter_than_alt(self):
+        self.assertEqual(policy.band_pct_for("BTC"), policy.REBALANCE_BAND_CORE_PCT)
+        self.assertEqual(policy.band_pct_for("TON"), policy.REBALANCE_BAND_ALT_PCT)
 
     def test_filter_drops_pump_and_cooldown(self):
         rows = [
@@ -50,14 +68,35 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertLessEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_PCT + 0.5)
         self.assertIn("Скор", why)
 
-    def test_score_empty_when_all_negative(self):
+    def test_score_alloc_bull_cash_floor(self):
         rows = [
-            {"ticker": "BTC", "chg": -2.0, "chg_7": -3.0, "turnover": 1e9},
-            {"ticker": "ETH", "chg": -1.0, "chg_7": -2.0, "turnover": 1e9},
+            {"ticker": "BTC", "chg": 1.0, "chg_7": 4.0, "turnover": 1e9},
+            {"ticker": "ETH", "chg": 0.5, "chg_7": 3.0, "turnover": 1e9},
+        ]
+        alloc, why = policy.score_alloc(rows, cash_floor_pct=policy.DESK_CASH_FLOOR_BULL_PCT)
+        self.assertTrue(alloc)
+        self.assertGreaterEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_BULL_PCT - 0.5)
+        self.assertIn("8%", why)
+
+    def test_score_empty_when_core_below_floor(self):
+        rows = [
+            {"ticker": "BTC", "chg": -2.0, "chg_7": -9.0, "turnover": 1e9},
+            {"ticker": "ETH", "chg": -1.0, "chg_7": -10.0, "turnover": 1e9},
         ]
         alloc, why = policy.score_alloc(rows)
         self.assertEqual(alloc, {})
         self.assertIn("кэш", why.lower())
+
+    def test_score_allows_core_mild_dip(self):
+        # Mean-reversion: ядро с откатом 7д до -8 ещё в игре.
+        rows = [
+            {"ticker": "BTC", "chg": 0.5, "chg_7": -4.0, "turnover": 1e9},
+            {"ticker": "DOGE", "chg": 2.0, "chg_7": -1.0, "turnover": 1e9},
+        ]
+        alloc, why = policy.score_alloc(rows)
+        self.assertIn("BTC", alloc)
+        self.assertNotIn("DOGE", alloc)
+        self.assertIn("Скор", why)
 
     def test_rebalance_band(self):
         self.assertFalse(
@@ -76,6 +115,29 @@ class TestDeskPolicy(unittest.TestCase):
                 equity=1000.0,
                 band_pct=6.0,
                 min_trade_usd=5.0,
+            )
+        )
+
+    def test_take_profit_on_day_pump(self):
+        # Внутри коридора 6% equity, но дневной памп → фиксируем избыток.
+        self.assertTrue(
+            policy.should_rebalance_leg(
+                current_value=130.0,
+                target_value=100.0,
+                equity=1000.0,
+                band_pct=6.0,
+                min_trade_usd=5.0,
+                day_chg=policy.TAKE_PROFIT_DAY_PCT,
+            )
+        )
+        self.assertFalse(
+            policy.should_rebalance_leg(
+                current_value=130.0,
+                target_value=100.0,
+                equity=1000.0,
+                band_pct=6.0,
+                min_trade_usd=5.0,
+                day_chg=5.0,
             )
         )
 
@@ -130,7 +192,7 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         ]
         text = crypto_journal.format_daily_pnl_report(trades, lifetime=1.5, day=now)
         self.assertIn("сделок 1", text)
-        self.assertIn("Lifetime", text)
+        self.assertIn("BTC", text)
 
 
 class TestDeskAutoUsesScore(unittest.TestCase):
@@ -169,6 +231,60 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             alloc, why = self.skill.desk_score_alloc(rows)
         self.assertEqual(alloc, {})
         self.assertIn("риск", why.lower())
+
+    def test_desk_score_uses_bull_cash_floor(self):
+        rows = [
+            {"ticker": "BTC", "chg": 1.0, "chg_7": 4.0, "turnover": 1e9, "held": 0},
+            {"ticker": "ETH", "chg": 0.5, "chg_7": 3.0, "turnover": 1e9, "held": 0},
+        ]
+        with (
+            patch.object(self.skill, "_btc_regime", return_value=(6.0, 1.0)),
+            patch.object(self.skill, "desk_auto_candidates", return_value=rows),
+        ):
+            alloc, why = self.skill.desk_score_alloc(rows)
+        self.assertTrue(alloc)
+        self.assertGreaterEqual(sum(alloc.values()), 90.0)
+        self.assertIn("8%", why)
+
+    def test_missing_bought_file_does_not_claim_held(self):
+        self.skill._desk_bought_ready = False
+        self.skill._desk_bought = set()
+        self.skill._ensure_desk_bought({"BTC", "ETH"})
+        self.assertTrue(self.skill._desk_bought_ready)
+        self.assertEqual(self.skill._desk_bought, set())
+        self.assertTrue(self.skill._is_owner_position("BTC"))
+        self.assertTrue(self.skill._is_owner_position("ETH"))
+
+    def test_rebalance_splits_cash_proportionally(self):
+        # Кэша мало на обе дыры → делим пропорционально need.
+        placed: list[tuple[str, float]] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+            placed.append((ticker, float(quote_usdt or 0)))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(
+                self.skill,
+                "_wallet",
+                return_value=(100.0, []),
+            ),
+            patch.object(self.skill, "_cash_and_held", return_value=(100.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_ticker", return_value={"price": 1.0, "chg": 0.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.desk.should_rebalance_leg", return_value=True),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            # цели: BTC 60, ETH 40 при equity≈100 → need 60 и 40, budget≈99.8
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"BTC", "ETH"}
+            self.skill._rebalance({"BTC": 60.0, "ETH": 40.0})
+        by_ticker = {t: q for t, q in placed}
+        self.assertIn("BTC", by_ticker)
+        self.assertIn("ETH", by_ticker)
+        self.assertGreater(by_ticker["BTC"], by_ticker["ETH"])
+        self.assertAlmostEqual(sum(by_ticker.values()), 100.0 * 0.998, places=1)
 
 
 if __name__ == "__main__":

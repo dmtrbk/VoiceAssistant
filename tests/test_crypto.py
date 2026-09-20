@@ -191,6 +191,26 @@ class TestCryptoSkill(unittest.TestCase):
         self.assertGreaterEqual(kwargs.get("quote_usdt"), 5)
         self.assertEqual(spoken, ["Купил Биткоин на 5 долларов."])
 
+    def test_voice_trade_buy_all_leaves_fee_buffer(self):
+        spoken: list[str] = []
+        with (
+            patch.dict(os.environ, {"BYBIT_API_KEY": "k", "BYBIT_API_SECRET": "s"}, clear=False),
+            patch("skills.crypto.common._voice_trade_enabled", return_value=True),
+            patch.object(self.skill, "_cash_and_held", return_value=(1000.0, {})),
+            patch.object(self.skill, "_place_order", return_value="Купил Биткоин на 998 долларов.") as place,
+            self._patch_ticker(),
+        ):
+            self.skill.execute(RequestContext(raw_text="купи весь биткоин", speak=spoken.append))
+        place.assert_called_once()
+        quote = place.call_args.kwargs["quote_usdt"]
+        self.assertAlmostEqual(quote, 1000.0 * 0.998)
+        self.assertLess(quote, 1000.0)
+
+    def test_desk_period_is_six_hours(self):
+        from skills.crypto import common as crypto_common
+
+        self.assertEqual(crypto_common._DESK_PERIOD_SEC, 6 * 60 * 60)
+
     def test_voice_trade_sell_min_not_dust(self):
         spoken: list[str] = []
         pos = {"qty": 0.00026352, "price": 76000.0, "value": 20.0}
