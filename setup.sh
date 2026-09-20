@@ -77,7 +77,7 @@ TINKOFF_AUTO_TRADE=
 TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
 # Крипта — спот Bybit. Курс без ключа.
 # Сделки: тумблер «Сделки голосом» или CRYPTO_VOICE_TRADE=true.
-# Авто: CRYPTO_AUTO_TRADE=true (пустое — только тестнет BYBIT_TESTNET=true).
+# Авто: CRYPTO_AUTO_TRADE=true (пустое — только тестнет). Цикл ~6 ч, скор без Groq.
 BYBIT_API_KEY=
 BYBIT_API_SECRET=
 BYBIT_TESTNET=false
@@ -317,7 +317,7 @@ echo "   TINKOFF_SANDBOX=true — песочница без реальных д�
 echo "   BYBIT_API_KEY / BYBIT_API_SECRET — спот Bybit (курс без ключа)"
 echo "   BYBIT_TESTNET=true — бумажный счёт api-testnet.bybit.com"
 echo "   CRYPTO_VOICE_TRADE=true — заявки крипты голосом (по умолчанию выкл)"
-echo "   CRYPTO_AUTO_TRADE=true — фон крипты; пустой флаг — только тестнет"
+echo "   CRYPTO_AUTO_TRADE=true — фон крипты ~6 ч (скор без Groq); пустой флаг — только тестнет"
 echo "   CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN — картинки Flux"
 echo "   CAMERA_INDEX — камера охраны (по умолчанию 0)"
 echo "   Тумблеры: правый клик по сфере или «открой настройки»"

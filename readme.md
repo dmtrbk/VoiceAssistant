@@ -24,7 +24,7 @@
 - **STT:** `hybrid` (Vosk + Whisper в фоне) или `vosk`; режим в настройках сферы.
 - **Характер:** пресеты в GUI / голосом (классический, саркастичный, брутальный, бро, свой промпт).
 - **Навыки:** погода, таймеры, калькулятор, музыка и радио, фильмы (MPV), поиск и карты, картинки (Cloudflare Flux), охрана с камерой, Xiaomi / Home Assistant, окна GNOME, Википедия.
-- **Биржа (Т-Инвест) и крипта (Bybit):** котировки, сводка, сделки голосом и автостол — отдельные тумблеры; по умолчанию сделки выкл. Conky в правом нижнем углу — дневной +/-.
+- **Биржа (Т-Инвест) и крипта (Bybit):** котировки, сводка, сделки голосом и автостол — отдельные тумблеры; по умолчанию сделки выкл. Крипта: авто ~6 ч, скор без Groq, риск-офф/коридор по BTC. Conky в правом нижнем углу — дневной +/-.
 - **Каналы:** один маршрутизатор для голоса, CLI и Telegram.
 
 ---
@@ -35,8 +35,7 @@
 
 ```bash
 git clone https://github.com/dmtrbk/VoiceAssistant.git
-cd VoiceAssistant
-git checkout experimental   # актуальная ветка разработки
+cd VoiceAssistant          # main — рабочая линия; experimental — дальше разработка
 chmod +x setup.sh setup_echo_cancel.sh
 ./setup.sh
 ```
@@ -106,12 +105,13 @@ TINKOFF_VOICE_TRADE=
 TINKOFF_AUTO_TRADE=
 TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
 
-# Крипта Bybit (опционально)
+# Крипта Bybit (опционально). Автостол ~6 ч при CRYPTO_AUTO_TRADE=true.
 BYBIT_API_KEY=
 BYBIT_API_SECRET=
 BYBIT_TESTNET=false
 CRYPTO_VOICE_TRADE=
 CRYPTO_AUTO_TRADE=
+CRYPTO_WATCHLIST=BTC,ETH,SOL
 
 # Картинки Cloudflare Workers AI
 CLOUDFLARE_ACCOUNT_ID=
