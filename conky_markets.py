@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # conky_markets.py
 # Две строки для Conky: дневной +/- биржи (Т-Инвест) и крипты (Bybit).
-# Крипта: сутки / lifetime · кулдаун (топ-3, если есть). Без ∑ — Candara его не рисует.
+# Обе: день / с покупки (ASCII `/`). Крипта ещё · кулдаун (топ-3). Без ∑ — Candara.
 # Цвета из ~/.conky: плюс c0c0c0 (system), минус 888888 (comands default).
 # Кэш 90 мин, сразу после сделки (дневник новее кэша). Стол заявок не запускает.
 
@@ -113,12 +113,18 @@ def render_lines(
     stocks: float | None,
     crypto: float | None,
     *,
+    stocks_life: float | None = None,
     crypto_life: float | None = None,
     cooldown: list[str] | None = None,
 ) -> str:
-    stocks_line = f"${{color {color_for(stocks)}}}{signed_amount(stocks, '₽')}"
+    stocks_day = f"${{color {color_for(stocks)}}}{signed_amount(stocks, '₽')}"
+    if stocks_life is not None:
+        stocks_life_s = f"${{color {color_for(stocks_life)}}}{signed_amount(stocks_life, '₽')}"
+        stocks_line = f"{stocks_day} / {stocks_life_s}"
+    else:
+        stocks_line = stocks_day
     day = f"${{color {color_for(crypto)}}}{signed_amount(crypto, '$$')}"
-    # Сутки / lifetime — ASCII-слэш: Candara не рисует ∑.
+    # День / с покупки — ASCII-слэш: Candara не рисует ∑.
     if crypto_life is not None:
         life = f"${{color {color_for(crypto_life)}}}{signed_amount(crypto_life, '$$')}"
         crypto_line = f"{day} / {life}"
@@ -290,6 +296,14 @@ def crypto_lifetime_pnl(*, refresh: bool = True) -> float | None:
     return read_lifetime_pnl()
 
 
+def fetch_stocks_life() -> float | None:
+    """С покупки (expectedYield портфеля) — без лишней логики."""
+    try:
+        return stocks_all_time_pnl()
+    except Exception:
+        return None
+
+
 def fetch_day_pnl() -> tuple[float | None, float | None]:
     from dotenv import load_dotenv
 
@@ -320,8 +334,15 @@ def fetch_crypto_extras() -> tuple[float | None, list[str]]:
 
 def fetch_lines() -> str:
     stocks, crypto = fetch_day_pnl()
+    stocks_life = fetch_stocks_life()
     life, cool = fetch_crypto_extras()
-    return render_lines(stocks, crypto, crypto_life=life, cooldown=cool)
+    return render_lines(
+        stocks,
+        crypto,
+        stocks_life=stocks_life,
+        crypto_life=life,
+        cooldown=cool,
+    )
 
 
 def fetch_lifetime_pnl() -> tuple[float | None, float | None]:
@@ -399,14 +420,20 @@ def write_pnl_cache(
 def _store(
     stocks: float | None,
     crypto: float | None,
+    stocks_life: float | None = None,
     crypto_life: float | None = None,
     cooldown: list[str] | None = None,
+    *,
+    fetch_missing_life: bool = True,
 ) -> str:
+    if fetch_missing_life and stocks_life is None:
+        stocks_life = fetch_stocks_life()
     if crypto_life is None and cooldown is None:
         crypto_life, cooldown = fetch_crypto_extras()
     text = render_lines(
         stocks,
         crypto,
+        stocks_life=stocks_life,
         crypto_life=crypto_life,
         cooldown=cooldown,
     )
@@ -428,8 +455,16 @@ def load_text() -> str:
         if cache_is_fresh():
             return read_cache()
         stocks, crypto = fetch_day_pnl()
+        stocks_life = fetch_stocks_life()
         life, cool = fetch_crypto_extras()
-        return _store(stocks, crypto, life, cool)
+        return _store(
+            stocks,
+            crypto,
+            stocks_life=stocks_life,
+            crypto_life=life,
+            cooldown=cool,
+            fetch_missing_life=False,
+        )
 
 
 def load_day_pnl() -> tuple[float | None, float | None]:

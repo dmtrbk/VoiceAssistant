@@ -28,6 +28,21 @@ class TestConkyMarkets(unittest.TestCase):
         self.assertNotIn("EXTRA", crypto)
         self.assertIn("${color 888888}ETH·SOL·TON", crypto)
 
+    def test_stocks_line_adds_lifetime_like_crypto(self):
+        text = conky_markets.render_lines(
+            -32.05,
+            5.0,
+            stocks_life=1500.4,
+            crypto_life=816.0,
+        )
+        stocks = conky_markets.select_line(text, "stocks")
+        self.assertEqual(
+            stocks,
+            "${color 888888}-32 ₽ / ${color c0c0c0}+1 500 ₽",
+        )
+        crypto = conky_markets.select_line(text, "crypto")
+        self.assertIn("+5 $$ / ${color c0c0c0}+816 $$", crypto)
+
     def test_minus_is_command_gray(self):
         text = conky_markets.render_lines(-50.2, -1.4)
         self.assertIn("${color 888888}-50 ₽", text)
