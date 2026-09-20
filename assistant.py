@@ -91,6 +91,17 @@ WAKE_WORDS = ["джарвис", "умник", "гаврила", "гаврюша"
 SAMPLERATE = 16000
 
 
+def _wait_for_display(timeout_sec: float = 90.0) -> bool:
+    """Ждём X11 :0 (XWayland). Иначе Qt xcb делает fatal и systemd ловит coredump."""
+    socket_path = "/tmp/.X11-unix/X0"
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if os.path.exists(socket_path):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def _read_positive_float(name: str, default: float) -> float:
     raw = os.getenv(name, str(default))
     try:
@@ -1114,12 +1125,19 @@ if __name__ == "__main__":
             logging.info("[Система] Запуск в headless-режиме (без GUI)...")
             main()
         else:
-            # 1. Запускаем основной поток распознавания Vosk в фоне
-            assistant_thread = threading.Thread(target=main, daemon=True)
-            assistant_thread.start()
-            
-            # 2. На основном потоке запускаем Qt6 GUI
-            run_gui(on_signal=hard_shutdown)
+            if not _wait_for_display():
+                logging.error(
+                    "[Система] Дисплей :0 не появился — GUI не поднять. "
+                    "Запуск без сферы (voice --no-gui)."
+                )
+                main()
+            else:
+                # 1. Запускаем основной поток распознавания Vosk в фоне
+                assistant_thread = threading.Thread(target=main, daemon=True)
+                assistant_thread.start()
+
+                # 2. На основном потоке запускаем Qt6 GUI
+                run_gui(on_signal=hard_shutdown)
     except KeyboardInterrupt:
         try:
             stop_speaking(to_idle=True)

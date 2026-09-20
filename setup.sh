@@ -30,7 +30,7 @@ CORE_PKGS=(
     cmatrix
     gnome-terminal nautilus gnome-system-monitor
     htop neofetch
-    libxcb tk xorg-xhost
+    libxcb xcb-util-cursor tk xorg-xhost
     xdotool wmctrl
     conky librsvg
 )
@@ -261,34 +261,34 @@ echo "    Юнит: $SERVICE_FILE"
 cat << EOF > "$SERVICE_FILE"
 [Unit]
 Description=Voice Assistant Service (Jarvis)
-After=network.target sound.target pipewire.service graphical-session.target
+# Не default.target: иначе Qt/xcb стартует до XWayland и падает ABRT.
+After=graphical-session.target pipewire.service sound.target
+Wants=graphical-session.target
 
 [Service]
 Type=simple
 WorkingDirectory=$PROJECT_DIR
+ExecStartPre=/bin/bash -c 'for i in \$(seq 1 90); do [ -S /tmp/.X11-unix/X0 ] && exit 0; sleep 1; done; echo "[voice-assistant] нет /tmp/.X11-unix/X0 за 90 с" >&2; exit 1'
 ExecStart=$VENV_DIR/bin/python assistant.py
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=5
 TimeoutStopSec=5
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
-# === НАСТРОЙКИ ===
 Environment=PYTHONUNBUFFERED=1
 Environment=LANG=ru_RU.UTF-8
 Environment=LC_ALL=ru_RU.UTF-8
-
-# Графика и рабочий стол
 Environment=DISPLAY=:0
 Environment=WAYLAND_DISPLAY=wayland-0
 Environment=XDG_CURRENT_DESKTOP=GNOME
 Environment=DESKTOP_SESSION=gnome
 Environment=XDG_SESSION_TYPE=wayland
-
-# Звук и сервисы
 Environment=XDG_RUNTIME_DIR=/run/user/$UID_NUM
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_NUM/bus
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 EOF
 
 EXT_UUID="jarvis-windows@voiceassistant"

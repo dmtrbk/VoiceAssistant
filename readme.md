@@ -47,7 +47,9 @@ chmod +x setup.sh setup_echo_cancel.sh
 3. Скачивает Vosk (`model/`) и Piper (`piper/`).
 4. Создаёт `.env` из `.env.example`, если файла ещё нет, и ставит права **`chmod 600`**.
 5. Кладёт виджет рынков в `~/.conky`.
-6. Включает `~/.config/systemd/user/voice-assistant.service`.
+6. Ставит юнит `voice-assistant.service` на `graphical-session.target`
+   (после появления дисплея; не `default.target`, иначе Qt падает на логине).
+   Автозагрузка включается; отключить: `systemctl --user disable voice-assistant.service`.
 
 Дальше заполните `.env` (минимум `GROQ_API_KEY`). Остальное — по желанию: Telegram, Т-Инвест, Bybit, Cloudflare, HA, лампа.
 
