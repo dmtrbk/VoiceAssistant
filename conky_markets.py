@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # conky_markets.py
-# Две строки для Conky: дневной +/- биржи (Т-Инвест) и крипты (Bybit, 24ч).
+# Две строки для Conky: дневной +/- биржи (Т-Инвест) и крипты (Bybit).
+# Крипта: сутки / lifetime · кулдаун (топ-3, если есть). Без ∑ — Candara его не рисует.
 # Цвета из ~/.conky: плюс c0c0c0 (system), минус 888888 (comands default).
 # Кэш 90 мин, сразу после сделки (дневник новее кэша). Стол заявок не запускает.
 
@@ -96,9 +97,36 @@ def color_for(value: float | None) -> str:
     return COLOR_PLUS
 
 
-def render_lines(stocks: float | None, crypto: float | None) -> str:
+def crypto_cooldown_top(limit: int = 3) -> list[str]:
+    """До limit тикеров в анти-чёрне — для Conky, без сети."""
+    try:
+        from skills.crypto.desk_policy import CHURN_COOLDOWN_HOURS
+        from skills.crypto import journal as crypto_journal
+
+        cool = crypto_journal.cooldown_tickers(CHURN_COOLDOWN_HOURS)
+    except Exception:
+        return []
+    return sorted({str(t).upper() for t in cool if t})[: max(0, int(limit))]
+
+
+def render_lines(
+    stocks: float | None,
+    crypto: float | None,
+    *,
+    crypto_life: float | None = None,
+    cooldown: list[str] | None = None,
+) -> str:
     stocks_line = f"${{color {color_for(stocks)}}}{signed_amount(stocks, '₽')}"
-    crypto_line = f"${{color {color_for(crypto)}}}{signed_amount(crypto, '$$')}"
+    day = f"${{color {color_for(crypto)}}}{signed_amount(crypto, '$$')}"
+    # Сутки / lifetime — ASCII-слэш: Candara не рисует ∑.
+    if crypto_life is not None:
+        life = f"${{color {color_for(crypto_life)}}}{signed_amount(crypto_life, '$$')}"
+        crypto_line = f"{day} / {life}"
+    else:
+        crypto_line = day
+    cool = [str(t).upper() for t in (cooldown or []) if t][:3]
+    if cool:
+        crypto_line = f"{crypto_line} · ${{color {COLOR_MINUS}}}{'·'.join(cool)}"
     return f"{stocks_line}\n{crypto_line}"
 
 
@@ -281,6 +309,21 @@ def fetch_day_pnl() -> tuple[float | None, float | None]:
     return stocks, crypto
 
 
+def fetch_crypto_extras() -> tuple[float | None, list[str]]:
+    """Lifetime (уже обновлённый в fetch_day_pnl) и кулдаун — без лишней сети."""
+    try:
+        life = crypto_lifetime_pnl(refresh=False)
+    except Exception:
+        life = None
+    return life, crypto_cooldown_top(3)
+
+
+def fetch_lines() -> str:
+    stocks, crypto = fetch_day_pnl()
+    life, cool = fetch_crypto_extras()
+    return render_lines(stocks, crypto, crypto_life=life, cooldown=cool)
+
+
 def fetch_lifetime_pnl() -> tuple[float | None, float | None]:
     from dotenv import load_dotenv
 
@@ -294,11 +337,6 @@ def fetch_lifetime_pnl() -> tuple[float | None, float | None]:
     except Exception:
         crypto = None
     return stocks, crypto
-
-
-def fetch_lines() -> str:
-    stocks, crypto = fetch_day_pnl()
-    return render_lines(stocks, crypto)
 
 
 def poke_refresh() -> None:
@@ -358,8 +396,20 @@ def write_pnl_cache(
     os.replace(tmp_path, cache_path)
 
 
-def _store(stocks: float | None, crypto: float | None) -> str:
-    text = render_lines(stocks, crypto)
+def _store(
+    stocks: float | None,
+    crypto: float | None,
+    crypto_life: float | None = None,
+    cooldown: list[str] | None = None,
+) -> str:
+    if crypto_life is None and cooldown is None:
+        crypto_life, cooldown = fetch_crypto_extras()
+    text = render_lines(
+        stocks,
+        crypto,
+        crypto_life=crypto_life,
+        cooldown=cooldown,
+    )
     try:
         write_cache(text)
     except Exception:
@@ -378,7 +428,8 @@ def load_text() -> str:
         if cache_is_fresh():
             return read_cache()
         stocks, crypto = fetch_day_pnl()
-        return _store(stocks, crypto)
+        life, cool = fetch_crypto_extras()
+        return _store(stocks, crypto, life, cool)
 
 
 def load_day_pnl() -> tuple[float | None, float | None]:

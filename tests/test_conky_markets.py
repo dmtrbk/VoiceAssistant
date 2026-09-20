@@ -14,6 +14,20 @@ class TestConkyMarkets(unittest.TestCase):
         self.assertNotIn("биржа", text)
         self.assertNotIn("крипта", text)
 
+    def test_crypto_line_adds_lifetime_and_cooldown(self):
+        text = conky_markets.render_lines(
+            10,
+            12.4,
+            crypto_life=48.6,
+            cooldown=["eth", "SOL", "TON", "EXTRA"],
+        )
+        crypto = conky_markets.select_line(text, "crypto")
+        self.assertIn("+12 $$", crypto)
+        self.assertIn("/ ${color c0c0c0}+49 $$", crypto)
+        self.assertIn("ETH·SOL·TON", crypto)
+        self.assertNotIn("EXTRA", crypto)
+        self.assertIn("${color 888888}ETH·SOL·TON", crypto)
+
     def test_minus_is_command_gray(self):
         text = conky_markets.render_lines(-50.2, -1.4)
         self.assertIn("${color 888888}-50 ₽", text)

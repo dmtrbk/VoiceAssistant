@@ -228,7 +228,10 @@ class CryptoDeskMixin:
                             "Ответ строго JSON: {\"alloc\": {\"BTC\": 40, \"ETH\": 30}, "
                             "\"why\": \"коротко по-русски до 180 знаков\"}. "
                             "Только тикеры из списка. Сумма до 100, остаток — кэш USDT. "
-                            "Если картина плохая — пустой alloc. Не обещай прибыль. Мужской род."
+                            "Если дан Fear & Greed — учти как фон (extreme fear ≠ обязательно всё в кэш; "
+                            "extreme greed — осторожнее с новыми покупками). "
+                            "Не выдумывай новости и цифры. Если картина плохая — пустой alloc. "
+                            "Не обещай прибыль. Мужской род."
                         ),
                     },
                     {"role": "user", "content": facts + "\n\nВыбери доли."},
@@ -258,7 +261,16 @@ class CryptoDeskMixin:
             except Exception:
                 book = "счёт недоступен"
         cool = crypto_journal.cooldown_tickers(CHURN_COOLDOWN_HOURS)
-        lines = [f"Портфель: {book}", "Кандидаты спот USDT:"]
+        lines = [f"Портфель: {book}"]
+        try:
+            from .sentiment import fear_greed_line
+
+            fng = fear_greed_line()
+            if fng:
+                lines.append(fng)
+        except Exception as exc:
+            logger.info("[Крипта] Fear & Greed в фактах: %s", exc)
+        lines.append("Кандидаты спот USDT:")
         if cool:
             lines.append("Недавно убыточные продажи (не рекомендуй): " + ", ".join(sorted(cool)))
         for row in candidates[:12]:
