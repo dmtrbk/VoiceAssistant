@@ -141,6 +141,48 @@ class TestDeskPolicy(unittest.TestCase):
             )
         )
 
+    def test_watch_take_profit_and_dip(self):
+        self.assertTrue(
+            policy.should_watch_take_profit(
+                day_chg=policy.WATCH_TP_DAY_PCT,
+                current_value=140.0,
+                target_value=100.0,
+                min_trade_usd=5.0,
+            )
+        )
+        self.assertFalse(
+            policy.should_watch_take_profit(
+                day_chg=5.0,
+                current_value=140.0,
+                target_value=100.0,
+                min_trade_usd=5.0,
+            )
+        )
+        self.assertTrue(
+            policy.should_watch_dip_buy(
+                ticker="BTC",
+                day_chg=policy.WATCH_DIP_DAY_PCT,
+                current_value=50.0,
+                target_value=100.0,
+                min_trade_usd=5.0,
+            )
+        )
+        self.assertFalse(
+            policy.should_watch_dip_buy(
+                ticker="DOGE",
+                day_chg=-10.0,
+                current_value=50.0,
+                target_value=100.0,
+                min_trade_usd=5.0,
+            )
+        )
+
+    def test_watch_rate_limit(self):
+        now = time.time()
+        self.assertTrue(policy.watch_rate_ok([], now=now))
+        self.assertTrue(policy.watch_rate_ok([now - 10, now - 20], now=now, max_per_hour=3))
+        self.assertFalse(policy.watch_rate_ok([now - 10, now - 20], now=now, max_per_hour=2))
+
 
 class TestJournalChurnAndDaily(unittest.TestCase):
     def setUp(self):
@@ -204,6 +246,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ("bought.json", "_BOUGHT_PATH"),
             ("trades.json", "_TRADE_PATH"),
             ("daily.json", "_DAILY_PATH"),
+            ("alloc.json", "_ALLOC_PATH"),
         ):
             path = os.path.join(self.tmp.name, name)
             patcher = patch(f"skills.crypto.common.{attr}", path)
@@ -216,11 +259,63 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "desk_score_alloc", return_value=({}, "кэш")) as score,
             patch.object(self.skill, "ai_pick_alloc") as ai,
             patch.object(self.skill, "desk_auto_candidates", return_value=[]),
+            patch.object(self.skill, "_btc_regime", return_value=(1.0, 0.5)),
         ):
             result = self.skill._trade_auto_locked(silent=True)
         score.assert_called_once()
         ai.assert_not_called()
         self.assertIn("кэш", result.lower())
+
+    def test_trade_auto_saves_alloc(self):
+        from skills.crypto import common as crypto_common
+
+        with (
+            patch.object(self.skill, "desk_score_alloc", return_value=({"BTC": 50.0}, "скор")),
+            patch.object(self.skill, "desk_auto_candidates", return_value=[]),
+            patch.object(self.skill, "_api_key", ""),
+        ):
+            self.skill._trade_auto_locked(silent=True)
+        state = crypto_common.read_alloc_state()
+        self.assertIsNotNone(state)
+        self.assertEqual(state["alloc"].get("BTC"), 50.0)
+
+    def test_watch_without_alloc(self):
+        result = self.skill._desk_watch_locked(silent=True)
+        self.assertIn("цели", result.lower())
+
+    def test_watch_take_profit_sells(self):
+        from skills.crypto import common as crypto_common
+
+        crypto_common.write_alloc_state({"BTC": 40.0}, why="test")
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+            placed.append((ticker, side, base_qty, quote_usdt))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(
+                self.skill,
+                "_wallet",
+                return_value=(
+                    20.0,
+                    [{"ticker": "BTC", "qty": 2.0, "value": 200.0, "price": 100.0, "name": "Биткоин"}],
+                ),
+            ),
+            patch.object(self.skill, "_cash_and_held", return_value=(20.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_btc_regime", return_value=(2.0, 1.0)),
+            patch.object(self.skill, "_ticker", return_value={"price": 100.0, "chg": 15.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch.object(self.skill, "_api_key", "x"),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"BTC"}
+            # equity≈220, target BTC 40%≈88, current 200 → excess, day +15% ≥ watch TP
+            result = self.skill._desk_watch_locked(silent=True)
+        self.assertTrue(any(side == "Sell" for _t, side, *_ in placed), result)
+        self.assertIn("дозор", result.lower())
 
     def test_risk_off_blocks_auto(self):
         rows = [{"ticker": "BTC", "chg": -4.0, "chg_7": -8.0, "turnover": 1e9, "held": 0}]

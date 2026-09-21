@@ -15,21 +15,28 @@ from .common import (
     _DESK_PERIOD_SEC,
     _MIN_QUOTE,
     _STABLES,
+    _WATCH_PERIOD_SEC,
     _min_trade_usd,
     _read_ticker_set,
     _spoken,
     _write_ticker_set,
     parse_ai_alloc,
+    read_alloc_state,
+    write_alloc_state,
 )
 from .desk_policy import (
     CHURN_COOLDOWN_HOURS,
     DESK_CORE,
+    WATCH_DIP_BUY_FRAC,
     band_pct_for,
     cash_floor_pct,
     filter_auto_candidates,
     is_risk_off,
     score_alloc,
     should_rebalance_leg,
+    should_watch_dip_buy,
+    should_watch_take_profit,
+    watch_rate_ok,
 )
 from . import journal as crypto_journal
 
@@ -291,13 +298,24 @@ class CryptoDeskMixin:
         # Авто и «поторгуй» — скор + режим BTC, без Groq.
         candidates = self.desk_auto_candidates()
         alloc, why = self.desk_score_alloc(candidates)
+        state = read_alloc_state() or {}
+        watch_trades = list(state.get("watch_trades") or [])
         if not alloc:
+            write_alloc_state({}, why=why or "кэш", watch_trades=watch_trades)
             result = why or "Стол оставил кэш."
             if silent:
                 logger.info("[Крипта] авто: %s", result)
+            # В кэш с заявками только при риске-офф по BTC — иначе не разматываем портфель.
+            btc7, btc_day = self._btc_regime()
+            if self._api_key and is_risk_off(btc_chg_7=btc7, btc_chg_day=btc_day):
+                try:
+                    result = self._rebalance({})
+                except Exception as exc:
+                    logger.warning("[Крипта] сброс в кэш: %s", exc)
             return result
         desc = ", ".join(f"{_spoken(ticker)} {int(round(pct))}%" for ticker, pct in alloc.items())
         logger.info("[Крипта] целевой портфель: %s (%s)", desc, why)
+        write_alloc_state(alloc, why=why, watch_trades=watch_trades)
         if not self._api_key:
             return f"Целевой портфель: {desc}. Ключа Bybit нет. {why}".strip()
         result = self._rebalance(alloc)
@@ -305,6 +323,137 @@ class CryptoDeskMixin:
             return f"{result} {why}".strip()
         return result
 
+    def _desk_watch(self, silent: bool = True) -> str:
+        with common._TRADE_LOCK:
+            return self._desk_watch_locked(silent)
+
+    def _desk_watch_locked(self, silent: bool = True) -> str:
+        """Быстрый дозор: к сохранённой цели. Без нового скора."""
+        state = read_alloc_state()
+        if state is None:
+            if silent:
+                logger.info("[Крипта] дозор: нет цели — жду полный стол")
+            return "нет цели"
+        watch_trades = list(state.get("watch_trades") or [])
+        now = time.time()
+        if not watch_rate_ok(watch_trades, now=now):
+            if silent:
+                logger.info("[Крипта] дозор: лимит сделок за час")
+            return "лимит дозора"
+        alloc = dict(state.get("alloc") or {})
+        btc7, btc_day = self._btc_regime()
+        if is_risk_off(btc_chg_7=btc7, btc_chg_day=btc_day):
+            why = "дозор: риск-офф по BTC — кэш"
+            logger.info("[Крипта] %s", why)
+            if not self._api_key:
+                write_alloc_state({}, why=why, watch_trades=watch_trades)
+                return why
+            result = self._rebalance({})
+            traded = result != "Портфель уже в коридоре цели."
+            if traded:
+                watch_trades.append(now)
+            write_alloc_state({}, why=why, watch_trades=watch_trades)
+            return result if traded else why
+
+        if not self._api_key:
+            return "ключа нет"
+        result = self._watch_react(alloc)
+        if result != "дозор: без сделок":
+            watch_trades.append(now)
+            write_alloc_state(alloc, why=str(state.get("why") or ""), watch_trades=watch_trades)
+            logger.info("[Крипта] дозор: %s", result)
+        elif silent:
+            logger.info("[Крипта] дозор: без сделок")
+        return result
+
+    def _watch_react(self, target_alloc: dict[str, float]) -> str:
+        """Только TP-продажи и добор ядра на просадке к сохранённой цели."""
+        cash, positions_list = self._wallet()
+        positions = {item["ticker"]: item for item in positions_list}
+        self._ensure_desk_bought(set(positions.keys()))
+        equity = max(cash + sum(item["value"] for item in positions_list), 1.0)
+        min_trade = _min_trade_usd(equity)
+        prices = {item["ticker"]: float(item["price"] or 0) for item in positions_list}
+        day_chgs: dict[str, float | None] = {}
+        for ticker in set(target_alloc) | set(positions):
+            need_px = ticker not in prices or prices[ticker] <= 0
+            try:
+                px = self._ticker(ticker)
+                if need_px:
+                    prices[ticker] = float(px.get("price") or 0)
+                day_chgs[ticker] = float(px.get("chg") or 0)
+            except Exception:
+                if need_px:
+                    prices[ticker] = 0.0
+                day_chgs[ticker] = None
+        relevant = set(positions) | set(target_alloc)
+        target_values = {
+            ticker: equity * (target_alloc.get(ticker, 0.0) / 100.0) for ticker in relevant
+        }
+        current_values = {
+            ticker: float(positions.get(ticker, {}).get("value") or 0) for ticker in relevant
+        }
+        parts: list[str] = []
+        sells = [
+            (ticker, current_values[ticker] - target_values[ticker])
+            for ticker in relevant
+            if should_watch_take_profit(
+                day_chg=day_chgs.get(ticker),
+                current_value=current_values[ticker],
+                target_value=target_values[ticker],
+                min_trade_usd=min_trade,
+            )
+        ]
+        sells.sort(key=lambda item: item[1], reverse=True)
+        for ticker, excess in sells:
+            if target_alloc.get(ticker, 0.0) <= 0 and self._is_owner_position(ticker):
+                continue
+            price = prices.get(ticker) or 0.0
+            qty = float(positions.get(ticker, {}).get("qty") or 0)
+            sell_qty = excess / price if price else 0.0
+            sell_qty = min(sell_qty, qty)
+            if sell_qty <= 0:
+                continue
+            try:
+                parts.append(self._place_order(ticker, "Sell", base_qty=sell_qty, price=price))
+                time.sleep(0.4)
+            except Exception as exc:
+                logger.warning("[Крипта] дозор продажа %s: %s", ticker, exc)
+        time.sleep(0.3)
+        self._bust_private_cache()
+        cash, _pos = self._cash_and_held()
+        budget = cash * common._BUY_CASH_BUFFER
+        cash = budget
+        buys = []
+        for ticker in target_alloc:
+            need = target_values.get(ticker, 0) - current_values.get(ticker, 0)
+            if not should_watch_dip_buy(
+                ticker=ticker,
+                day_chg=day_chgs.get(ticker),
+                current_value=current_values.get(ticker, 0),
+                target_value=target_values.get(ticker, 0),
+                min_trade_usd=min_trade,
+            ):
+                continue
+            quote = max(0.0, need) * WATCH_DIP_BUY_FRAC
+            if quote >= _MIN_QUOTE:
+                buys.append((ticker, quote))
+        buys.sort(key=lambda item: item[1], reverse=True)
+        for ticker, need in buys:
+            if cash < _MIN_QUOTE:
+                break
+            quote = min(need, cash)
+            if quote < _MIN_QUOTE:
+                continue
+            try:
+                parts.append(self._place_order(ticker, "Buy", quote_usdt=quote))
+                cash -= quote
+                time.sleep(0.4)
+            except Exception as exc:
+                logger.warning("[Крипта] дозор покупка %s: %s", ticker, exc)
+        if not parts:
+            return "дозор: без сделок"
+        return "дозор: " + " ".join(parts)
     def _rebalance(self, target_alloc: dict[str, float]) -> str:
         cash, positions_list = self._wallet()
         positions = {item["ticker"]: item for item in positions_list}
@@ -432,27 +581,43 @@ class CryptoDeskMixin:
 
     def _desk_loop(self) -> None:
         self._desk_stop.wait(90)
+        next_desk = 0.0
+        next_watch = 0.0
         while not self._desk_stop.is_set():
             if not self._desk_ready():
                 if self._desk_stop.wait(2.0):
                     return
                 continue
-            deadline = time.time() + _DESK_PERIOD_SEC
-            skipped = False
-            while time.time() < deadline:
-                remaining = min(2.0, deadline - time.time())
+            now = time.time()
+            # Нет сохранённой цели (после обнуления / первый старт) — сразу полный стол.
+            if next_desk <= 0:
+                if read_alloc_state() is None:
+                    next_desk = now
+                else:
+                    next_desk = now + _DESK_PERIOD_SEC
+                next_watch = now + _WATCH_PERIOD_SEC
+            wake_at = min(next_desk, next_watch)
+            while time.time() < wake_at:
+                remaining = min(2.0, wake_at - time.time())
                 if remaining <= 0:
                     break
                 if self._desk_stop.wait(remaining):
                     return
                 if not self._desk_ready():
-                    skipped = True
                     break
-            if skipped:
+            if not self._desk_ready():
                 continue
+            now = time.time()
             try:
                 self._reload_env()
-                self._trade_auto(silent=True)
-                self._maybe_daily_report()
+                if now >= next_desk:
+                    self._trade_auto(silent=True)
+                    self._maybe_daily_report()
+                    next_desk = time.time() + _DESK_PERIOD_SEC
+                    next_watch = time.time() + _WATCH_PERIOD_SEC
+                elif now >= next_watch:
+                    self._desk_watch(silent=True)
+                    next_watch = time.time() + _WATCH_PERIOD_SEC
             except Exception as exc:
                 logger.warning("[Крипта] фоновый цикл: %s", exc)
+                next_watch = time.time() + _WATCH_PERIOD_SEC

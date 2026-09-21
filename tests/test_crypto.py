@@ -210,6 +210,7 @@ class TestCryptoSkill(unittest.TestCase):
         from skills.crypto import common as crypto_common
 
         self.assertEqual(crypto_common._DESK_PERIOD_SEC, 6 * 60 * 60)
+        self.assertEqual(crypto_common._WATCH_PERIOD_SEC, 12 * 60)
 
     def test_voice_trade_sell_min_not_dust(self):
         spoken: list[str] = []

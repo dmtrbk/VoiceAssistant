@@ -26,7 +26,8 @@ _API_PROD = "https://api.bybit.com"
 _API_TEST = "https://api-testnet.bybit.com"
 _QUOTE = "USDT"
 _CACHE_SEC = 25.0
-_DESK_PERIOD_SEC = 6 * 60 * 60  # спот: реже цикл — меньше комиссий и шума
+_DESK_PERIOD_SEC = 6 * 60 * 60  # полный скор + ребаланс
+_WATCH_PERIOD_SEC = 12 * 60  # дозор: TP / risk-off / добор ядра к сохранённой цели
 _DEFAULT_WATCH = ("BTC", "ETH", "SOL")
 _STABLES = frozenset({"USDT", "USDC", "DAI", "FDUSD", "USDE"})
 _MIN_QUOTE = 5.0
@@ -41,6 +42,7 @@ _HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_holds.json")
 _BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_bought.json")
 _TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trades.json")
 _DAILY_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_daily.json")
+_ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_alloc.json")
 
 _ENCYCLOPEDIA = (
     "что такое", "что значит", "кто такой", "кто такая",
@@ -271,6 +273,74 @@ def _write_ticker_set(path: str, tickers: set[str]) -> None:
         os.replace(tmp_path, path)
     except Exception as exc:
         logger.warning("[Крипта] не записал %s: %s", os.path.basename(path), exc)
+
+
+def read_alloc_state(path: str | None = None) -> dict[str, Any] | None:
+    """Последняя цель стола + метки дозора. None — файла нет / битый."""
+    path = path or _ALLOC_PATH
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    alloc_raw = raw.get("alloc") or {}
+    if not isinstance(alloc_raw, dict):
+        alloc_raw = {}
+    alloc: dict[str, float] = {}
+    for key, value in alloc_raw.items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or ticker in _STABLES:
+            continue
+        try:
+            pct = float(value)
+        except (TypeError, ValueError):
+            continue
+        if pct > 0:
+            alloc[ticker] = pct
+    watch_trades: list[float] = []
+    for item in raw.get("watch_trades") or []:
+        try:
+            watch_trades.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return {
+        "alloc": alloc,
+        "why": str(raw.get("why") or ""),
+        "ts": float(raw.get("ts") or 0),
+        "watch_trades": watch_trades,
+    }
+
+
+def write_alloc_state(
+    alloc: dict[str, float],
+    *,
+    why: str = "",
+    watch_trades: list[float] | None = None,
+    path: str | None = None,
+) -> None:
+    path = path or _ALLOC_PATH
+    clean = {
+        _normalize_ticker(str(k)): float(v)
+        for k, v in (alloc or {}).items()
+        if _normalize_ticker(str(k)) and float(v) > 0
+    }
+    payload = {
+        "alloc": clean,
+        "why": str(why or ""),
+        "ts": time.time(),
+        "watch_trades": list(watch_trades or [])[-20:],
+    }
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал цель стола: %s", exc)
 
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
     start = raw.find("{")

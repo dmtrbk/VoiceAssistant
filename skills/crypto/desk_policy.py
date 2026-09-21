@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 # Ядро whitelist для авто (плюс уже держанные позиции).
@@ -22,6 +23,11 @@ MIN_TURNOVER_USD = 5_000_000.0
 MAX_DAY_PUMP_PCT = 25.0
 # Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
 TAKE_PROFIT_DAY_PCT = 18.0
+# Дозор (~12 мин): чуть чувствительнее TP, добор только ядра на просадке.
+WATCH_TP_DAY_PCT = 12.0
+WATCH_DIP_DAY_PCT = -5.0
+WATCH_DIP_BUY_FRAC = 0.5
+WATCH_MAX_TRADES_PER_HOUR = 2
 CHURN_COOLDOWN_HOURS = 12.0
 
 
@@ -186,3 +192,52 @@ def should_rebalance_leg(
     equity = max(float(equity), 1.0)
     band = max(equity * (band_pct / 100.0), float(min_trade_usd))
     return drift_usd(current_value, target_value) >= band
+
+
+def watch_rate_ok(
+    watch_trades: list[float] | None,
+    *,
+    now: float | None = None,
+    max_per_hour: int = WATCH_MAX_TRADES_PER_HOUR,
+) -> bool:
+    """Не больше max_per_hour сделок дозора за последний час."""
+    current = time.time() if now is None else float(now)
+    cutoff = current - 3600.0
+    recent = [float(ts) for ts in (watch_trades or []) if float(ts) >= cutoff]
+    return len(recent) < max(0, int(max_per_hour))
+
+
+def should_watch_take_profit(
+    *,
+    day_chg: float | None,
+    current_value: float,
+    target_value: float,
+    min_trade_usd: float,
+    tp_pct: float = WATCH_TP_DAY_PCT,
+) -> bool:
+    excess = float(current_value) - float(target_value)
+    if excess < float(min_trade_usd):
+        return False
+    if day_chg is None:
+        return False
+    return float(day_chg) >= float(tp_pct)
+
+
+def should_watch_dip_buy(
+    *,
+    ticker: str,
+    day_chg: float | None,
+    current_value: float,
+    target_value: float,
+    min_trade_usd: float,
+    dip_pct: float = WATCH_DIP_DAY_PCT,
+) -> bool:
+    """Докупка только ядра к сохранённой цели на дневной просадке."""
+    if str(ticker or "").upper() not in DESK_CORE:
+        return False
+    gap = float(target_value) - float(current_value)
+    if gap < float(min_trade_usd):
+        return False
+    if day_chg is None:
+        return False
+    return float(day_chg) <= float(dip_pct)
