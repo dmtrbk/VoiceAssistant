@@ -183,6 +183,43 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.watch_rate_ok([now - 10, now - 20], now=now, max_per_hour=3))
         self.assertFalse(policy.watch_rate_ok([now - 10, now - 20], now=now, max_per_hour=2))
 
+    def test_trail_arm_and_stop(self):
+        # +10% от входа → armed; high 110, trail 6% → stop 103.4; цена 103 → hit
+        leg = policy.update_trail_leg(
+            price=110.0,
+            entry=100.0,
+            high=None,
+            armed=False,
+            arm_pct=8.0,
+            trail_pct=6.0,
+        )
+        self.assertTrue(leg["armed"])
+        self.assertAlmostEqual(leg["high"], 110.0)
+        self.assertFalse(leg["hit"])
+        hit = policy.update_trail_leg(
+            price=103.0,
+            entry=100.0,
+            high=110.0,
+            armed=True,
+            arm_pct=8.0,
+            trail_pct=6.0,
+        )
+        self.assertTrue(hit["hit"])
+        self.assertAlmostEqual(hit["stop"], 110.0 * 0.94, places=4)
+        # Без вооружения не бьём
+        cold = policy.update_trail_leg(
+            price=95.0,
+            entry=100.0,
+            high=100.0,
+            armed=False,
+            arm_pct=8.0,
+            trail_pct=6.0,
+        )
+        self.assertFalse(cold["armed"])
+        self.assertFalse(cold["hit"])
+        self.assertEqual(policy.trail_pct_for("BTC"), policy.TRAIL_CORE_PCT)
+        self.assertEqual(policy.trail_pct_for("DOGE"), policy.TRAIL_ALT_PCT)
+
 
 class TestJournalChurnAndDaily(unittest.TestCase):
     def setUp(self):
@@ -247,6 +284,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ("trades.json", "_TRADE_PATH"),
             ("daily.json", "_DAILY_PATH"),
             ("alloc.json", "_ALLOC_PATH"),
+            ("trail.json", "_TRAIL_PATH"),
         ):
             path = os.path.join(self.tmp.name, name)
             patcher = patch(f"skills.crypto.common.{attr}", path)
@@ -316,6 +354,47 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             result = self.skill._desk_watch_locked(silent=True)
         self.assertTrue(any(side == "Sell" for _t, side, *_ in placed), result)
         self.assertIn("дозор", result.lower())
+
+    def test_watch_trailing_stop_sells_full_leg(self):
+        from skills.crypto import common as crypto_common
+
+        crypto_common.write_alloc_state({"BTC": 40.0}, why="test")
+        crypto_common.write_trail_state(
+            {"BTC": {"entry": 100.0, "high": 120.0, "armed": True}}
+        )
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+            placed.append((ticker, side, base_qty, quote_usdt))
+            return f"trail {ticker}"
+
+        with (
+            patch.object(
+                self.skill,
+                "_wallet",
+                return_value=(
+                    10.0,
+                    [{"ticker": "BTC", "qty": 1.0, "value": 112.0, "price": 112.0, "name": "Биткоин"}],
+                ),
+            ),
+            patch.object(self.skill, "_cash_and_held", return_value=(10.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_btc_regime", return_value=(2.0, 1.0)),
+            # 112 / 120 high, trail 6% → stop 112.8; 112 <= 112.8 → hit
+            patch.object(self.skill, "_ticker", return_value={"price": 112.0, "chg": 1.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch.object(self.skill, "_api_key", "x"),
+            patch("skills.crypto.journal.open_avg_costs", return_value={"BTC": 100.0}),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"BTC"}
+            result = self.skill._desk_watch_locked(silent=True)
+        self.assertTrue(placed, result)
+        self.assertEqual(placed[0][0], "BTC")
+        self.assertEqual(placed[0][1], "Sell")
+        self.assertAlmostEqual(float(placed[0][2]), 1.0)
+        self.assertNotIn("BTC", crypto_common.read_trail_state())
 
     def test_risk_off_blocks_auto(self):
         rows = [{"ticker": "BTC", "chg": -4.0, "chg_7": -8.0, "turnover": 1e9, "held": 0}]

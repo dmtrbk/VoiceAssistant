@@ -28,6 +28,10 @@ WATCH_TP_DAY_PCT = 12.0
 WATCH_DIP_DAY_PCT = -5.0
 WATCH_DIP_BUY_FRAC = 0.5
 WATCH_MAX_TRADES_PER_HOUR = 2
+# Трейлинг-стоп дозора: защита пика с покупки (только позиции стола).
+TRAIL_ARM_PCT = 8.0
+TRAIL_CORE_PCT = 6.0
+TRAIL_ALT_PCT = 8.0
 CHURN_COOLDOWN_HOURS = 12.0
 
 
@@ -241,3 +245,45 @@ def should_watch_dip_buy(
     if day_chg is None:
         return False
     return float(day_chg) <= float(dip_pct)
+
+
+def trail_pct_for(ticker: str) -> float:
+    if str(ticker or "").upper() in DESK_CORE:
+        return TRAIL_CORE_PCT
+    return TRAIL_ALT_PCT
+
+
+def update_trail_leg(
+    *,
+    price: float,
+    entry: float,
+    high: float | None = None,
+    armed: bool = False,
+    arm_pct: float = TRAIL_ARM_PCT,
+    trail_pct: float = TRAIL_CORE_PCT,
+) -> dict[str, Any]:
+    """Обновить водяную марку. hit=True — цена пробила подтягивающийся стоп."""
+    px = float(price)
+    ent = float(entry) if entry and float(entry) > 0 else px
+    if px <= 0 or ent <= 0:
+        return {
+            "entry": max(ent, 0.0),
+            "high": max(float(high or 0), ent, 0.0),
+            "armed": False,
+            "stop": 0.0,
+            "hit": False,
+            "gain_pct": 0.0,
+        }
+    hi = max(float(high or 0), ent, px)
+    gain_pct = (px / ent - 1.0) * 100.0
+    is_armed = bool(armed) or gain_pct >= float(arm_pct)
+    stop = hi * (1.0 - float(trail_pct) / 100.0)
+    hit = is_armed and px <= stop + 1e-12
+    return {
+        "entry": ent,
+        "high": hi,
+        "armed": is_armed,
+        "stop": stop,
+        "hit": hit,
+        "gain_pct": gain_pct,
+    }

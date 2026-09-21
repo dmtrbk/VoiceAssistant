@@ -43,6 +43,7 @@ _BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_bought.json")
 _TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trades.json")
 _DAILY_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_daily.json")
 _ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_alloc.json")
+_TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trail.json")
 
 _ENCYCLOPEDIA = (
     "что такое", "что значит", "кто такой", "кто такая",
@@ -341,6 +342,72 @@ def write_alloc_state(
         os.replace(tmp_path, path)
     except Exception as exc:
         logger.warning("[Крипта] не записал цель стола: %s", exc)
+
+
+def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
+    """high/entry/armed по тикерам стола."""
+    path = path or _TRAIL_PATH
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return {}
+    legs_raw = raw.get("legs") if isinstance(raw, dict) else None
+    if not isinstance(legs_raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, value in legs_raw.items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            high = float(value.get("high") or 0)
+            entry = float(value.get("entry") or 0)
+        except (TypeError, ValueError):
+            continue
+        if high <= 0 and entry <= 0:
+            continue
+        out[ticker] = {
+            "high": max(high, entry, 0.0),
+            "entry": max(entry, 0.0),
+            "armed": bool(value.get("armed")),
+        }
+    return out
+
+
+def write_trail_state(
+    legs: dict[str, dict[str, Any]],
+    path: str | None = None,
+) -> None:
+    path = path or _TRAIL_PATH
+    clean: dict[str, dict[str, Any]] = {}
+    for key, value in (legs or {}).items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            high = float(value.get("high") or 0)
+            entry = float(value.get("entry") or 0)
+        except (TypeError, ValueError):
+            continue
+        if high <= 0 and entry <= 0:
+            continue
+        clean[ticker] = {
+            "high": max(high, entry, 0.0),
+            "entry": max(entry, 0.0),
+            "armed": bool(value.get("armed")),
+        }
+    payload = {"legs": clean, "ts": time.time()}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал трейл: %s", exc)
+
 
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
     start = raw.find("{")

@@ -98,6 +98,43 @@ def read_lifetime_pnl(path: str | None = None) -> float | None:
         return None
 
 
+def open_avg_costs(
+    trades: list[dict[str, Any]] | None = None,
+) -> dict[str, float]:
+    """Средняя цена оставшихся лотов по журналу (FIFO-cost)."""
+    rows = trades if trades is not None else _read_trades()
+    lots: dict[str, dict[str, float]] = {}
+    for entry in rows:
+        ticker = str(entry.get("ticker") or "").upper()
+        side = str(entry.get("side") or "").lower()
+        quote = float(entry.get("quote") or 0)
+        price = float(entry.get("price") or 0)
+        if not ticker or price <= 0 or quote <= 0:
+            continue
+        qty = quote / price
+        if qty <= 0:
+            continue
+        lot = lots.setdefault(ticker, {"qty": 0.0, "cost": 0.0})
+        if side == "buy":
+            lot["qty"] += qty
+            lot["cost"] += quote
+            continue
+        if side != "sell" or lot["qty"] <= 0:
+            continue
+        sell_qty = min(qty, lot["qty"])
+        avg = lot["cost"] / lot["qty"]
+        lot["qty"] -= sell_qty
+        lot["cost"] -= avg * sell_qty
+        if lot["qty"] < 1e-12:
+            lot["qty"] = 0.0
+            lot["cost"] = 0.0
+    out: dict[str, float] = {}
+    for ticker, lot in lots.items():
+        if lot["qty"] > 0 and lot["cost"] > 0:
+            out[ticker] = lot["cost"] / lot["qty"]
+    return out
+
+
 def compute_lifetime_from_trades(
     trades: list[dict[str, Any]],
     mark_prices: dict[str, float] | None = None,

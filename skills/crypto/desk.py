@@ -22,7 +22,9 @@ from .common import (
     _write_ticker_set,
     parse_ai_alloc,
     read_alloc_state,
+    read_trail_state,
     write_alloc_state,
+    write_trail_state,
 )
 from .desk_policy import (
     CHURN_COOLDOWN_HOURS,
@@ -36,6 +38,8 @@ from .desk_policy import (
     should_rebalance_leg,
     should_watch_dip_buy,
     should_watch_take_profit,
+    trail_pct_for,
+    update_trail_leg,
     watch_rate_ok,
 )
 from . import journal as crypto_journal
@@ -352,6 +356,7 @@ class CryptoDeskMixin:
             traded = result != "Портфель уже в коридоре цели."
             if traded:
                 watch_trades.append(now)
+                write_trail_state({})
             write_alloc_state({}, why=why, watch_trades=watch_trades)
             return result if traded else why
 
@@ -367,7 +372,7 @@ class CryptoDeskMixin:
         return result
 
     def _watch_react(self, target_alloc: dict[str, float]) -> str:
-        """Только TP-продажи и добор ядра на просадке к сохранённой цели."""
+        """Трейл → TP-продажи → добор ядра на просадке. К сохранённой цели."""
         cash, positions_list = self._wallet()
         positions = {item["ticker"]: item for item in positions_list}
         self._ensure_desk_bought(set(positions.keys()))
@@ -394,10 +399,62 @@ class CryptoDeskMixin:
             ticker: float(positions.get(ticker, {}).get("value") or 0) for ticker in relevant
         }
         parts: list[str] = []
+        trail_sold: set[str] = set()
+        try:
+            avg_costs = crypto_journal.open_avg_costs()
+        except Exception:
+            avg_costs = {}
+        trail_legs = read_trail_state()
+        new_trail: dict[str, dict[str, Any]] = {}
+        for ticker, pos in positions.items():
+            if self._is_owner_position(ticker):
+                continue
+            price = float(prices.get(ticker) or pos.get("price") or 0)
+            if price <= 0:
+                continue
+            prev = trail_legs.get(ticker) or {}
+            entry = float(prev.get("entry") or 0) or float(avg_costs.get(ticker) or 0) or price
+            updated = update_trail_leg(
+                price=price,
+                entry=entry,
+                high=float(prev.get("high") or 0) or None,
+                armed=bool(prev.get("armed")),
+                trail_pct=trail_pct_for(ticker),
+            )
+            new_trail[ticker] = {
+                "entry": updated["entry"],
+                "high": updated["high"],
+                "armed": updated["armed"],
+            }
+            if not updated["hit"]:
+                continue
+            qty = float(pos.get("qty") or 0)
+            value = float(pos.get("value") or 0) or qty * price
+            if qty <= 0 or value < min_trade:
+                continue
+            try:
+                parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price))
+                trail_sold.add(ticker)
+                time.sleep(0.4)
+                logger.info(
+                    "[Крипта] трейл %s: high %.4g stop %.4g gain %+.1f%%",
+                    ticker,
+                    updated["high"],
+                    updated["stop"],
+                    updated["gain_pct"],
+                )
+            except Exception as exc:
+                logger.warning("[Крипта] трейл продажа %s: %s", ticker, exc)
+                continue
+            # После срабатывания ногу из трейла убираем.
+            new_trail.pop(ticker, None)
+        write_trail_state(new_trail)
+
         sells = [
             (ticker, current_values[ticker] - target_values[ticker])
             for ticker in relevant
-            if should_watch_take_profit(
+            if ticker not in trail_sold
+            and should_watch_take_profit(
                 day_chg=day_chgs.get(ticker),
                 current_value=current_values[ticker],
                 target_value=target_values[ticker],
@@ -426,6 +483,8 @@ class CryptoDeskMixin:
         cash = budget
         buys = []
         for ticker in target_alloc:
+            if ticker in trail_sold:
+                continue
             need = target_values.get(ticker, 0) - current_values.get(ticker, 0)
             if not should_watch_dip_buy(
                 ticker=ticker,
@@ -454,6 +513,7 @@ class CryptoDeskMixin:
         if not parts:
             return "дозор: без сделок"
         return "дозор: " + " ".join(parts)
+
     def _rebalance(self, target_alloc: dict[str, float]) -> str:
         cash, positions_list = self._wallet()
         positions = {item["ticker"]: item for item in positions_list}
