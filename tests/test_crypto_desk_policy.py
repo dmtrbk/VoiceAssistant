@@ -190,7 +190,7 @@ class TestDeskPolicy(unittest.TestCase):
             entry=100.0,
             high=None,
             armed=False,
-            arm_pct=8.0,
+            arm_pct=policy.TRAIL_ARM_PCT,
             trail_pct=6.0,
         )
         self.assertTrue(leg["armed"])
@@ -201,7 +201,7 @@ class TestDeskPolicy(unittest.TestCase):
             entry=100.0,
             high=110.0,
             armed=True,
-            arm_pct=8.0,
+            arm_pct=policy.TRAIL_ARM_PCT,
             trail_pct=6.0,
         )
         self.assertTrue(hit["hit"])
@@ -212,11 +212,12 @@ class TestDeskPolicy(unittest.TestCase):
             entry=100.0,
             high=100.0,
             armed=False,
-            arm_pct=8.0,
+            arm_pct=policy.TRAIL_ARM_PCT,
             trail_pct=6.0,
         )
         self.assertFalse(cold["armed"])
         self.assertFalse(cold["hit"])
+        self.assertEqual(policy.TRAIL_ARM_PCT, 5.0)
         self.assertEqual(policy.trail_pct_for("BTC"), policy.TRAIL_CORE_PCT)
         self.assertEqual(policy.trail_pct_for("DOGE"), policy.TRAIL_ALT_PCT)
 

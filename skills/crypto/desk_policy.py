@@ -29,7 +29,7 @@ WATCH_DIP_DAY_PCT = -5.0
 WATCH_DIP_BUY_FRAC = 0.5
 WATCH_MAX_TRADES_PER_HOUR = 2
 # Трейлинг-стоп дозора: защита пика с покупки (только позиции стола).
-TRAIL_ARM_PCT = 8.0
+TRAIL_ARM_PCT = 5.0
 TRAIL_CORE_PCT = 6.0
 TRAIL_ALT_PCT = 8.0
 CHURN_COOLDOWN_HOURS = 12.0
