@@ -19,6 +19,7 @@ quiet_book.json
 jarvis_holds.json
 jarvis_bought.json
 jarvis_trades.json
+jarvis_stocks_alloc.json
 jarvis_crypto_holds.json
 jarvis_crypto_bought.json
 jarvis_crypto_trades.json

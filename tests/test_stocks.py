@@ -31,12 +31,16 @@ class TestStocks(unittest.TestCase):
         patcher_hold = patch("skills.stocks.common._HOLD_PATH", hold_path)
         patcher_bought = patch("skills.stocks.common._BOUGHT_PATH", bought_path)
         patcher_trade = patch("skills.stocks.common._TRADE_PATH", trade_path)
+        alloc_path = os.path.join(self.tmp.name, "alloc.json")
+        patcher_alloc = patch("skills.stocks.common._ALLOC_PATH", alloc_path)
         patcher_hold.start()
         patcher_bought.start()
         patcher_trade.start()
+        patcher_alloc.start()
         self.addCleanup(patcher_hold.stop)
         self.addCleanup(patcher_bought.stop)
         self.addCleanup(patcher_trade.stop)
+        self.addCleanup(patcher_alloc.stop)
         self.skill = StocksSkill()
 
     def test_extract_lots(self):
@@ -498,6 +502,43 @@ class TestStocks(unittest.TestCase):
         self.assertFalse(self.skill.can_handle(RequestContext(raw_text="поторгуй криптой")))
         self.assertFalse(self.skill.can_handle(RequestContext(raw_text="купи биткоин")))
         self.assertFalse(self.skill.can_handle(RequestContext(raw_text="сколько стоит эфир")))
+
+    def test_desk_periods_and_alloc_state(self):
+        from skills.stocks.common import (
+            _DESK_PERIOD_SEC,
+            _WATCH_PERIOD_SEC,
+            read_alloc_state,
+            write_alloc_state,
+        )
+
+        self.assertEqual(_DESK_PERIOD_SEC, 3 * 3600)
+        self.assertEqual(_WATCH_PERIOD_SEC, 15 * 60)
+        self.assertIsNone(read_alloc_state())
+        write_alloc_state({"SBER": 40.0, "GAZP": 30.0}, why="тест")
+        state = read_alloc_state()
+        self.assertIsNotNone(state)
+        self.assertEqual(state["alloc"]["SBER"], 40.0)
+        self.assertEqual(state["why"], "тест")
+        self.assertIn("ts", state)
+
+    def test_desk_watch_uses_saved_alloc(self):
+        from skills.stocks.common import _ALLOC_PATH, write_alloc_state
+
+        write_alloc_state({"SBER": 50.0}, why="цель")
+        with (
+            patch.object(self.skill, "_market_open", return_value=True),
+            patch.object(self.skill, "_rebalance_portfolio", return_value="ок") as reb,
+        ):
+            self.skill._token = "tok"
+            out = self.skill._desk_watch_locked(silent=True)
+        reb.assert_called_once_with({"SBER": 50.0}, silent=False)
+        self.assertIn("дозор", out)
+
+        os.remove(_ALLOC_PATH)
+        with patch.object(self.skill, "_rebalance_portfolio") as reb2:
+            out2 = self.skill._desk_watch_locked(silent=True)
+        reb2.assert_not_called()
+        self.assertEqual(out2, "нет цели")
 
 
 if __name__ == "__main__":

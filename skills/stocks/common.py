@@ -38,9 +38,11 @@ _BOOK_PATH = os.path.join(_PROJECT_DIR, "quiet_book.json")
 _HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_holds.json")
 _BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_bought.json")
 _TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_trades.json")
+_ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_stocks_alloc.json")
 _MOEX_HISTORY = "https://iss.moex.com/iss/history/engines/stock/markets/shares"
 _RU_CA = os.path.join(_PROJECT_DIR, "certs", "russian_trusted_root_ca.pem")
-_DESK_PERIOD_SEC = 45 * 60
+_DESK_PERIOD_SEC = 3 * 60 * 60  # полный скор сигналов + ребаланс
+_WATCH_PERIOD_SEC = 15 * 60  # дозор: к сохранённой цели, без нового скора
 _MOMENTUM_SPREAD = 0.8
 
 _CACHE_SEC = 25.0
@@ -216,6 +218,66 @@ def _write_ticker_set(path: str, tickers: set[str]) -> None:
             os.remove(tmp_path)
         except OSError:
             pass
+
+
+def read_alloc_state(path: str | None = None) -> dict[str, Any] | None:
+    """Последняя цель стола. None — файла нет / битый."""
+    path = path or _ALLOC_PATH
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    alloc_raw = raw.get("alloc") or {}
+    if not isinstance(alloc_raw, dict):
+        alloc_raw = {}
+    alloc: dict[str, float] = {}
+    for key, value in alloc_raw.items():
+        ticker = str(key or "").upper().strip()
+        if not ticker:
+            continue
+        try:
+            pct = float(value)
+        except (TypeError, ValueError):
+            continue
+        if pct > 0:
+            alloc[ticker] = pct
+    return {
+        "alloc": alloc,
+        "why": str(raw.get("why") or ""),
+        "ts": float(raw.get("ts") or 0),
+    }
+
+
+def write_alloc_state(
+    alloc: dict[str, float],
+    *,
+    why: str = "",
+    path: str | None = None,
+) -> None:
+    path = path or _ALLOC_PATH
+    clean = {
+        str(k).upper().strip(): float(v)
+        for k, v in (alloc or {}).items()
+        if str(k).strip() and float(v) > 0
+    }
+    payload = {"alloc": clean, "why": str(why or ""), "ts": time.time()}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Биржа] не записал цель стола: %s", exc)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
 
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
     start = raw.find("{")

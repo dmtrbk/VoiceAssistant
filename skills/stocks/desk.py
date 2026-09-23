@@ -20,12 +20,15 @@ from .common import (
     _SIGNAL_PAGE,
     _SIGNALS,
     _SMALL_EQUITY_RUB,
+    _WATCH_PERIOD_SEC,
     _buy_block_reason,
     _min_trade_rub,
     _read_ticker_set,
     _signal_is_buy,
     _signal_weight,
     _write_ticker_set,
+    read_alloc_state,
+    write_alloc_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -592,6 +595,7 @@ class StocksDeskMixin:
             candidates,
         )
         if not alloc:
+            write_alloc_state({}, why="нечего покупать через API")
             return "Нечего покупать: брокер не даёт эти бумаги через API."
 
         alloc_parts = []
@@ -600,6 +604,7 @@ class StocksDeskMixin:
             alloc_parts.append(f"{name} {int(round(pct))}%")
         alloc_desc = ", ".join(alloc_parts)
         logger.info("[Биржа] целевой портфель: %s", alloc_desc)
+        write_alloc_state(alloc, why=alloc_desc)
 
         if not self._token:
             return f"Целевой портфель: {alloc_desc}. Торгового ключа нет, пока держу на бумаге."
@@ -608,6 +613,31 @@ class StocksDeskMixin:
             raise RuntimeError("market closed")
 
         return self._rebalance_portfolio(alloc, silent=silent)
+
+    def _desk_watch(self, silent: bool = True) -> str:
+        with common._TRADE_LOCK:
+            return self._desk_watch_locked(silent)
+
+    def _desk_watch_locked(self, silent: bool = True) -> str:
+        """Дозор: ребаланс к сохранённой цели без нового скора сигналов."""
+        state = read_alloc_state()
+        if state is None:
+            if silent:
+                logger.info("[Биржа] дозор: нет цели — жду полный стол")
+            return "нет цели"
+        alloc = dict(state.get("alloc") or {})
+        if not alloc:
+            if silent:
+                logger.info("[Биржа] дозор: пустая цель")
+            return "пустая цель"
+        if not self._token:
+            return "токена нет"
+        if not self._market_open():
+            return "рынок закрыт"
+        result = self._rebalance_portfolio(alloc, silent=False)
+        if silent:
+            logger.info("[Биржа] дозор: %s", result)
+        return f"дозор: {result}"
 
     def _desk_ready(self) -> bool:
         if not self._desk_enabled.is_set():
@@ -624,33 +654,58 @@ class StocksDeskMixin:
         return True
 
     def _desk_loop(self) -> None:
-        # Сам ходит, пока биржа открыта, навык включён и разрешена автоторговля.
-        # После старта: 90 с, затем период 45 мин — без сделки сразу при запуске.
+        # Полный стол ~3 ч (сигналы), дозор ~15 мин к сохранённой цели. Вне сессии — пауза.
         self._desk_stop.wait(90)
+        next_desk = 0.0
+        next_watch = 0.0
         while not self._desk_stop.is_set():
             if not self._desk_ready():
                 if self._desk_stop.wait(2.0):
                     return
                 continue
-            deadline = time.time() + _DESK_PERIOD_SEC
-            skipped = False
-            while time.time() < deadline:
-                remaining = min(2.0, deadline - time.time())
+            self._token = (
+                os.getenv("TINKOFF_INVEST_TOKEN") or os.getenv("TINKOFF_TOKEN") or ""
+            ).strip()
+            now = time.time()
+            if next_desk <= 0:
+                if read_alloc_state() is None:
+                    next_desk = now
+                else:
+                    next_desk = now + _DESK_PERIOD_SEC
+                next_watch = now + _WATCH_PERIOD_SEC
+            try:
+                market_open = self._market_open()
+            except Exception:
+                market_open = False
+            if not market_open:
+                if self._desk_stop.wait(120.0):
+                    return
+                continue
+            wake_at = min(next_desk, next_watch)
+            while time.time() < wake_at:
+                remaining = min(2.0, wake_at - time.time())
                 if remaining <= 0:
                     break
                 if self._desk_stop.wait(remaining):
                     return
                 if not self._desk_ready():
-                    skipped = True
                     break
-            if skipped:
+            if not self._desk_ready():
                 continue
             try:
-                self._token = (
-                    os.getenv("TINKOFF_INVEST_TOKEN") or os.getenv("TINKOFF_TOKEN") or ""
-                ).strip()
                 if not self._market_open():
                     continue
-                self._trade_auto(silent=True)
+            except Exception:
+                continue
+            now = time.time()
+            try:
+                if now >= next_desk:
+                    self._trade_auto(silent=True)
+                    next_desk = time.time() + _DESK_PERIOD_SEC
+                    next_watch = time.time() + _WATCH_PERIOD_SEC
+                elif now >= next_watch:
+                    self._desk_watch(silent=True)
+                    next_watch = time.time() + _WATCH_PERIOD_SEC
             except Exception as exc:
                 logger.warning("[Биржа] фоновый цикл торговли: %s", exc)
+                next_watch = time.time() + _WATCH_PERIOD_SEC
