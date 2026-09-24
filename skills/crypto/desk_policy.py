@@ -7,14 +7,15 @@ import time
 from typing import Any
 
 # Ядро whitelist для авто (плюс уже держанные позиции).
-DESK_CORE = frozenset({"BTC", "ETH", "SOL"})
+DESK_CORE = frozenset({"BTC", "ETH"})
 # Узкий spot-рукав альта поверх ядра: ≤ ALT_SLEEVE_MAX_PCT, недобор → кэш.
+# Бывшая доля SOL (~⅓ старого ядра) ушла сюда: 15% + ~20% ≈ 35%.
 DESK_ALT_SLEEVE = frozenset({
     "XRP", "DOGE", "LINK", "AVAX", "TON", "SUI", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
 })
-DESK_MAX_NAMES = 3
-ALT_SLEEVE_MAX_PCT = 15.0
-ALT_MAX_NAMES = 2
+DESK_MAX_NAMES = 2
+ALT_SLEEVE_MAX_PCT = 35.0
+ALT_MAX_NAMES = 3
 DESK_CASH_FLOOR_PCT = 25.0
 DESK_CASH_FLOOR_BULL_PCT = 8.0
 REBALANCE_BAND_PCT = 6.0

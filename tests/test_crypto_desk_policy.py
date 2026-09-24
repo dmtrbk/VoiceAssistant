@@ -111,10 +111,12 @@ class TestDeskPolicy(unittest.TestCase):
             {"ticker": "MNT", "chg": 6.0, "chg_7": 8.0, "turnover": 1e9},
             {"ticker": "LINK", "chg": 3.0, "chg_7": 5.0, "turnover": 1e9},
             {"ticker": "AVAX", "chg": 2.0, "chg_7": 4.0, "turnover": 1e9},
+            {"ticker": "NEAR", "chg": 2.5, "chg_7": 4.5, "turnover": 1e9},
         ]
         alloc, why = policy.score_alloc(rows)
         alt_sum = sum(v for k, v in alloc.items() if k in policy.DESK_ALT_SLEEVE)
         core_sum = sum(v for k, v in alloc.items() if k in policy.DESK_CORE)
+        self.assertNotIn("SOL", alloc)
         self.assertLessEqual(alt_sum, policy.ALT_SLEEVE_MAX_PCT + 0.5)
         self.assertGreater(alt_sum, 0)
         self.assertLessEqual(len([k for k in alloc if k in policy.DESK_ALT_SLEEVE]), policy.ALT_MAX_NAMES)
@@ -122,6 +124,19 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertLessEqual(core_sum, core_cap + 0.5)
         self.assertLessEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_PCT + 0.5)
         self.assertIn("альты", why)
+
+    def test_sol_excluded_from_core(self):
+        self.assertNotIn("SOL", policy.DESK_CORE)
+        self.assertNotIn("SOL", policy.DESK_ALT_SLEEVE)
+        rows = [
+            {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
+            {"ticker": "ETH", "chg": 0.8, "chg_7": 2.5, "turnover": 1e9},
+            {"ticker": "SOL", "chg": 5.0, "chg_7": 10.0, "turnover": 1e9},
+        ]
+        alloc, _why = policy.score_alloc(rows)
+        self.assertNotIn("SOL", alloc)
+        self.assertIn("BTC", alloc)
+        self.assertIn("ETH", alloc)
 
     def test_alt_sleeve_skips_weak_momentum(self):
         rows = [
