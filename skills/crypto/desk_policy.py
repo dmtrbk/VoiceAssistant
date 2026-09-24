@@ -8,7 +8,13 @@ from typing import Any
 
 # Ядро whitelist для авто (плюс уже держанные позиции).
 DESK_CORE = frozenset({"BTC", "ETH", "SOL"})
+# Узкий spot-рукав альта поверх ядра: ≤ ALT_SLEEVE_MAX_PCT, недобор → кэш.
+DESK_ALT_SLEEVE = frozenset({
+    "XRP", "DOGE", "LINK", "AVAX", "TON", "SUI", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
+})
 DESK_MAX_NAMES = 3
+ALT_SLEEVE_MAX_PCT = 15.0
+ALT_MAX_NAMES = 2
 DESK_CASH_FLOOR_PCT = 25.0
 DESK_CASH_FLOOR_BULL_PCT = 8.0
 REBALANCE_BAND_PCT = 6.0
@@ -80,11 +86,11 @@ def filter_auto_candidates(
     watchlist: list[str],
     cooldown: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Узкий список для автостола: ядро + watch + позиции, без пампов и кулдауна."""
+    """Узкий список для автостола: ядро + рукав альта + watch + позиции."""
     cool = {str(t).upper() for t in (cooldown or set())}
     held_u = {str(t).upper() for t in held}
     watch_u = [str(t).upper() for t in watchlist]
-    allow = DESK_CORE | held_u | set(watch_u)
+    allow = DESK_CORE | DESK_ALT_SLEEVE | held_u | set(watch_u)
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in rows:
@@ -120,16 +126,17 @@ def _row_score(row: dict[str, Any]) -> float:
     return score
 
 
-def score_alloc(
+def _pick_bucket(
     candidates: list[dict[str, Any]],
     *,
-    max_names: int = DESK_MAX_NAMES,
-    cash_floor_pct: float = DESK_CASH_FLOOR_PCT,
-) -> tuple[dict[str, float], str]:
-    """Доли без LLM. Пустой alloc = кэш. Сумма долей ≤ 100 − cash_floor."""
-    floor = max(0.0, min(100.0, float(cash_floor_pct)))
-    if floor >= 100.0:
-        return {}, "Рынок слабый — держу кэш в тетере."
+    budget_pct: float,
+    max_names: int,
+    allow_weak_core: bool,
+) -> dict[str, float]:
+    """Доли внутри бюджета. Пустой — бюджет остаётся кэшем."""
+    budget = max(0.0, float(budget_pct))
+    if budget <= 0 or not candidates:
+        return {}
     ranked = sorted(
         (
             row
@@ -141,7 +148,6 @@ def score_alloc(
         reverse=True,
     )
     picked = ranked[: max(1, int(max_names))]
-    # Только положительный скор или ядро в допустимом 7д-окне (в т.ч. лёгкий откат).
     usable: list[dict[str, Any]] = []
     for row in picked:
         score = _row_score(row)
@@ -150,23 +156,77 @@ def score_alloc(
         if score > 0:
             usable.append(row)
             continue
-        if ticker in DESK_CORE and _chg7_allowed(ticker, chg7):
+        if allow_weak_core and ticker in DESK_CORE and _chg7_allowed(ticker, chg7):
             usable.append(row)
     if not usable:
-        return {}, "Рынок слабый — держу кэш в тетере."
-    invest_pct = max(0.0, 100.0 - floor)
+        return {}
     weights = [max(_row_score(row), 0.5) for row in usable]
     total_w = sum(weights) or 1.0
     alloc = {
-        str(row["ticker"]).upper(): round(invest_pct * (w / total_w), 1)
+        str(row["ticker"]).upper(): round(budget * (w / total_w), 1)
         for row, w in zip(usable, weights)
     }
-    # Нормализация суммы долей invest_pct.
     s = sum(alloc.values())
-    if s > 0 and abs(s - invest_pct) > 0.2:
-        alloc = {k: round(v * invest_pct / s, 1) for k, v in alloc.items()}
-    names = ", ".join(f"{k} {int(round(v))}%" for k, v in alloc.items())
-    return alloc, f"Скор-стол: {names}, кэш ≥ {int(floor)}%."
+    if s > 0 and abs(s - budget) > 0.2:
+        alloc = {k: round(v * budget / s, 1) for k, v in alloc.items()}
+    return alloc
+
+
+def score_alloc(
+    candidates: list[dict[str, Any]],
+    *,
+    max_names: int = DESK_MAX_NAMES,
+    cash_floor_pct: float = DESK_CASH_FLOOR_PCT,
+    alt_sleeve_pct: float = ALT_SLEEVE_MAX_PCT,
+    alt_max_names: int = ALT_MAX_NAMES,
+) -> tuple[dict[str, float], str]:
+    """Ядро + рукав альта. Недобор рукава → кэш. Сумма ≤ 100 − cash_floor."""
+    floor = max(0.0, min(100.0, float(cash_floor_pct)))
+    if floor >= 100.0:
+        return {}, "Рынок слабый — держу кэш в тетере."
+    sleeve = max(0.0, min(float(alt_sleeve_pct), 100.0 - floor))
+    core_budget = max(0.0, 100.0 - floor - sleeve)
+
+    core_rows = [
+        row for row in candidates
+        if str(row.get("ticker") or "").upper() in DESK_CORE
+    ]
+    alt_rows = [
+        row for row in candidates
+        if str(row.get("ticker") or "").upper() in DESK_ALT_SLEEVE
+    ]
+
+    core_alloc = _pick_bucket(
+        core_rows,
+        budget_pct=core_budget,
+        max_names=max_names,
+        allow_weak_core=True,
+    )
+    alt_alloc = _pick_bucket(
+        alt_rows,
+        budget_pct=sleeve,
+        max_names=alt_max_names,
+        allow_weak_core=False,
+    )
+    if not core_alloc and not alt_alloc:
+        return {}, "Рынок слабый — держу кэш в тетере."
+
+    alloc = {**core_alloc, **alt_alloc}
+    parts: list[str] = []
+    if core_alloc:
+        parts.append(
+            "ядро "
+            + ", ".join(f"{k} {int(round(v))}%" for k, v in core_alloc.items())
+        )
+    if alt_alloc:
+        parts.append(
+            "альты "
+            + ", ".join(f"{k} {int(round(v))}%" for k, v in alt_alloc.items())
+        )
+    else:
+        parts.append(f"альты 0% (≤{int(sleeve)}% → кэш)")
+    body = "; ".join(parts)
+    return alloc, f"Скор-стол: {body}, кэш ≥ {int(floor)}%."
 
 
 def drift_usd(current: float, target: float) -> float:

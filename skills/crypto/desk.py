@@ -28,6 +28,7 @@ from .common import (
 )
 from .desk_policy import (
     CHURN_COOLDOWN_HOURS,
+    DESK_ALT_SLEEVE,
     DESK_CORE,
     WATCH_DIP_BUY_FRAC,
     band_pct_for,
@@ -143,7 +144,7 @@ class CryptoDeskMixin:
                 pass
             chosen.append({**row, "held": held.get(ticker, 0), **mom})
 
-        for ticker in list(held) + list(self._watchlist):
+        for ticker in list(held) + list(self._watchlist) + list(DESK_CORE) + list(DESK_ALT_SLEEVE):
             row = from_tape.get(ticker)
             if row is None:
                 try:
@@ -159,7 +160,7 @@ class CryptoDeskMixin:
                     continue
             add(row)
         for row in tape:
-            if len(chosen) >= 12:
+            if len(chosen) >= 24:
                 break
             add(row)
         return chosen
@@ -195,7 +196,7 @@ class CryptoDeskMixin:
         return filter_auto_candidates(
             rows,
             held=held,
-            watchlist=list(self._watchlist) + list(DESK_CORE),
+            watchlist=list(self._watchlist) + list(DESK_CORE) + list(DESK_ALT_SLEEVE),
             cooldown=cool,
         )
 

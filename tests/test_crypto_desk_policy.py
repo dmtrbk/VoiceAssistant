@@ -65,8 +65,11 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         alloc, why = policy.score_alloc(rows)
         self.assertTrue(alloc)
-        self.assertLessEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_PCT + 0.5)
+        # Ядро ≤ 100 − floor − рукав; без альтов рукав остаётся кэшем.
+        core_cap = 100.0 - policy.DESK_CASH_FLOOR_PCT - policy.ALT_SLEEVE_MAX_PCT
+        self.assertLessEqual(sum(alloc.values()), core_cap + 0.5)
         self.assertIn("Скор", why)
+        self.assertIn("альты 0%", why)
 
     def test_score_alloc_bull_cash_floor(self):
         rows = [
@@ -75,7 +78,9 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         alloc, why = policy.score_alloc(rows, cash_floor_pct=policy.DESK_CASH_FLOOR_BULL_PCT)
         self.assertTrue(alloc)
-        self.assertGreaterEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_BULL_PCT - 0.5)
+        core_cap = 100.0 - policy.DESK_CASH_FLOOR_BULL_PCT - policy.ALT_SLEEVE_MAX_PCT
+        self.assertGreaterEqual(sum(alloc.values()), core_cap - 0.5)
+        self.assertLessEqual(sum(alloc.values()), core_cap + 0.5)
         self.assertIn("8%", why)
 
     def test_score_empty_when_core_below_floor(self):
@@ -97,6 +102,36 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIn("BTC", alloc)
         self.assertNotIn("DOGE", alloc)
         self.assertIn("Скор", why)
+
+    def test_alt_sleeve_caps_and_leaves_unused_as_cash(self):
+        rows = [
+            {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
+            {"ticker": "ETH", "chg": 0.8, "chg_7": 2.5, "turnover": 1e9},
+            {"ticker": "SOL", "chg": 1.2, "chg_7": 4.0, "turnover": 1e9},
+            {"ticker": "MNT", "chg": 6.0, "chg_7": 8.0, "turnover": 1e9},
+            {"ticker": "LINK", "chg": 3.0, "chg_7": 5.0, "turnover": 1e9},
+            {"ticker": "AVAX", "chg": 2.0, "chg_7": 4.0, "turnover": 1e9},
+        ]
+        alloc, why = policy.score_alloc(rows)
+        alt_sum = sum(v for k, v in alloc.items() if k in policy.DESK_ALT_SLEEVE)
+        core_sum = sum(v for k, v in alloc.items() if k in policy.DESK_CORE)
+        self.assertLessEqual(alt_sum, policy.ALT_SLEEVE_MAX_PCT + 0.5)
+        self.assertGreater(alt_sum, 0)
+        self.assertLessEqual(len([k for k in alloc if k in policy.DESK_ALT_SLEEVE]), policy.ALT_MAX_NAMES)
+        core_cap = 100.0 - policy.DESK_CASH_FLOOR_PCT - policy.ALT_SLEEVE_MAX_PCT
+        self.assertLessEqual(core_sum, core_cap + 0.5)
+        self.assertLessEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_PCT + 0.5)
+        self.assertIn("альты", why)
+
+    def test_alt_sleeve_skips_weak_momentum(self):
+        rows = [
+            {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
+            {"ticker": "MNT", "chg": -1.0, "chg_7": -2.0, "turnover": 1e9},
+        ]
+        alloc, why = policy.score_alloc(rows)
+        self.assertIn("BTC", alloc)
+        self.assertNotIn("MNT", alloc)
+        self.assertIn("альты 0%", why)
 
     def test_rebalance_band(self):
         self.assertFalse(
@@ -418,7 +453,9 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         ):
             alloc, why = self.skill.desk_score_alloc(rows)
         self.assertTrue(alloc)
-        self.assertGreaterEqual(sum(alloc.values()), 90.0)
+        core_cap = 100.0 - policy.DESK_CASH_FLOOR_BULL_PCT - policy.ALT_SLEEVE_MAX_PCT
+        self.assertGreaterEqual(sum(alloc.values()), core_cap - 0.5)
+        self.assertLessEqual(sum(alloc.values()), core_cap + 0.5)
         self.assertIn("8%", why)
 
     def test_missing_bought_file_does_not_claim_held(self):
