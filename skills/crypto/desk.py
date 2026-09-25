@@ -39,9 +39,11 @@ from .desk_policy import (
     should_rebalance_leg,
     should_watch_dip_buy,
     should_watch_take_profit,
+    take_profit_day_pct_for,
     trail_pct_for,
     update_trail_leg,
     watch_rate_ok,
+    watch_tp_day_pct_for,
 )
 from . import journal as crypto_journal
 
@@ -373,7 +375,7 @@ class CryptoDeskMixin:
         return result
 
     def _watch_react(self, target_alloc: dict[str, float]) -> str:
-        """Трейл → TP-продажи → добор ядра на просадке. К сохранённой цели."""
+        """Трейл → TP-продажи → добор ядра/альта на просадке. К сохранённой цели."""
         cash, positions_list = self._wallet()
         positions = {item["ticker"]: item for item in positions_list}
         self._ensure_desk_bought(set(positions.keys()))
@@ -460,6 +462,7 @@ class CryptoDeskMixin:
                 current_value=current_values[ticker],
                 target_value=target_values[ticker],
                 min_trade_usd=min_trade,
+                tp_pct=watch_tp_day_pct_for(ticker),
             )
         ]
         sells.sort(key=lambda item: item[1], reverse=True)
@@ -551,6 +554,7 @@ class CryptoDeskMixin:
                 band_pct=band_pct_for(ticker),
                 min_trade_usd=min_trade,
                 day_chg=day_chgs.get(ticker),
+                take_profit_pct=take_profit_day_pct_for(ticker),
             )
             and current_values[ticker] > target_values[ticker]
         ]
@@ -587,6 +591,7 @@ class CryptoDeskMixin:
                 band_pct=band_pct_for(ticker),
                 min_trade_usd=min_trade,
                 day_chg=day_chgs.get(ticker),
+                take_profit_pct=take_profit_day_pct_for(ticker),
             )
             and target_values.get(ticker, 0) > current_values.get(ticker, 0)
         ]

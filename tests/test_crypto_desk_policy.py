@@ -104,14 +104,15 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIn("Скор", why)
 
     def test_alt_sleeve_caps_and_leaves_unused_as_cash(self):
+        # Mean-reversion: в рукав идут просевшие альты, не дневной разгон.
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
             {"ticker": "ETH", "chg": 0.8, "chg_7": 2.5, "turnover": 1e9},
             {"ticker": "SOL", "chg": 1.2, "chg_7": 4.0, "turnover": 1e9},
-            {"ticker": "MNT", "chg": 6.0, "chg_7": 8.0, "turnover": 1e9},
-            {"ticker": "LINK", "chg": 3.0, "chg_7": 5.0, "turnover": 1e9},
-            {"ticker": "AVAX", "chg": 2.0, "chg_7": 4.0, "turnover": 1e9},
-            {"ticker": "NEAR", "chg": 2.5, "chg_7": 4.5, "turnover": 1e9},
+            {"ticker": "MNT", "chg": -6.0, "chg_7": -4.0, "turnover": 1e9},
+            {"ticker": "LINK", "chg": -4.0, "chg_7": -3.0, "turnover": 1e9},
+            {"ticker": "AVAX", "chg": -3.0, "chg_7": -2.0, "turnover": 1e9},
+            {"ticker": "NEAR", "chg": -5.0, "chg_7": -3.5, "turnover": 1e9},
         ]
         alloc, why = policy.score_alloc(rows)
         alt_sum = sum(v for k, v in alloc.items() if k in policy.DESK_ALT_SLEEVE)
@@ -138,15 +139,41 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIn("BTC", alloc)
         self.assertIn("ETH", alloc)
 
-    def test_alt_sleeve_skips_weak_momentum(self):
+    def test_alt_prefers_dip_over_pump(self):
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
-            {"ticker": "MNT", "chg": -1.0, "chg_7": -2.0, "turnover": 1e9},
+            {"ticker": "MNT", "chg": -5.0, "chg_7": -3.0, "turnover": 1e9},
+            {"ticker": "LINK", "chg": 8.0, "chg_7": 6.0, "turnover": 1e9},
+        ]
+        alloc, why = policy.score_alloc(rows)
+        self.assertIn("BTC", alloc)
+        self.assertIn("MNT", alloc)
+        self.assertNotIn("LINK", alloc)
+        self.assertIn("альты", why)
+
+    def test_alt_skips_crash_and_week_pump(self):
+        rows = [
+            {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
+            {"ticker": "MNT", "chg": -2.0, "chg_7": -25.0, "turnover": 1e9},
+            {"ticker": "LINK", "chg": -2.0, "chg_7": 12.0, "turnover": 1e9},
         ]
         alloc, why = policy.score_alloc(rows)
         self.assertIn("BTC", alloc)
         self.assertNotIn("MNT", alloc)
+        self.assertNotIn("LINK", alloc)
         self.assertIn("альты 0%", why)
+
+    def test_filter_blocks_rising_alt_entry(self):
+        rows = [
+            {"ticker": "BTC", "turnover": 1e9, "chg": 1.0, "chg_7": 2.0},
+            {"ticker": "NEAR", "turnover": 1e9, "chg": 5.0, "chg_7": -1.0},
+        ]
+        filtered = policy.filter_auto_candidates(
+            rows, held=set(), watchlist=["BTC", "NEAR"], cooldown=set()
+        )
+        tickers = {r["ticker"] for r in filtered}
+        self.assertIn("BTC", tickers)
+        self.assertNotIn("NEAR", tickers)
 
     def test_rebalance_band(self):
         self.assertFalse(
@@ -217,13 +244,31 @@ class TestDeskPolicy(unittest.TestCase):
                 min_trade_usd=5.0,
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             policy.should_watch_dip_buy(
                 ticker="DOGE",
+                day_chg=policy.WATCH_DIP_ALT_DAY_PCT,
+                current_value=50.0,
+                target_value=100.0,
+                min_trade_usd=5.0,
+            )
+        )
+        self.assertFalse(
+            policy.should_watch_dip_buy(
+                ticker="FAKE",
                 day_chg=-10.0,
                 current_value=50.0,
                 target_value=100.0,
                 min_trade_usd=5.0,
+            )
+        )
+        self.assertTrue(
+            policy.should_watch_take_profit(
+                day_chg=policy.WATCH_TP_ALT_DAY_PCT,
+                current_value=140.0,
+                target_value=100.0,
+                min_trade_usd=5.0,
+                tp_pct=policy.WATCH_TP_ALT_DAY_PCT,
             )
         )
 
