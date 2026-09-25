@@ -205,13 +205,13 @@ def _clean_expanded(raw: str) -> str:
 
 
 def expand_prompt(user_text: str, complete: Callable[..., str] | None = None) -> str:
-    """Короткий русский запрос → детальный английский промпт. Без LLM — шаблон."""
+    """Короткий русский запрос → детальный английский промпт. Без Groq — шаблон."""
     fallback = fallback_prompt(user_text)
     try:
         if complete is None:
-            from skills.openai_client import FAST_MODEL, complete as llm_complete
+            from skills.groq_client import FAST_MODEL, complete as groq_complete
 
-            complete = llm_complete
+            complete = groq_complete
             preferred = FAST_MODEL
         else:
             preferred = None
@@ -225,7 +225,7 @@ def expand_prompt(user_text: str, complete: Callable[..., str] | None = None) ->
             max_tokens=180,
         )
     except Exception as exc:
-        logger.warning("[Картинки] Не развернул промпт через LLM: %s", exc)
+        logger.warning("[Картинки] Не развернул промпт через Groq: %s", exc)
         return fallback
     cleaned = _clean_expanded(raw)
     if len(cleaned) < 12:

@@ -1,10 +1,63 @@
 # stt.py
-# Локальное распознавание речи через Vosk.
-# PhraseAudioBuffer оставлен для захвата фразы в assistant.py.
+# Онлайн / гибридное распознавание речи (Groq Whisper Turbo + Vosk)
+# Локальный Vosk: wake-words, barge-in стоп-слова, аварийные стопы, оффлайн fallback.
+# Groq Whisper: высокоточное распознавание реплик диалога, слотов и сложных команд.
 
 from __future__ import annotations
 
+import io
+import logging
+import os
+import re
 import threading
+import wave
+from typing import Optional
+
+# Паттерны, при наличии которых фраза целиком признается галлюцинацией тишины
+_FULL_HALLUCINATION_PATTERNS = (
+    r"продолжение следует",
+    r"субтитр",
+    r"дима торжок",
+    r"dima torzok",
+    r"спасибо за просмотр",
+    r"ставьте лайк",
+    r"подписывай",
+)
+_FULL_HALLUCINATION_RE = re.compile("|".join(_FULL_HALLUCINATION_PATTERNS), flags=re.IGNORECASE)
+
+# Паттерны для вырезания шумов в скобках [музыка], (смех)
+_INLINE_NOISE_RE = re.compile(r"\[.*?\]|\(.*?\)")
+
+
+def clean_whisper_text(text: str) -> str:
+    """Очищает результат транскрипции Whisper от шума и галлюцинаций тишины."""
+    if not text:
+        return ""
+    cleaned = text.strip().strip("\"'«»")
+    if _FULL_HALLUCINATION_RE.search(cleaned):
+        return ""
+    if _INLINE_NOISE_RE.search(cleaned):
+        cleaned = _INLINE_NOISE_RE.sub(" ", cleaned).strip()
+    # Если остались только знаки препинания или пустота
+    if not re.search(r"[\wа-яА-ЯёЁ]", cleaned):
+        return ""
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def pcm_to_wav(
+    pcm_bytes: bytes,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    sampwidth: int = 2,
+) -> bytes:
+    """Упаковывает сырые 16-битные PCM-сэмплы в формат WAV в памяти."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sampwidth)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    return buf.getvalue()
 
 
 class PhraseAudioBuffer:
@@ -54,11 +107,68 @@ class PhraseAudioBuffer:
             self._has_speech = False
 
 
+def transcribe_groq_whisper(
+    pcm_bytes: bytes,
+    sample_rate: int = 16000,
+    model: str = "whisper-large-v3-turbo",
+    language: str = "ru",
+    timeout: float = 4.0,
+) -> Optional[str]:
+    """
+    Отправляет аудио в облачный Groq Whisper API.
+    Возвращает очищенную строку или None при сбое сети/ошибке.
+    """
+    # Минимум ~0.35 секунды звука для транскрипции
+    min_bytes = int(sample_rate * 2 * 0.35)
+    if not pcm_bytes or len(pcm_bytes) < min_bytes:
+        return None
+
+    try:
+        from skills.groq_client import get_client
+
+        client = get_client()
+        if client is None:
+            return None
+
+        wav_data = pcm_to_wav(pcm_bytes, sample_rate=sample_rate)
+        # Без своего timeout берётся клиентский read=45 с: реплика зависла бы до минуты.
+        response = client.audio.transcriptions.create(
+            model=model,
+            file=("speech.wav", io.BytesIO(wav_data), "audio/wav"),
+            language=language,
+            response_format="text",
+            timeout=timeout,
+        )
+        raw_text = response if isinstance(response, str) else getattr(response, "text", str(response))
+        cleaned = clean_whisper_text(raw_text)
+        return cleaned or None
+    except Exception as exc:
+        logging.warning("[STT Groq] Ошибка транскрипции Whisper: %s", exc)
+        return None
+
+
 def transcribe_audio(
     pcm_bytes: bytes,
     fallback_text: str = "",
     sample_rate: int = 16000,
 ) -> str:
-    """Возвращает текст Vosk. Облачный Whisper отключён — только оффлайн."""
-    _ = pcm_bytes, sample_rate
+    """
+    Распознает аудио:
+    1. Если включен гибридный режим и доступен Groq Whisper — пробует онлайн.
+    2. При успехе возвращает онлайн-текст.
+    3. При сбое сети или отключенном режиме — возвращает fallback_text (Vosk).
+    """
+    try:
+        from skill_settings import is_online_stt_enabled
+
+        if is_online_stt_enabled():
+            online_result = transcribe_groq_whisper(pcm_bytes, sample_rate=sample_rate)
+            if online_result:
+                logging.info("[STT Groq Whisper] '%s' (Vosk: '%s')", online_result, fallback_text)
+                return online_result
+            if fallback_text:
+                logging.info("[STT Fallback] Whisper не дал результат, используем Vosk: '%s'", fallback_text)
+    except Exception as exc:
+        logging.warning("[STT] Сбой онлайн распознавания: %s", exc)
+
     return fallback_text

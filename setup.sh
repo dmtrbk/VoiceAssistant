@@ -56,14 +56,12 @@ echo "[+] Шаг 3/7: Проверка конфигурации .env..."
 ENV_EXAMPLE="$PROJECT_DIR/.env.example"
 if [ ! -f "$ENV_EXAMPLE" ]; then
     cat << 'EOF' > "$ENV_EXAMPLE"
-# OpenRouter / OpenAI-compatible — диалог и аналитика ИИ
-# Ключ: https://openrouter.ai/keys
+# Groq — облачный диалог и аналитика ИИ
 # Старт — быстрая 20B. Сильную 120B выбери в настройках (когда Cursor закрыт).
-OPENAI_API_KEY=
-OPENAI_API_BASE=https://openrouter.ai/api/v1
-OPENAI_MODEL=openai/gpt-oss-20b
-# Распознавание речи: только локальный Vosk
-STT_MODE=vosk
+GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-20b
+# Режим распознавания речи: hybrid (Vosk + Groq Whisper Turbo) или vosk (только оффлайн)
+STT_MODE=hybrid
 # Характер ассистента: jarvis, sarcastic, brutal, buddy, custom
 PERSONA_PRESET=jarvis
 
@@ -79,7 +77,7 @@ TINKOFF_AUTO_TRADE=
 TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
 # Крипта — спот Bybit. Курс без ключа.
 # Сделки: тумблер «Сделки голосом» или CRYPTO_VOICE_TRADE=true.
-# Авто: CRYPTO_AUTO_TRADE=true (пустое — только тестнет). Цикл ~6 ч, скор без LLM.
+# Авто: CRYPTO_AUTO_TRADE=true (пустое — только тестнет). Цикл ~6 ч, скор без Groq.
 BYBIT_API_KEY=
 BYBIT_API_SECRET=
 BYBIT_TESTNET=false
@@ -310,9 +308,8 @@ echo "=================================================================="
 echo "    ✅ Установка завершена успешно!                              "
 echo "=================================================================="
 echo "1. Ключи в $PROJECT_DIR/.env:"
-echo "   OPENAI_API_KEY — диалог через OpenRouter (https://openrouter.ai/keys)"
-echo "   OPENAI_API_BASE — по умолчанию https://openrouter.ai/api/v1"
-echo "   STT_MODE — только vosk (локальное распознавание)"
+echo "   GROQ_API_KEY — облачный диалог и гибридное STT Groq Whisper Turbo"
+echo "   STT_MODE — режим распознавания: hybrid (Vosk + Whisper) или vosk"
 echo "   TINKOFF_TOKEN — биржа (сводка; сделки — тумблер «Сделки голосом»)"
 echo "   TINKOFF_VOICE_TRADE=true — заявки голосом (по умолчанию выкл)"
 echo "   TINKOFF_AUTO_TRADE=true — фоновые заявки на живом счёте"

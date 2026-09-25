@@ -6,11 +6,11 @@ from unittest.mock import patch
 from skill_settings import (
     OPTIONAL_IDS,
     _env_voice_trade_default,
-    get_effective_openai_model,
+    get_effective_groq_model,
     is_cursor_running,
     ordered_skill_ids,
 )
-from skills.openai_client import FAST_MODEL, STRONG_MODEL, model_chain, openai_model_choices
+from skills.groq_client import FAST_MODEL, STRONG_MODEL, groq_model_choices, model_chain
 from skills.security import SecuritySkill, set_display_power
 from skills.assistant_settings import AssistantSettingsSkill
 from skills.base import RequestContext
@@ -92,25 +92,25 @@ class TestSecurityAndSettings(unittest.TestCase):
         with patch.dict(os.environ, {"CRYPTO_VOICE_TRADE": "", "BYBIT_VOICE_TRADE": ""}, clear=False):
             self.assertFalse(_env_crypto_voice_trade_default())
 
-    def test_openai_model_chain_puts_strong_first(self):
+    def test_groq_model_chain_puts_strong_first(self):
         chain = model_chain(STRONG_MODEL)
         self.assertEqual(chain[0], STRONG_MODEL)
         self.assertIn(FAST_MODEL, chain)
-        labels = [title for _mid, title in openai_model_choices()]
+        labels = [title for _mid, title in groq_model_choices()]
         self.assertTrue(any("Быстрая" in title for title in labels))
         self.assertTrue(any("Сильная" in title for title in labels))
 
     def test_effective_model_stays_fast_while_cursor_open(self):
         with (
-            patch("skill_settings.get_openai_model", return_value=STRONG_MODEL),
+            patch("skill_settings.get_groq_model", return_value=STRONG_MODEL),
             patch("skill_settings.is_cursor_running", return_value=True),
         ):
-            self.assertEqual(get_effective_openai_model(), FAST_MODEL)
+            self.assertEqual(get_effective_groq_model(), FAST_MODEL)
         with (
-            patch("skill_settings.get_openai_model", return_value=STRONG_MODEL),
+            patch("skill_settings.get_groq_model", return_value=STRONG_MODEL),
             patch("skill_settings.is_cursor_running", return_value=False),
         ):
-            self.assertEqual(get_effective_openai_model(), STRONG_MODEL)
+            self.assertEqual(get_effective_groq_model(), STRONG_MODEL)
         self.assertIsInstance(is_cursor_running(), bool)
 
     def test_settings_groups_cover_all_optional_skills(self):

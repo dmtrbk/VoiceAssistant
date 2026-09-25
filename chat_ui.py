@@ -51,12 +51,6 @@ class ChatWindow(QWidget):
         self._input.setPlaceholderText("Напишите сообщение…")
         self._input.returnPressed.connect(self._send)
 
-        self._clear_btn = QPushButton("Очистить")
-        self._clear_btn.setObjectName("chatClear")
-        self._clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._clear_btn.setToolTip("Очистить окно чата")
-        self._clear_btn.clicked.connect(self._clear_log)
-
         self._send_btn = QPushButton("Отправить")
         self._send_btn.setObjectName("chatSend")
         self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -65,7 +59,6 @@ class ChatWindow(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(self._input, 1)
-        row.addWidget(self._clear_btn)
         row.addWidget(self._send_btn)
 
         root = QVBoxLayout(self)
@@ -108,16 +101,6 @@ QPushButton#chatSend:disabled {{
     background: {palette.off_track};
     color: {palette.muted};
 }}
-QPushButton#chatClear {{
-    background: {palette.off_track};
-    color: {palette.fg};
-    border: none;
-    border-radius: 8px;
-    padding: 8px 12px;
-}}
-QPushButton#chatClear:hover {{
-    background: {palette.divider};
-}}
 """
         self.setStyleSheet(palette.stylesheet() + extra)
 
@@ -138,10 +121,6 @@ QPushButton#chatClear:hover {{
     def prepare_reopen(self) -> None:
         """Сброс флага перед повторным show() после close()."""
         self._closing = False
-
-    def _clear_log(self) -> None:
-        """Только визуальный лог окна; память Groq не трогает."""
-        self._log.clear()
 
     def _append(self, who: str, text: str, *, muted: bool = False) -> None:
         palette = current_palette()

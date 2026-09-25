@@ -1,6 +1,6 @@
 # Джарвис — голосовой ассистент для Manjaro GNOME
 
-Локальный ассистент под **Manjaro + GNOME** (Wayland / PipeWire): wake-words и стоп через **Vosk**, речь — **Piper (Dmitri)**, диалог — **OpenRouter** (OpenAI-совместимый API), навыки — музыка, окна, биржа, крипта, умный дом, Telegram.
+Локальный ассистент под **Manjaro + GNOME** (Wayland / PipeWire): wake-words и стоп через **Vosk**, уточнение фраз через **Groq Whisper**, речь — **Piper (Dmitri)**, диалог — **Groq**, навыки — музыка, окна, биржа, крипта, умный дом, Telegram.
 
 Точки входа:
 
@@ -21,10 +21,10 @@
 ## Возможности (кратко)
 
 - **Сессия:** имена «джарвис / умник / гаврила / гаврюша», тайм-аут внимания, barge-in («стоп», «замолчи», имя), ремонт диалога («что?», «продолжай»), ducking Audacious.
-- **STT:** только локальный **Vosk** (wake-words, команды, диалог).
+- **STT:** `hybrid` (Vosk + Whisper в фоне) или `vosk`; режим в настройках сферы.
 - **Характер:** пресеты в GUI / голосом (классический, саркастичный, брутальный, бро, свой промпт).
 - **Навыки:** погода, таймеры, калькулятор, музыка и радио, фильмы (MPV), поиск и карты, картинки (Cloudflare Flux), охрана с камерой, Xiaomi / Home Assistant, окна GNOME, Википедия.
-- **Биржа (Т-Инвест) и крипта (Bybit):** котировки, сводка, сделки голосом и автостол — отдельные тумблеры; по умолчанию сделки выкл. Биржа: стол ~3 ч + дозор ~15 мин. Крипта: стол ~6 ч + дозор ~12 мин, ядро BTC/ETH + рукав альта ≤35% (недобор → кэш; SOL вне автостола), скор без LLM. Conky — день / с покупки (₽ и $), у крипты ещё кулдаун. Совет «посоветуй» — LLM + Fear & Greed.
+- **Биржа (Т-Инвест) и крипта (Bybit):** котировки, сводка, сделки голосом и автостол — отдельные тумблеры; по умолчанию сделки выкл. Биржа: стол ~3 ч + дозор ~15 мин. Крипта: стол ~6 ч + дозор ~12 мин, ядро BTC/ETH + рукав альта ≤35% (недобор → кэш; SOL вне автостола), скор без Groq. Conky — день / с покупки (₽ и $), у крипты ещё кулдаун. Совет «посоветуй» — Groq + Fear & Greed.
 - **Каналы:** один маршрутизатор для голоса, CLI и Telegram.
 
 ---
@@ -51,7 +51,7 @@ chmod +x setup.sh setup_echo_cancel.sh
    (после появления дисплея; не `default.target`, иначе Qt падает на логине).
    Автозагрузка включается; отключить: `systemctl --user disable voice-assistant.service`.
 
-Дальше заполните `.env` (минимум `OPENAI_API_KEY` с [OpenRouter](https://openrouter.ai/keys)). Остальное — по желанию: Telegram, Т-Инвест, Bybit, Cloudflare, HA, лампа.
+Дальше заполните `.env` (минимум `GROQ_API_KEY`). Остальное — по желанию: Telegram, Т-Инвест, Bybit, Cloudflare, HA, лампа.
 
 ### Переезд на другое железо
 
@@ -95,10 +95,9 @@ journalctl --user -u voice-assistant.service -f
 Главное:
 
 ```ini
-OPENAI_API_KEY=
-OPENAI_API_BASE=https://openrouter.ai/api/v1
-OPENAI_MODEL=openai/gpt-oss-20b
-STT_MODE=vosk            # только локальный Vosk
+GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-20b
+STT_MODE=hybrid          # hybrid | vosk
 PERSONA_PRESET=jarvis    # jarvis | sarcastic | brutal | buddy | custom
 
 # Биржа (опционально). Сделки голосом по умолчанию выкл.
@@ -142,7 +141,7 @@ MAPS_PROVIDER=yandex
 ```
 VoiceAssistant/
 ├── assistant.py           # Оркестратор: Vosk, Piper, сессия, уточнение STT в фоне
-├── stt.py                 # Буфер фразы, Vosk
+├── stt.py                 # Буфер фразы, Whisper, fallback на Vosk
 ├── cli.py                 # Текстовый режим
 ├── commands.py            # Маршрутизатор навыков
 ├── dialogue_repair.py     # Паузы, «что?», голые глаголы
@@ -163,8 +162,7 @@ VoiceAssistant/
 └── skills/
     ├── stocks/            # Т-Инвест: quotes, trades, desk, journal
     ├── crypto/            # Bybit: то же разбиение
-    ├── ai_chat.py         # OpenRouter-диалог
-    ├── openai_client.py   # OpenAI SDK → OpenRouter
+    ├── ai_chat.py         # Groq-диалог
     ├── persona.py         # Характеры
     └── …                  # Погода, музыка, охрана, HA, …
 ```

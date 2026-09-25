@@ -140,10 +140,10 @@ def _fallback_advice(facts: str) -> str:
 
 def advise(facts: str) -> str:
     try:
-        from skill_settings import get_effective_openai_model
-        from skills.openai_client import complete
+        from skill_settings import get_effective_groq_model
+        from skills.groq_client import complete
 
-        model = get_effective_openai_model()
+        model = get_effective_groq_model()
         text = complete(
             [
                 {"role": "system", "content": _SYSTEM},
@@ -156,7 +156,7 @@ def advise(facts: str) -> str:
         if text:
             return text
     except Exception as exc:
-        logger.warning("[Советник] LLM: %s", exc)
+        logger.warning("[Советник] Groq: %s", exc)
     return _fallback_advice(facts)
 
 
