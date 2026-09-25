@@ -11,19 +11,22 @@ from typing import Any, Callable, Iterator
 _LOCK = threading.Lock()
 _client = None
 
-# qwen/qwen3.8-27b ловил таймаут на fallback; llama-3.3-70b снят с free 16.08.2026.
+# qwen/qwen3.8-27b — в free Groq; llama-3.3-70b снят 16.08.2026.
 FAST_MODEL = "openai/gpt-oss-20b"
 STRONG_MODEL = "openai/gpt-oss-120b"
 FALLBACK_MODELS = (
     FAST_MODEL,
-    "qwen/qwen3.6-27b",
+    "qwen/qwen3.8-27b",
     STRONG_MODEL,
 )
 
-# id, подпись в окне настроек. Старт — быстрая; сильная — когда Cursor закрыт.
+# Чат-модели с Groq (list_models). Whisper / guard / TTS в настройки не кладём.
 GROQ_MODEL_CHOICES = (
     (FAST_MODEL, "Быстрая — GPT-OSS 20B"),
     (STRONG_MODEL, "Сильная — GPT-OSS 120B"),
+    ("qwen/qwen3.8-27b", "Qwen 3.8 27B"),
+    ("openai/gpt-oss-safeguard-20b", "GPT-OSS Safeguard 20B"),
+    ("allam-2-7b", "ALLaM 2 7B"),
 )
 
 

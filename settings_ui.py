@@ -239,7 +239,7 @@ class SettingsWindow(QWidget):
         col.addWidget(self._card_title("Модель диалога"))
 
         combo = QComboBox()
-        for model_id, title in groq_model_choices():
+        for model_id, title in groq_model_choices(get_groq_model()):
             combo.addItem(title, model_id)
         combo.currentIndexChanged.connect(self._on_model_changed)
         self._model_combo = combo
