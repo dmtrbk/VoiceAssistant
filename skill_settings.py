@@ -75,7 +75,8 @@ AUTO_TRADE_KEY = "stocks_auto_trade"
 VOICE_TRADE_KEY = "stocks_voice_trade"
 CRYPTO_AUTO_TRADE_KEY = "crypto_auto_trade"
 CRYPTO_VOICE_TRADE_KEY = "crypto_voice_trade"
-GROQ_MODEL_KEY = "groq_model"
+OPENAI_MODEL_KEY = "openai_model"
+_LEGACY_GROQ_MODEL_KEY = "groq_model"
 STT_MODE_KEY = "stt_mode"
 PERSONA_PRESET_KEY = "persona_preset"
 _CURSOR_COMM = frozenset({"cursor", "cursor-bin"})
@@ -89,7 +90,7 @@ _auto_trade = False
 _voice_trade = False
 _crypto_auto_trade = False
 _crypto_voice_trade = False
-_groq_model = ""
+_openai_model = ""
 _stt_mode = ""
 _persona_preset = ""
 _loaded = False
@@ -128,27 +129,26 @@ def _env_crypto_voice_trade_default() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def _env_groq_model_default() -> str:
-    from skills.groq_client import normalize_groq_model
+def _env_openai_model_default() -> str:
+    from skills.openai_client import normalize_openai_model
 
-    return normalize_groq_model(os.getenv("GROQ_MODEL"))
+    raw = os.getenv("OPENAI_MODEL") or os.getenv("GROQ_MODEL")
+    return normalize_openai_model(raw)
 
 
 STT_MODE_CHOICES = (
-    ("hybrid", "Гибридное (Vosk + Groq Whisper Turbo)"),
     ("vosk", "Оффлайн (только Vosk)"),
 )
 
 
 def normalize_stt_mode(raw: str | None) -> str:
-    clean = (raw or "").strip().lower()
-    if clean in {"vosk", "offline", "local"}:
-        return "vosk"
-    return "hybrid"
+    """Раньше был hybrid (Whisper); сейчас всегда только Vosk."""
+    _ = raw
+    return "vosk"
 
 
 def _env_stt_mode_default() -> str:
-    return normalize_stt_mode(os.getenv("STT_MODE"))
+    return "vosk"
 
 
 def stt_mode_choices() -> list[tuple[str, str]]:
@@ -252,7 +252,7 @@ def _persist() -> None:
         snapshot[VOICE_TRADE_KEY] = bool(_voice_trade)
         snapshot[CRYPTO_AUTO_TRADE_KEY] = bool(_crypto_auto_trade)
         snapshot[CRYPTO_VOICE_TRADE_KEY] = bool(_crypto_voice_trade)
-        snapshot[GROQ_MODEL_KEY] = _groq_model
+        snapshot[OPENAI_MODEL_KEY] = _openai_model
         snapshot[STT_MODE_KEY] = _stt_mode
         snapshot[PERSONA_PRESET_KEY] = _persona_preset
     try:
@@ -263,16 +263,16 @@ def _persist() -> None:
 
 def reload_from_disk() -> dict[str, bool]:
     """Читает skills_enabled.json. Нет ключа — навык включён."""
-    global _enabled, _auto_trade, _voice_trade, _crypto_auto_trade, _crypto_voice_trade, _groq_model, _stt_mode, _persona_preset
+    global _enabled, _auto_trade, _voice_trade, _crypto_auto_trade, _crypto_voice_trade, _openai_model, _stt_mode, _persona_preset
     flags = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
     auto_trade = _env_auto_trade_default()
     voice_trade = _env_voice_trade_default()
     crypto_auto_trade = _env_crypto_auto_trade_default()
     crypto_voice_trade = _env_crypto_voice_trade_default()
-    groq_model = _env_groq_model_default()
+    openai_model = _env_openai_model_default()
     stt_mode = _env_stt_mode_default()
     persona_preset = _env_persona_preset_default()
-    # Ключи в JSON важнее пустых TINKOFF_* / GROQ_MODEL.
+    # Ключи в JSON важнее пустых TINKOFF_* / OPENAI_MODEL.
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
@@ -289,10 +289,13 @@ def reload_from_disk() -> dict[str, bool]:
                     crypto_auto_trade = bool(raw[CRYPTO_AUTO_TRADE_KEY])
                 if CRYPTO_VOICE_TRADE_KEY in raw:
                     crypto_voice_trade = bool(raw[CRYPTO_VOICE_TRADE_KEY])
-                if GROQ_MODEL_KEY in raw:
-                    from skills.groq_client import normalize_groq_model
+                model_raw = raw.get(OPENAI_MODEL_KEY)
+                if model_raw is None:
+                    model_raw = raw.get(_LEGACY_GROQ_MODEL_KEY)
+                if model_raw is not None:
+                    from skills.openai_client import normalize_openai_model
 
-                    groq_model = normalize_groq_model(str(raw[GROQ_MODEL_KEY] or ""))
+                    openai_model = normalize_openai_model(str(model_raw or ""))
                 if STT_MODE_KEY in raw:
                     stt_mode = normalize_stt_mode(str(raw[STT_MODE_KEY] or ""))
                 if PERSONA_PRESET_KEY in raw:
@@ -307,7 +310,7 @@ def reload_from_disk() -> dict[str, bool]:
         _voice_trade = voice_trade
         _crypto_auto_trade = crypto_auto_trade
         _crypto_voice_trade = crypto_voice_trade
-        _groq_model = groq_model
+        _openai_model = openai_model
         _stt_mode = stt_mode
         _persona_preset = persona_preset
     return dict(flags)
@@ -420,36 +423,36 @@ def set_crypto_voice_trade(enabled: bool) -> None:
     logging.info("[Настройки] Сделки крипты голосом: %s", "вкл" if enabled else "выкл")
 
 
-def get_groq_model() -> str:
-    """Модель, выбранная в настройках или из GROQ_MODEL."""
+def get_openai_model() -> str:
+    """Модель, выбранная в настройках или из OPENAI_MODEL."""
     _ensure_loaded()
     with _lock:
-        return _groq_model or _env_groq_model_default()
+        return _openai_model or _env_openai_model_default()
 
 
-def set_groq_model(model_id: str) -> None:
+def set_openai_model(model_id: str) -> None:
     """Комбо модели диалога: сразу на диск и в окружение процесса."""
-    global _groq_model
-    from skills.groq_client import normalize_groq_model
+    global _openai_model
+    from skills.openai_client import normalize_openai_model
 
-    chosen = normalize_groq_model(model_id)
+    chosen = normalize_openai_model(model_id)
     _ensure_loaded()
     with _lock:
-        _groq_model = chosen
-    os.environ["GROQ_MODEL"] = chosen
+        _openai_model = chosen
+    os.environ["OPENAI_MODEL"] = chosen
     _persist()
     logging.info("[Настройки] Модель диалога: %s", chosen)
 
 
 def get_stt_mode() -> str:
-    """Режим распознавания речи: 'hybrid' или 'vosk'."""
+    """Режим распознавания речи: только 'vosk'."""
     _ensure_loaded()
     with _lock:
         return _stt_mode or _env_stt_mode_default()
 
 
 def set_stt_mode(mode: str) -> None:
-    """Переключает режим распознавания: сразу на диск и в окружение."""
+    """Фиксирует оффлайн Vosk (hybrid больше не поддерживается)."""
     global _stt_mode
     chosen = normalize_stt_mode(mode)
     _ensure_loaded()
@@ -503,17 +506,15 @@ def get_persona_hint(preset: str) -> str:
 
 
 def is_online_stt_enabled() -> bool:
-    """Включено ли онлайн/гибридное распознавание через Groq Whisper."""
-    mode = get_stt_mode()
-    has_key = bool((os.getenv("GROQ_API_KEY") or "").strip().strip("\"'"))
-    return mode == "hybrid" and has_key
+    """Облачный STT отключён — только локальный Vosk."""
+    return False
 
 
-def get_effective_groq_model() -> str:
-    """Сильная ждёт закрытия Cursor, чтобы не жечь квоту Groq во время правки кода."""
-    from skills.groq_client import FAST_MODEL
+def get_effective_openai_model() -> str:
+    """Сильная ждёт закрытия Cursor, чтобы не жечь квоту во время правки кода."""
+    from skills.openai_client import FAST_MODEL
 
-    preferred = get_groq_model()
+    preferred = get_openai_model()
     if preferred != FAST_MODEL and is_cursor_running():
         return FAST_MODEL
     return preferred

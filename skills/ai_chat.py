@@ -14,8 +14,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from skills.base import BaseSkill, RequestContext
-from skills.groq_client import (
-    complete as groq_complete,
+from skills.openai_client import (
+    complete as llm_complete,
     get_client,
     is_retriable_model_error,
     model_chain,
@@ -34,7 +34,7 @@ _PROFILE_LOCK = threading.Lock()
 _REPLY_LOCK = threading.Lock()
 
 HISTORY_TTL_SEC = 2700  # 45 мин тишины — потом история сбрасывается
-MAX_LIVE_MESSAGES = 8  # только хвост диалога; LLM-выжимку убрали — она давала второй запрос Groq и держала lock
+MAX_LIVE_MESSAGES = 8  # только хвост диалога; LLM-выжимку убрали — она давала второй запрос и держала lock
 DAYS_RU = (
     "понедельник", "вторник", "среда", "четверг",
     "пятница", "суббота", "воскресенье",
@@ -158,7 +158,7 @@ def _fix_self_gender(text: str) -> str:
         text.strip(),
     )
     if text != original:
-        logging.info(f"[Groq] Поправил род: '{original}' → '{text}'")
+        logging.info(f"[LLM] Поправил род: '{original}' → '{text}'")
     return text
 
 
@@ -189,12 +189,11 @@ def log_system_action(action_text: str) -> None:
 
 
 class AIChatSkill(BaseSkill):
-    """Навык работы с ИИ Groq (Джарвис) с поддержкой памяти и очисткой речи под Piper TTS."""
+    """Навык работы с ИИ (Джарвис) с поддержкой памяти и очисткой речи под Piper TTS."""
 
     def __init__(self):
-        self.groq_api_key = (os.getenv("GROQ_API_KEY") or "").strip().strip("\"'")
-        # Чат, не агент: groq/compound* делают лишний круг и в логе Retrying + второй HTTP.
-        self.groq_model = self._preferred_model()
+        self.openai_api_key = (os.getenv("OPENAI_API_KEY") or "").strip().strip("\"'")
+        self.openai_model = self._preferred_model()
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.history_cache_path = os.path.join(base_dir, "chat_history_cache.json")
@@ -208,25 +207,25 @@ class AIChatSkill(BaseSkill):
 
         self._load_persona()
 
-        if not self.groq_api_key:
-            logging.error("[Groq] Ключ GROQ_API_KEY не найден в .env.")
+        if not self.openai_api_key:
+            logging.error("[LLM] Ключ OPENAI_API_KEY не найден в .env.")
             return
 
         try:
             self.client = get_client()
-            logging.info(f"[Groq] Модель: {self._preferred_model()}")
+            logging.info(f"[LLM] Модель: {self._preferred_model()}")
             self._load_history()
         except Exception as e:
-            logging.error(f"[Groq] Ошибка инициализации Groq: {e}")
+            logging.error(f"[LLM] Ошибка инициализации OpenAI-клиента: {e}")
             self.client = None
 
     def _preferred_model(self) -> str:
         try:
-            from skill_settings import get_effective_groq_model
+            from skill_settings import get_effective_openai_model
 
-            return get_effective_groq_model()
+            return get_effective_openai_model()
         except Exception:
-            return (os.getenv("GROQ_MODEL") or "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
+            return (os.getenv("OPENAI_MODEL") or "qwen/qwen3.8-27b:free").strip() or "qwen/qwen3.8-27b:free"
 
     def reload_persona(self) -> None:
         """Перезагружает характер и обновляет системную инструкцию в истории."""
@@ -238,7 +237,7 @@ class AIChatSkill(BaseSkill):
 
             self.persona_prompt = get_effective_persona_prompt(self.persona_config_path)
         except Exception as exc:
-            logging.warning("[Groq] Ошибка загрузки пресета характера: %s", exc)
+            logging.warning("[LLM] Ошибка загрузки пресета характера: %s", exc)
             default_persona = (
                 "Ты — Джарвис, мужчина, голосовой помощник. О себе только мужской род: "
                 "понял, рад, сделал, готов, согласен, уверен, должен. "
@@ -318,7 +317,7 @@ class AIChatSkill(BaseSkill):
         try:
             _write_json_atomic(self.history_cache_path, data)
         except Exception as e:
-            logging.error(f"[Groq] Ошибка сохранения истории: {e}")
+            logging.error(f"[LLM] Ошибка сохранения истории: {e}")
 
     def record_exchange(self, user_text: str, assistant_text: str) -> None:
         """Пишет в память диалога реплику навыка, чтобы Groq видел, что только что произошло."""
@@ -415,7 +414,7 @@ class AIChatSkill(BaseSkill):
                 with open(SHARED_EVENTS_PATH, "r", encoding="utf-8") as f:
                     events = json.load(f)
             except Exception as e:
-                logging.error(f"[Groq] Ошибка чтения событий: {e}")
+                logging.error(f"[LLM] Ошибка чтения событий: {e}")
                 return ""
 
         valid_events = []
@@ -676,7 +675,7 @@ class AIChatSkill(BaseSkill):
                         last_assistant = message["content"]
                         break
             if last_assistant and is_self_echo(text, last_assistant):
-                logging.info(f"[Groq] Похоже на эхо своей речи, пропускаю: '{text}'")
+                logging.info(f"[LLM] Похоже на эхо своей речи, пропускаю: '{text}'")
                 return
 
         self._reply(text, context.speak, channel=channel)
@@ -822,14 +821,14 @@ class AIChatSkill(BaseSkill):
                     if broker_report:
                         extra += f"\n[Реальное состояние твоего фонда на этот момент]: {broker_report}"
             except Exception as exc:
-                logging.warning(f"[Groq] Не удалось получить сводку брокера: {exc}")
+                logging.warning(f"[LLM] Не удалось получить сводку брокера: {exc}")
         elif all_time_ask:
             try:
                 import conky_markets
 
                 extra += conky_markets.lifetime_briefing()
             except Exception as exc:
-                logging.warning(f"[Groq] Не удалось получить рынки с покупки: {exc}")
+                logging.warning(f"[LLM] Не удалось получить рынки с покупки: {exc}")
                 extra += (
                     "\n[Рынки с покупки]: цифр нет. Скажи коротко, что цифр сейчас нет, не выдумывай."
                 )
@@ -857,7 +856,7 @@ class AIChatSkill(BaseSkill):
 
                 extra += conky_markets.mood_briefing()
             except Exception as exc:
-                logging.warning(f"[Groq] Не удалось получить день рынков: {exc}")
+                logging.warning(f"[LLM] Не удалось получить день рынков: {exc}")
                 extra += (
                     "\n[День рынков]: цифр нет. На «как дела» ответь коротко вроде «нормально», "
                     "без выдуманного плюса и минуса."
@@ -925,21 +924,21 @@ class AIChatSkill(BaseSkill):
                     except Exception as model_exc:
                         if parts:
                             logging.warning(
-                                f"[Groq] Поток {model_name} оборвался после начала озвучки: {model_exc}"
+                                f"[LLM] Поток {model_name} оборвался после начала озвучки: {model_exc}"
                             )
                             cleaned_reply = " ".join(parts).strip()
                             streamed = True
                             break
                         if is_retriable_model_error(model_exc, extra=("stream",)):
                             logging.warning(
-                                f"[Groq] Поток {model_name} недоступен, пробую другую модель или обычный ответ"
+                                f"[LLM] Поток {model_name} недоступен, пробую другую модель или обычный ответ"
                             )
                             continue
-                        logging.warning(f"[Groq] Поток не удался ({model_exc}), обычный запрос.")
+                        logging.warning(f"[LLM] Поток не удался ({model_exc}), обычный запрос.")
                         break
 
                 if not streamed and not aborted():
-                    raw_reply = groq_complete(
+                    raw_reply = llm_complete(
                         messages_for_api,
                         preferred=preferred,
                         temperature=temperature,
@@ -951,7 +950,7 @@ class AIChatSkill(BaseSkill):
                     if cleaned_reply:
                         speak_func(cleaned_reply)
             else:
-                raw_reply = groq_complete(
+                raw_reply = llm_complete(
                     messages_for_api,
                     preferred=preferred,
                     temperature=temperature,
@@ -963,15 +962,15 @@ class AIChatSkill(BaseSkill):
 
             if not cleaned_reply:
                 if aborted():
-                    logging.info("[Groq] Ответ оборван, в историю не пишу.")
+                    logging.info("[LLM] Ответ оборван, в историю не пишу.")
                     self._discard_last_user(text)
                     return
-                logging.warning("[Groq] Пустой ответ после очистки.")
+                logging.warning("[LLM] Пустой ответ после очистки.")
                 speak_func("Не вышло.")
                 cleaned_reply = "Не вышло."
 
             if aborted():
-                logging.info("[Groq] Ответ оборван после начала озвучки, в историю не пишу.")
+                logging.info("[LLM] Ответ оборван после начала озвучки, в историю не пишу.")
                 self._discard_last_user(text)
                 return
 
@@ -981,7 +980,7 @@ class AIChatSkill(BaseSkill):
                 self._save_history()
 
         except Exception as e:
-            logging.error(f"[Groq] Ошибка запроса к API: {e}")
+            logging.error(f"[LLM] Ошибка запроса к API: {e}")
             self._discard_last_user(text)
             if not aborted():
                 speak_func("Недоступен.")

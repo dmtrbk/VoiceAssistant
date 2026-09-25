@@ -227,8 +227,8 @@ class CryptoDeskMixin:
                 else "Риск-офф по BTC — лучше кэш."
             )
         try:
-            from skill_settings import get_effective_groq_model
-            from skills.groq_client import complete
+            from skill_settings import get_effective_openai_model
+            from skills.openai_client import complete
 
             raw = complete(
                 [
@@ -248,7 +248,7 @@ class CryptoDeskMixin:
                     },
                     {"role": "user", "content": facts + "\n\nВыбери доли."},
                 ],
-                preferred=get_effective_groq_model(),
+                preferred=get_effective_openai_model(),
                 temperature=0.2,
                 max_tokens=250,
             )

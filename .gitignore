@@ -13,6 +13,7 @@ surveillance_snaps/
 generated_images/
 *.tmp
 skills/chat_history_cache.json
+skills/openrouter_models_cache.json
 skills/user_profile.json
 skills/shared_events.json
 quiet_book.json

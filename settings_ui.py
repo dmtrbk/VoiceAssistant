@@ -1,7 +1,7 @@
 # settings_ui.py
 # Окно Qt: вкладки «Основные» (речь, модель, характер) и «Навыки». Каркас скрыт.
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -20,10 +20,9 @@ from PySide6.QtWidgets import (
 
 from skill_settings import (
     get_flags,
-    get_groq_model,
+    get_openai_model,
     get_persona_hint,
     get_persona_preset,
-    get_stt_mode,
     grouped_skills,
     is_auto_trade_enabled,
     is_crypto_auto_trade_enabled,
@@ -36,14 +35,43 @@ from skill_settings import (
     set_crypto_auto_trade,
     set_crypto_voice_trade,
     set_flag,
-    set_groq_model,
+    set_openai_model,
     set_persona_preset,
-    set_stt_mode,
     set_voice_trade,
-    stt_mode_choices,
 )
-from skills.groq_client import FAST_MODEL, groq_model_choices
+from skills.openai_client import FAST_MODEL, openai_model_choices
 from theme_colors import current_palette, load_palette
+
+
+class _ModelCatalogWorker(QThread):
+    """Фон: обновить каталог и опционально пропинговать free-модели."""
+
+    finished_ok = Signal(object)  # list[tuple[str, str]]
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, *, probe: bool = False, parent=None):
+        super().__init__(parent)
+        self._probe = probe
+
+    def run(self) -> None:
+        try:
+            from skills.model_catalog import fetch_free_models, probe_models, settings_model_choices
+
+            self.progress.emit("Обновляю каталог OpenRouter…")
+            catalog = fetch_free_models(force=True)
+            if self._probe and catalog:
+                ids = [mid for mid, _title in catalog]
+
+                def on_progress(done: int, total: int, mid: str, status: str) -> None:
+                    mark = "ok" if status == "ok" else "fail"
+                    self.progress.emit(f"Проверка {done}/{total}: {mid} [{mark}]")
+
+                self.progress.emit(f"Пинг {len(ids)} бесплатных моделей…")
+                probe_models(ids, progress=on_progress)
+            self.finished_ok.emit(settings_model_choices(get_openai_model()))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class ToggleSwitch(QCheckBox):
@@ -100,8 +128,9 @@ class SettingsWindow(QWidget):
 
         self._model_combo: QComboBox | None = None
         self._model_hint: QLabel | None = None
-        self._stt_combo: QComboBox | None = None
-        self._stt_hint: QLabel | None = None
+        self._model_refresh_btn: QPushButton | None = None
+        self._model_probe_btn: QPushButton | None = None
+        self._model_worker: _ModelCatalogWorker | None = None
         self._persona_combo: QComboBox | None = None
         self._persona_hint: QLabel | None = None
         self._boxes: dict[str, QCheckBox] = {}
@@ -162,7 +191,6 @@ class SettingsWindow(QWidget):
         col = QVBoxLayout(page)
         col.setContentsMargins(0, 4, 0, 0)
         col.setSpacing(10)
-        col.addWidget(self._build_stt_card())
         col.addWidget(self._build_model_card())
         col.addWidget(self._build_persona_card())
         col.addStretch(1)
@@ -205,30 +233,6 @@ class SettingsWindow(QWidget):
         heading.setObjectName("section")
         return heading
 
-    def _build_stt_card(self) -> QFrame:
-        card = QFrame()
-        card.setObjectName("card")
-        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        col = QVBoxLayout(card)
-        col.setContentsMargins(16, 12, 16, 12)
-        col.setSpacing(8)
-        col.addWidget(self._card_title("Распознавание речи"))
-
-        combo = QComboBox()
-        for mode_id, title in stt_mode_choices():
-            combo.addItem(title, mode_id)
-        combo.currentIndexChanged.connect(self._on_stt_changed)
-        self._stt_combo = combo
-        col.addWidget(combo)
-
-        hint = QLabel()
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        self._stt_hint = hint
-        col.addWidget(hint)
-        self._sync_stt_row()
-        return card
-
     def _build_model_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
@@ -239,11 +243,34 @@ class SettingsWindow(QWidget):
         col.addWidget(self._card_title("Модель диалога"))
 
         combo = QComboBox()
-        for model_id, title in groq_model_choices():
+        combo.setMaxVisibleItems(16)
+        for model_id, title in openai_model_choices(get_openai_model()):
             combo.addItem(title, model_id)
         combo.currentIndexChanged.connect(self._on_model_changed)
         self._model_combo = combo
         col.addWidget(combo)
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(8)
+        refresh = QPushButton("Обновить список")
+        refresh.setObjectName("navBtn")
+        refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        refresh.clicked.connect(lambda: self._start_model_worker(probe=False))
+        self._model_refresh_btn = refresh
+        actions.addWidget(refresh, 1)
+        probe = QPushButton("Проверить")
+        probe.setObjectName("navBtn")
+        probe.setCursor(Qt.CursorShape.PointingHandCursor)
+        probe.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        probe.setToolTip(
+            "Короткий ping каждой бесплатной модели (медленно, тратит лимиты free)."
+        )
+        probe.clicked.connect(lambda: self._start_model_worker(probe=True))
+        self._model_probe_btn = probe
+        actions.addWidget(probe, 1)
+        col.addLayout(actions)
 
         hint = QLabel()
         hint.setObjectName("hint")
@@ -251,7 +278,68 @@ class SettingsWindow(QWidget):
         self._model_hint = hint
         col.addWidget(hint)
         self._sync_model_row()
+        self._kick_catalog_refresh()
         return card
+
+    def _set_model_buttons_enabled(self, enabled: bool) -> None:
+        for button in (self._model_refresh_btn, self._model_probe_btn):
+            if button is not None:
+                button.setEnabled(enabled)
+
+    def _kick_catalog_refresh(self) -> None:
+        """При открытии: тихо подтянуть каталог, если кэш пуст/протух."""
+        try:
+            from skills.model_catalog import cached_free_models
+
+            if cached_free_models(allow_stale=False):
+                return
+        except Exception:
+            return
+        self._start_model_worker(probe=False)
+
+    def _start_model_worker(self, *, probe: bool) -> None:
+        if self._model_worker is not None and self._model_worker.isRunning():
+            return
+        self._set_model_buttons_enabled(False)
+        if self._model_hint is not None:
+            self._model_hint.setText(
+                "Пинг бесплатных моделей…" if probe else "Обновляю каталог OpenRouter…"
+            )
+        worker = _ModelCatalogWorker(probe=probe, parent=self)
+        worker.progress.connect(self._on_model_worker_progress)
+        worker.finished_ok.connect(self._on_model_worker_ok)
+        worker.failed.connect(self._on_model_worker_fail)
+        worker.finished.connect(lambda: self._set_model_buttons_enabled(True))
+        self._model_worker = worker
+        worker.start()
+
+    def _on_model_worker_progress(self, text: str) -> None:
+        if self._model_hint is not None and text:
+            self._model_hint.setText(text)
+
+    def _on_model_worker_ok(self, _models: object) -> None:
+        self._reload_model_combo()
+        self._sync_model_row()
+
+    def _on_model_worker_fail(self, message: str) -> None:
+        if self._model_hint is not None:
+            self._model_hint.setText(f"Не удалось обновить модели: {message}")
+
+    def _reload_model_combo(self) -> None:
+        if self._model_combo is None:
+            return
+        current = get_openai_model()
+        self._model_combo.blockSignals(True)
+        self._model_combo.clear()
+        for model_id, title in openai_model_choices(current):
+            self._model_combo.addItem(title, model_id)
+        index = self._model_combo.findData(current)
+        if index < 0 and current:
+            self._model_combo.addItem(current, current)
+            index = self._model_combo.findData(current)
+        if index >= 0:
+            self._model_combo.setCurrentIndex(index)
+        self._model_combo.blockSignals(False)
 
     def _build_persona_card(self) -> QFrame:
         card = QFrame()
@@ -283,7 +371,6 @@ class SettingsWindow(QWidget):
     def showEvent(self, event):
         self._apply_theme()
         self._rebuild()
-        self._sync_stt_row()
         self._sync_model_row()
         self._sync_persona_row()
         super().showEvent(event)
@@ -308,37 +395,10 @@ class SettingsWindow(QWidget):
         set_persona_preset(str(preset_id))
         self._sync_persona_row()
 
-    def _sync_stt_row(self) -> None:
-        if self._stt_combo is None or self._stt_hint is None:
-            return
-        current = get_stt_mode()
-        index = self._stt_combo.findData(current)
-        self._stt_combo.blockSignals(True)
-        if index >= 0:
-            self._stt_combo.setCurrentIndex(index)
-        self._stt_combo.blockSignals(False)
-        if current == "hybrid":
-            self._stt_hint.setText(
-                "Гибридный режим: Vosk для имени и стоп-слов, Groq Whisper Turbo для точного понимания реплик диалога."
-            )
-        else:
-            self._stt_hint.setText(
-                "Оффлайн режим: только локальная модель Vosk без обращений к облаку."
-            )
-
-    def _on_stt_changed(self, index: int) -> None:
-        if self._stt_combo is None or index < 0:
-            return
-        mode_id = self._stt_combo.itemData(index)
-        if not mode_id:
-            return
-        set_stt_mode(str(mode_id))
-        self._sync_stt_row()
-
     def _sync_model_row(self) -> None:
         if self._model_combo is None or self._model_hint is None:
             return
-        current = get_groq_model()
+        current = get_openai_model()
         known = {self._model_combo.itemData(i) for i in range(self._model_combo.count())}
         if current not in known:
             self._model_combo.addItem(current, current)
@@ -350,22 +410,35 @@ class SettingsWindow(QWidget):
 
         cursor_on = is_cursor_running()
         strong = current != FAST_MODEL
+        try:
+            from skills.model_catalog import cached_free_models
+
+            free_n = len(cached_free_models(allow_stale=True))
+        except Exception:
+            free_n = 0
+        catalog_note = (
+            f"В списке {free_n} бесплатных с OpenRouter. "
+            "«Обновить список» — каталог, «Проверить» — ping (медленно)."
+            if free_n
+            else "Нажми «Обновить список», чтобы подтянуть бесплатные модели OpenRouter."
+        )
         if cursor_on and strong:
             self._model_hint.setText(
                 "Сильная выбрана. Пока открыт Cursor, отвечает быстрая. "
-                "Закрой редактор — Джарвис переключится."
+                "Закрой редактор — Джарвис переключится. " + catalog_note
             )
         elif cursor_on:
             self._model_hint.setText(
-                "Сейчас быстрая. Сильную можно выбрать заранее: заработает, когда закроешь Cursor."
+                "Сейчас быстрая. Сильную можно выбрать заранее: заработает, когда закроешь Cursor. "
+                + catalog_note
             )
         elif strong:
             self._model_hint.setText(
-                "Сильная модель. Если откроешь Cursor, временно вернётся быстрая."
+                "Сильная модель. Если откроешь Cursor, временно вернётся быстрая. " + catalog_note
             )
         else:
             self._model_hint.setText(
-                "Быстрая модель. Сильную удобнее включать, когда Cursor закрыт."
+                "Быстрая модель. Сильную удобнее включать, когда Cursor закрыт. " + catalog_note
             )
 
     def _on_model_changed(self, index: int) -> None:
@@ -374,7 +447,7 @@ class SettingsWindow(QWidget):
         model_id = self._model_combo.itemData(index)
         if not model_id:
             return
-        set_groq_model(str(model_id))
+        set_openai_model(str(model_id))
         self._sync_model_row()
 
     def _make_toggle(self, checked: bool) -> QCheckBox:

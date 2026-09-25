@@ -142,7 +142,7 @@ volume_ctrl = VolumeController()
 
 is_speaking = False
 MUTE_SPEECH = False
-is_thinking = False  # пока Groq/навык думает — не гасить сессию по тайм-ауту
+is_thinking = False  # пока LLM/навык думает — не гасить сессию по тайм-ауту
 _thinking_lock = threading.Lock()
 _thinking_count = 0
 playback_interrupted = False
@@ -153,7 +153,7 @@ last_speak_end_time = 0.0
 last_spoken_text = ""
 play_process = None
 
-# Очередь предложений: is_speaking не падает между фразами Groq, иначе Vosk слышит колонки.
+# Очередь предложений: is_speaking не падает между фразами LLM, иначе Vosk слышит колонки.
 # Воркер один на процесс; Piper следующего куска идёт, пока paplay играет текущий.
 _tts_lock = threading.Lock()
 _tts_queue: queue.Queue = queue.Queue()
@@ -269,7 +269,7 @@ def _synth_item(text: str, gen: int) -> tuple[str, bool, int] | None:
 
 
 def _mark_tts_idle() -> None:
-    """Очередь пуста и Groq уже не пишет — можно снова слушать. Воркер не гасим."""
+    """Очередь пуста и LLM уже не пишет — можно снова слушать. Воркер не гасим."""
     global is_speaking, last_active_time, last_speak_end_time
     with _tts_lock:
         if not _tts_queue.empty() or play_process is not None:
@@ -874,7 +874,7 @@ def main():
         route_phrase(phrase, wake)
 
     def refine_worker() -> None:
-        """Whisper отдельным потоком: пока он отвечает, микрофон слушают дальше."""
+        """Уточнение фразы отдельным потоком: микрофон слушают дальше."""
         while True:
             item = refine_queue.get()
             try:
@@ -1010,7 +1010,7 @@ def main():
                         _reset_recognizer(recognizer)
                         continue
 
-                # Уточнение фразы через онлайн Groq Whisper для диалога или полной команды.
+                # Уточнение фразы (сейчас — текст Vosk) для диалога или полной команды.
                 # Запрос уходит в refine_worker: в цикле он глушил микрофон на время ответа.
                 vosk_phrase = _strip_wake(text, detected_wake_word) if detected_wake_word else text
                 if is_active or (detected_wake_word and vosk_phrase):

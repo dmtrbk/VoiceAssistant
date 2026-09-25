@@ -1,5 +1,6 @@
-# skills/groq_client.py
-# Один клиент Groq на процесс. Цепочка моделей общая для чата и биржи.
+# skills/openai_client.py
+# Один OpenAI-совместимый клиент на процесс (по умолчанию OpenRouter).
+# Цепочка моделей общая для чата и биржи.
 
 from __future__ import annotations
 
@@ -11,37 +12,45 @@ from typing import Any, Callable, Iterator
 _LOCK = threading.Lock()
 _client = None
 
-# qwen/qwen3.8-27b ловил таймаут на fallback; llama-3.3-70b снят с free 16.08.2026.
-FAST_MODEL = "openai/gpt-oss-20b"
-STRONG_MODEL = "openai/gpt-oss-120b"
+DEFAULT_API_BASE = "https://openrouter.ai/api/v1"
+
+# id в формате OpenRouter (provider/model).
+FAST_MODEL = "qwen/qwen3.8-27b:free"
+STRONG_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 FALLBACK_MODELS = (
     FAST_MODEL,
-    "qwen/qwen3.6-27b",
+    "google/gemma-4-31b-it:free",
+    "z-ai/glm-5.2:free",
     STRONG_MODEL,
 )
 
 # id, подпись в окне настроек. Старт — быстрая; сильная — когда Cursor закрыт.
-GROQ_MODEL_CHOICES = (
-    (FAST_MODEL, "Быстрая — GPT-OSS 20B"),
-    (STRONG_MODEL, "Сильная — GPT-OSS 120B"),
+OPENAI_MODEL_CHOICES = (
+    (FAST_MODEL, "Быстрая — Qwen3.8 27B free"),
+    (STRONG_MODEL, "Сильная — Nemotron Super 120B free"),
 )
 
+_MODEL_MISS = ("model", "not found", "unknown", "404", "400")
+_RETRY_TRANSIENT = ("timeout", "timed out", "temporarily", "429", "rate limit", "overloaded")
 
-def normalize_groq_model(raw: str | None) -> str:
+
+def normalize_openai_model(raw: str | None) -> str:
     clean = (raw or "").strip()
     return clean or FAST_MODEL
 
 
-def groq_model_choices(current: str | None = None) -> list[tuple[str, str]]:
-    rows = list(GROQ_MODEL_CHOICES)
-    seen = {item[0] for item in rows}
-    extra = (current or "").strip()
-    if extra and extra not in seen:
-        rows.append((extra, extra))
-    return rows
+def openai_model_choices(current: str | None = None) -> list[tuple[str, str]]:
+    try:
+        from skills.model_catalog import settings_model_choices
 
-_MODEL_MISS = ("model", "not found", "unknown", "404", "400")
-_RETRY_TRANSIENT = ("timeout", "timed out", "temporarily", "429", "rate limit", "overloaded")
+        return settings_model_choices(current)
+    except Exception:
+        rows = list(OPENAI_MODEL_CHOICES)
+        seen = {item[0] for item in rows}
+        extra = (current or "").strip()
+        if extra and extra not in seen:
+            rows.append((extra, extra))
+        return rows
 
 
 def model_chain(preferred: str | None = None) -> list[str]:
@@ -60,16 +69,25 @@ def is_retriable_model_error(exc: BaseException, extra: tuple[str, ...] = ()) ->
     return any(marker in err for marker in _MODEL_MISS + _RETRY_TRANSIENT + extra)
 
 
+def _api_key() -> str:
+    return (os.getenv("OPENAI_API_KEY") or "").strip().strip("\"'")
+
+
+def _api_base() -> str:
+    raw = (os.getenv("OPENAI_API_BASE") or "").strip().strip("\"'")
+    return raw or DEFAULT_API_BASE
+
+
 def get_client():
-    """Синхронный Groq. max_retries=0 — иначе ~0.4 с Retrying до каждой реплики."""
+    """Синхронный OpenAI SDK. max_retries=0 — без лишней задержки Retrying."""
     global _client
     with _LOCK:
         if _client is not None:
             return _client
-        key = (os.getenv("GROQ_API_KEY") or "").strip().strip("\"'")
+        key = _api_key()
         if not key:
             return None
-        from groq import Groq
+        from openai import OpenAI
 
         try:
             import httpx
@@ -77,7 +95,16 @@ def get_client():
             timeout: Any = httpx.Timeout(connect=8.0, read=45.0, write=10.0, pool=5.0)
         except Exception:
             timeout = 45.0
-        _client = Groq(api_key=key, max_retries=0, timeout=timeout)
+        _client = OpenAI(
+            api_key=key,
+            base_url=_api_base(),
+            max_retries=0,
+            timeout=timeout,
+            default_headers={
+                "HTTP-Referer": "https://github.com/local/VoiceAssistant",
+                "X-Title": "VoiceAssistant Jarvis",
+            },
+        )
         return _client
 
 
@@ -96,8 +123,6 @@ def chat_kwargs(
     }
     if stream:
         kwargs["stream"] = True
-    if "gpt-oss" in (model_name or ""):
-        kwargs["reasoning_effort"] = "low"
     return kwargs
 
 
@@ -109,7 +134,7 @@ def complete_one(
 ) -> str:
     client = get_client()
     if client is None:
-        raise RuntimeError("Groq client unavailable")
+        raise RuntimeError("OpenAI client unavailable")
     response = client.chat.completions.create(
         **chat_kwargs(messages, model_name, temperature, max_tokens)
     )
@@ -129,12 +154,12 @@ def complete(
         except Exception as exc:
             last_err = exc
             if is_retriable_model_error(exc):
-                logging.warning("[Groq] Модель %s недоступна, пробую fallback", model_name)
+                logging.warning("[LLM] Модель %s недоступна, пробую fallback", model_name)
                 continue
             raise
     if last_err:
         raise last_err
-    raise RuntimeError("No response from Groq")
+    raise RuntimeError("No response from OpenAI-compatible API")
 
 
 def stream_tokens(
@@ -146,7 +171,7 @@ def stream_tokens(
 ) -> Iterator[str]:
     client = get_client()
     if client is None:
-        raise RuntimeError("Groq client unavailable")
+        raise RuntimeError("OpenAI client unavailable")
     if abort and abort():
         return
     stream = client.chat.completions.create(
