@@ -27,6 +27,7 @@ from .common import (
     write_trail_state,
 )
 from .desk_policy import (
+    ALT_MIN_HOLD_HOURS,
     CHURN_COOLDOWN_HOURS,
     DESK_ALT_SLEEVE,
     DESK_CORE,
@@ -316,7 +317,7 @@ class CryptoDeskMixin:
             btc7, btc_day = self._btc_regime()
             if self._api_key and is_risk_off(btc_chg_7=btc7, btc_chg_day=btc_day):
                 try:
-                    result = self._rebalance({})
+                    result = self._rebalance({}, respect_hold=False)
                 except Exception as exc:
                     logger.warning("[Крипта] сброс в кэш: %s", exc)
             return result
@@ -355,7 +356,7 @@ class CryptoDeskMixin:
             if not self._api_key:
                 write_alloc_state({}, why=why, watch_trades=watch_trades)
                 return why
-            result = self._rebalance({})
+            result = self._rebalance({}, respect_hold=False)
             traded = result != "Портфель уже в коридоре цели."
             if traded:
                 watch_trades.append(now)
@@ -414,6 +415,10 @@ class CryptoDeskMixin:
                 continue
             price = float(prices.get(ticker) or pos.get("price") or 0)
             if price <= 0:
+                continue
+            # Пыль после продажи не держит трейл — иначе новая покупка унаследует старый пик.
+            leg_value = float(pos.get("value") or 0) or float(pos.get("qty") or 0) * price
+            if leg_value < min_trade:
                 continue
             prev = trail_legs.get(ticker) or {}
             entry = float(prev.get("entry") or 0) or float(avg_costs.get(ticker) or 0) or price
@@ -518,7 +523,7 @@ class CryptoDeskMixin:
             return "дозор: без сделок"
         return "дозор: " + " ".join(parts)
 
-    def _rebalance(self, target_alloc: dict[str, float]) -> str:
+    def _rebalance(self, target_alloc: dict[str, float], *, respect_hold: bool = True) -> str:
         cash, positions_list = self._wallet()
         positions = {item["ticker"]: item for item in positions_list}
         self._ensure_desk_bought(set(positions.keys()))
@@ -559,8 +564,28 @@ class CryptoDeskMixin:
             and current_values[ticker] > target_values[ticker]
         ]
         sells.sort(key=lambda item: item[1], reverse=True)
+        fresh: set[str] = set()
+        if respect_hold:
+            try:
+                fresh = crypto_journal.recently_bought(ALT_MIN_HOLD_HOURS)
+            except Exception:
+                fresh = set()
+        kept_alt_value = 0.0
         for ticker, excess in sells:
             if target_alloc.get(ticker, 0.0) <= 0 and self._is_owner_position(ticker):
+                continue
+            day_chg = day_chgs.get(ticker)
+            if (
+                ticker in fresh
+                and ticker in DESK_ALT_SLEEVE
+                and (day_chg is None or day_chg < take_profit_day_pct_for(ticker))
+            ):
+                kept_alt_value += excess
+                logger.info(
+                    "[Крипта] %s куплен < %d ч назад — не ротирую",
+                    ticker,
+                    int(ALT_MIN_HOLD_HOURS),
+                )
                 continue
             price = prices.get(ticker) or 0.0
             qty = float(positions.get(ticker, {}).get("qty") or 0)
@@ -595,6 +620,12 @@ class CryptoDeskMixin:
             )
             and target_values.get(ticker, 0) > current_values.get(ticker, 0)
         ]
+        # Удержанный свежий альт занимает место в рукаве — новые альты добираем на остаток.
+        if kept_alt_value > 0:
+            alt_need = sum(n for t, n in buys if t in DESK_ALT_SLEEVE and n > 0)
+            if alt_need > 0:
+                scale = max(0.0, alt_need - kept_alt_value) / alt_need
+                buys = [(t, n * scale if t in DESK_ALT_SLEEVE else n) for t, n in buys]
         buys = [(t, n) for t, n in buys if n > 0]
         buys.sort(key=lambda item: item[1], reverse=True)
         need_sum = sum(need for _ticker, need in buys)

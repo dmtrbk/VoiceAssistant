@@ -47,6 +47,8 @@ TRAIL_ARM_PCT = 5.0
 TRAIL_CORE_PCT = 6.0
 TRAIL_ALT_PCT = 8.0
 CHURN_COOLDOWN_HOURS = 12.0
+# Свежекупленный альт не ротируем полным столом (трейл, TP и risk-off продают как обычно).
+ALT_MIN_HOLD_HOURS = 12.0
 
 
 def is_alt_sleeve(ticker: str) -> bool:

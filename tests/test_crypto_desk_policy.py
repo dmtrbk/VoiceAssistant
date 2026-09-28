@@ -558,6 +558,96 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertGreater(by_ticker["BTC"], by_ticker["ETH"])
         self.assertAlmostEqual(sum(by_ticker.values()), 100.0 * 0.998, places=1)
 
+    def test_buy_resets_stale_trail_leg(self):
+        from skills.crypto import common as crypto_common
+
+        crypto_common.write_trail_state(
+            {"MNT": {"entry": 0.67, "high": 0.7069, "armed": True}}
+        )
+        with (
+            patch.object(self.skill, "_filters", return_value={"step": 0.01, "min_amt": 5.0, "min_qty": 0.0}),
+            patch.object(self.skill, "_ticker", return_value={"price": 0.65, "chg": 0.0, "turnover": 1}),
+            patch.object(self.skill, "_signed", return_value={"result": {"orderId": "1"}}),
+            patch.object(self.skill, "_journal_trade"),
+            patch.object(self.skill, "_mark_desk_bought"),
+        ):
+            self.skill._place_order("MNT", "Buy", quote_usdt=5.0)
+        self.assertNotIn("MNT", crypto_common.read_trail_state())
+
+    def test_watch_trail_ignores_dust(self):
+        from skills.crypto import common as crypto_common
+
+        crypto_common.write_alloc_state({"BTC": 40.0}, why="test")
+        crypto_common.write_trail_state(
+            {"MNT": {"entry": 0.67, "high": 0.7069, "armed": True}}
+        )
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+            placed.append((ticker, side))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(
+                self.skill,
+                "_wallet",
+                return_value=(
+                    60.0,
+                    [{"ticker": "MNT", "qty": 0.5, "value": 0.32, "price": 0.64, "name": "MNT"}],
+                ),
+            ),
+            patch.object(self.skill, "_cash_and_held", return_value=(60.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_btc_regime", return_value=(2.0, 1.0)),
+            patch.object(self.skill, "_ticker", return_value={"price": 0.64, "chg": 0.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch.object(self.skill, "_api_key", "x"),
+            patch("skills.crypto.journal.open_avg_costs", return_value={}),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"MNT"}
+            self.skill._desk_watch_locked(silent=True)
+        self.assertFalse(any(t == "MNT" and s == "Sell" for t, s in placed))
+        self.assertNotIn("MNT", crypto_common.read_trail_state())
+
+    def _rebalance_with_fresh_alt(self, *, respect_hold: bool) -> list[tuple[str, str]]:
+        placed: list[tuple[str, str]] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+            placed.append((ticker, side))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(
+                self.skill,
+                "_wallet",
+                return_value=(
+                    70.0,
+                    [{"ticker": "DOGE", "qty": 300.0, "value": 30.0, "price": 0.1, "name": "Дож"}],
+                ),
+            ),
+            patch.object(self.skill, "_cash_and_held", return_value=(70.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_ticker", return_value={"price": 0.1, "chg": 1.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.journal.recently_bought", return_value={"DOGE"}),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"DOGE"}
+            self.skill._rebalance({"BTC": 40.0}, respect_hold=respect_hold)
+        return placed
+
+    def test_rebalance_keeps_fresh_alt(self):
+        placed = self._rebalance_with_fresh_alt(respect_hold=True)
+        self.assertNotIn(("DOGE", "Sell"), placed)
+        self.assertIn(("BTC", "Buy"), placed)
+
+    def test_risk_off_sells_fresh_alt(self):
+        placed = self._rebalance_with_fresh_alt(respect_hold=False)
+        self.assertIn(("DOGE", "Sell"), placed)
+
 
 if __name__ == "__main__":
     unittest.main()

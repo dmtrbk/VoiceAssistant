@@ -157,6 +157,12 @@ class CryptoTradesMixin:
         self._bust_private_cache()
         return ( " ".join(parts) + " " if parts else "") + self._trade_buy(ticker, None)
 
+    def _reset_trail_leg(self, ticker: str) -> None:
+        """Новая покупка — трейл с нуля: старый пик/armed от прошлой позиции не наследуем."""
+        legs = common.read_trail_state()
+        if legs.pop(ticker.upper(), None) is not None:
+            common.write_trail_state(legs)
+
     def _place_order(
         self,
         ticker: str,
@@ -197,6 +203,7 @@ class CryptoTradesMixin:
         self._bust_private_cache()
         if side == "Buy":
             self._mark_desk_bought(ticker)
+            self._reset_trail_leg(ticker)
         spoken = _spoken(ticker)
         verb = "Купил" if side == "Buy" else "Продал"
         phrase = f"{verb} {spoken} на {_format_usd(filled_quote)}."
