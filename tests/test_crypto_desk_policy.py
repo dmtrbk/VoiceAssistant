@@ -104,23 +104,23 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIn("Скор", why)
 
     def test_alt_sleeve_caps_and_leaves_unused_as_cash(self):
-        # Mean-reversion: в рукав идут просевшие альты, не дневной разгон.
+        # В рукав идут альты у нижней полосы 4h: самые глубокие, по равному слоту.
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
             {"ticker": "ETH", "chg": 0.8, "chg_7": 2.5, "turnover": 1e9},
-            {"ticker": "SOL", "chg": 1.2, "chg_7": 4.0, "turnover": 1e9},
-            {"ticker": "MNT", "chg": -6.0, "chg_7": -4.0, "turnover": 1e9},
-            {"ticker": "LINK", "chg": -4.0, "chg_7": -3.0, "turnover": 1e9},
-            {"ticker": "AVAX", "chg": -3.0, "chg_7": -2.0, "turnover": 1e9},
-            {"ticker": "NEAR", "chg": -5.0, "chg_7": -3.5, "turnover": 1e9},
+            {"ticker": "SOL", "chg": 1.2, "chg_7": 4.0, "turnover": 1e9, "bb_z": -3.5},
+            {"ticker": "MNT", "chg": -6.0, "chg_7": -4.0, "turnover": 1e9, "bb_z": -3.1},
+            {"ticker": "LINK", "chg": -4.0, "chg_7": -3.0, "turnover": 1e9, "bb_z": -2.6},
+            {"ticker": "AVAX", "chg": -3.0, "chg_7": -2.0, "turnover": 1e9, "bb_z": -2.9},
+            {"ticker": "NEAR", "chg": -5.0, "chg_7": -3.5, "turnover": 1e9, "bb_z": -2.7},
         ]
         alloc, why = policy.score_alloc(rows)
-        alt_sum = sum(v for k, v in alloc.items() if k in policy.DESK_ALT_SLEEVE)
+        alts = {k: v for k, v in alloc.items() if k in policy.DESK_ALT_SLEEVE}
         core_sum = sum(v for k, v in alloc.items() if k in policy.DESK_CORE)
         self.assertNotIn("SOL", alloc)
-        self.assertLessEqual(alt_sum, policy.ALT_SLEEVE_MAX_PCT + 0.5)
-        self.assertGreater(alt_sum, 0)
-        self.assertLessEqual(len([k for k in alloc if k in policy.DESK_ALT_SLEEVE]), policy.ALT_MAX_NAMES)
+        self.assertEqual(set(alts), {"MNT", "AVAX", "NEAR"})
+        self.assertTrue(all(v == policy.alt_slot_pct() for v in alts.values()))
+        self.assertLessEqual(sum(alts.values()), policy.ALT_SLEEVE_MAX_PCT + 0.5)
         core_cap = 100.0 - policy.DESK_CASH_FLOOR_PCT - policy.ALT_SLEEVE_MAX_PCT
         self.assertLessEqual(core_sum, core_cap + 0.5)
         self.assertLessEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_PCT + 0.5)
@@ -139,41 +139,62 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIn("BTC", alloc)
         self.assertIn("ETH", alloc)
 
-    def test_alt_prefers_dip_over_pump(self):
+    def test_alt_enters_only_at_lower_band(self):
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
-            {"ticker": "MNT", "chg": -5.0, "chg_7": -3.0, "turnover": 1e9},
-            {"ticker": "LINK", "chg": 8.0, "chg_7": 6.0, "turnover": 1e9},
+            {"ticker": "MNT", "chg": -5.0, "chg_7": -3.0, "turnover": 1e9, "bb_z": -2.8},
+            {"ticker": "LINK", "chg": -6.0, "chg_7": -9.0, "turnover": 1e9, "bb_z": -1.2},
+            {"ticker": "NEAR", "chg": -9.0, "chg_7": -20.0, "turnover": 1e9},
         ]
         alloc, why = policy.score_alloc(rows)
         self.assertIn("BTC", alloc)
         self.assertIn("MNT", alloc)
         self.assertNotIn("LINK", alloc)
+        self.assertNotIn("NEAR", alloc)  # без полос не входим
         self.assertIn("альты", why)
 
-    def test_alt_skips_crash_and_week_pump(self):
+    def test_held_alt_kept_until_exit_dust_dropped(self):
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
-            {"ticker": "MNT", "chg": -2.0, "chg_7": -25.0, "turnover": 1e9},
-            {"ticker": "LINK", "chg": -2.0, "chg_7": 12.0, "turnover": 1e9},
+            {"ticker": "XRP", "chg": 2.0, "chg_7": 1.0, "turnover": 1e9, "bb_z": 0.8, "held_value": 30.0},
+            {"ticker": "ADA", "chg": 1.0, "chg_7": 1.0, "turnover": 1e9, "bb_z": 0.5, "held_value": 0.4},
         ]
-        alloc, why = policy.score_alloc(rows)
-        self.assertIn("BTC", alloc)
-        self.assertNotIn("MNT", alloc)
-        self.assertNotIn("LINK", alloc)
-        self.assertIn("альты 0%", why)
+        alloc, _why = policy.score_alloc(rows)
+        self.assertEqual(alloc.get("XRP"), policy.alt_slot_pct())
+        self.assertNotIn("ADA", alloc)
 
-    def test_filter_blocks_rising_alt_entry(self):
+    def test_held_alts_take_slots_first(self):
         rows = [
-            {"ticker": "BTC", "turnover": 1e9, "chg": 1.0, "chg_7": 2.0},
-            {"ticker": "NEAR", "turnover": 1e9, "chg": 5.0, "chg_7": -1.0},
-        ]
-        filtered = policy.filter_auto_candidates(
-            rows, held=set(), watchlist=["BTC", "NEAR"], cooldown=set()
+            {"ticker": t, "turnover": 1e9, "bb_z": 0.0, "held_value": 20.0}
+            for t in ("XRP", "DOGE", "ADA")
+        ] + [{"ticker": "LINK", "turnover": 1e9, "bb_z": -3.5}]
+        alts = policy.pick_alts(rows)
+        self.assertEqual(set(alts), {"XRP", "DOGE", "ADA"})
+
+    def test_alt_exit_reason(self):
+        self.assertEqual(policy.alt_exit_reason(price=85.0, entry=100.0, ma=120.0), "стоп")
+        self.assertEqual(policy.alt_exit_reason(price=102.0, entry=100.0, ma=101.0), "средняя")
+        # У средней, но прибыль не перекрывает комиссии с запасом.
+        self.assertIsNone(policy.alt_exit_reason(price=100.5, entry=100.0, ma=100.2))
+        self.assertIsNone(policy.alt_exit_reason(price=105.0, entry=100.0, ma=110.0))
+        self.assertIsNone(policy.alt_exit_reason(price=90.0, entry=100.0, ma=None))
+
+    def test_pick_watch_alt_entries_respects_room_and_blocks(self):
+        bands = {
+            "LINK": {"z": -3.0, "ma": 1.0},
+            "NEAR": {"z": -2.6, "ma": 1.0},
+            "DOT": {"z": -3.4, "ma": 1.0},
+            "ADA": {"z": -1.0, "ma": 1.0},
+            "SOL": {"z": -4.0, "ma": 1.0},
+        }
+        picked = policy.pick_watch_alt_entries(
+            bands, target_alloc={"BTC": 40.0, "XRP": 11.7}, held_alts=set(), blocked={"DOT"}
         )
-        tickers = {r["ticker"] for r in filtered}
-        self.assertIn("BTC", tickers)
-        self.assertNotIn("NEAR", tickers)
+        self.assertEqual(picked, ["LINK", "NEAR"])
+        none = policy.pick_watch_alt_entries(
+            bands, target_alloc={"XRP": 11.7}, held_alts={"DOGE", "MNT"}, blocked=set()
+        )
+        self.assertEqual(none, [])
 
     def test_rebalance_band(self):
         self.assertFalse(
@@ -247,10 +268,32 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(
             policy.should_watch_dip_buy(
                 ticker="DOGE",
-                day_chg=policy.WATCH_DIP_ALT_DAY_PCT,
+                day_chg=1.0,
+                current_value=0.0,
+                target_value=100.0,
+                min_trade_usd=5.0,
+                bb_z=-3.0,
+            )
+        )
+        # Держанный альт не усредняем, а выше нижней полосы не входим.
+        self.assertFalse(
+            policy.should_watch_dip_buy(
+                ticker="DOGE",
+                day_chg=-10.0,
                 current_value=50.0,
                 target_value=100.0,
                 min_trade_usd=5.0,
+                bb_z=-3.0,
+            )
+        )
+        self.assertFalse(
+            policy.should_watch_dip_buy(
+                ticker="DOGE",
+                day_chg=-10.0,
+                current_value=0.0,
+                target_value=100.0,
+                min_trade_usd=5.0,
+                bb_z=-1.0,
             )
         )
         self.assertFalse(
@@ -387,6 +430,13 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.skill = CryptoSkill()
+        self.bands: dict[str, dict] = {}
+        bands_patch = patch.object(self.skill, "_alt_bands", side_effect=lambda t: self.bands.get(t))
+        bands_patch.start()
+        self.addCleanup(bands_patch.stop)
+        cool_patch = patch("skills.crypto.journal.cooldown_tickers", return_value=set())
+        cool_patch.start()
+        self.addCleanup(cool_patch.stop)
 
     def test_trade_auto_uses_score_not_groq(self):
         with (
@@ -647,6 +697,87 @@ class TestDeskAutoUsesScore(unittest.TestCase):
     def test_risk_off_sells_fresh_alt(self):
         placed = self._rebalance_with_fresh_alt(respect_hold=False)
         self.assertIn(("DOGE", "Sell"), placed)
+
+    def _watch_alt(self, *, price: float, entry: float, alloc: dict, positions: list, cash: float = 60.0):
+        from skills.crypto import common as crypto_common
+
+        crypto_common.write_alloc_state(alloc, why="test")
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+            placed.append((ticker, side, base_qty, quote_usdt))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(self.skill, "_wallet", return_value=(cash, positions)),
+            patch.object(self.skill, "_cash_and_held", return_value=(cash, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_btc_regime", return_value=(2.0, 1.0)),
+            patch.object(self.skill, "_ticker", return_value={"price": price, "chg": 0.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch.object(self.skill, "_api_key", "x"),
+            patch("skills.crypto.journal.open_avg_costs", return_value={"XRP": entry}),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"XRP", "BTC"}
+            result = self.skill._desk_watch_locked(silent=True)
+        return placed, result, crypto_common.read_alloc_state()
+
+    def test_watch_sells_alt_at_middle_band(self):
+        self.bands = {"XRP": {"z": 0.1, "ma": 2.0}}
+        pos = [{"ticker": "XRP", "qty": 20.0, "value": 41.0, "price": 2.05, "name": "XRP"}]
+        placed, result, state = self._watch_alt(
+            price=2.05, entry=2.0, alloc={"BTC": 40.0, "XRP": 11.7}, positions=pos
+        )
+        self.assertIn(("XRP", "Sell", 20.0, None), placed, result)
+        self.assertNotIn("XRP", state["alloc"])
+
+    def test_watch_stop_loss_alt(self):
+        self.bands = {"XRP": {"z": -3.0, "ma": 2.4}}
+        pos = [{"ticker": "XRP", "qty": 20.0, "value": 33.0, "price": 1.65, "name": "XRP"}]
+        placed, result, _state = self._watch_alt(
+            price=1.65, entry=2.0, alloc={"BTC": 40.0, "XRP": 11.7}, positions=pos
+        )
+        self.assertIn(("XRP", "Sell", 20.0, None), placed, result)
+
+    def test_watch_holds_alt_between_bands(self):
+        self.bands = {"XRP": {"z": -1.0, "ma": 2.2}}
+        pos = [{"ticker": "XRP", "qty": 20.0, "value": 38.0, "price": 1.9, "name": "XRP"}]
+        placed, _result, _state = self._watch_alt(
+            price=1.9, entry=2.0, alloc={"BTC": 40.0, "XRP": 11.7}, positions=pos
+        )
+        self.assertFalse(any(t == "XRP" for t, *_ in placed))
+
+    def test_watch_enters_alt_at_lower_band(self):
+        self.bands = {"LINK": {"z": -2.9, "ma": 20.0}, "NEAR": {"z": -1.0, "ma": 3.0}}
+        placed, result, state = self._watch_alt(
+            price=18.0, entry=0.0, alloc={"BTC": 40.0}, positions=[], cash=100.0
+        )
+        buys = [(t, q) for t, side, _b, q in placed if side == "Buy"]
+        self.assertEqual([t for t, _q in buys], ["LINK"], result)
+        self.assertAlmostEqual(buys[0][1], 100.0 * policy.alt_slot_pct() / 100.0, places=1)
+        self.assertEqual(state["alloc"].get("LINK"), policy.alt_slot_pct())
+
+
+class TestBollinger(unittest.TestCase):
+    def test_bands_and_z(self):
+        from skills.crypto.indicators import bollinger
+
+        closes = [10.0] * 19 + [12.0]
+        b = bollinger(closes)
+        self.assertAlmostEqual(b["ma"], 10.1)
+        self.assertGreater(b["z"], 2.0)
+        self.assertAlmostEqual(b["upper"] - b["ma"], b["ma"] - b["lower"])
+        self.assertIsNone(bollinger(closes[:10]))
+        flat = bollinger([5.0] * 20)
+        self.assertEqual(flat["z"], 0.0)
+
+    def test_closes_from_kline_oldest_first(self):
+        from skills.crypto.indicators import closes_from_kline
+
+        rows = [["3", "0", "0", "0", "3.0"], ["2", "0", "0", "0", "2.0"], ["1", "0", "0", "0", "1.0"]]
+        self.assertEqual(closes_from_kline(rows), [1.0, 2.0, 3.0])
 
 
 if __name__ == "__main__":

@@ -40,6 +40,7 @@ from .common import (
     _testnet,
     _watchlist,
 )
+from .indicators import BB_PERIOD, bollinger, closes_from_kline
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +294,22 @@ class CryptoQuotesMixin:
             return {"chg_7": None, "trend": "нет данных"}
         chg = (now - old) / old * 100.0
         return {"chg_7": chg, "trend": "выше" if chg >= 0 else "ниже"}
+
+    def _bands(self, ticker: str, interval: str = "240") -> dict[str, float] | None:
+        """Боллинджер по свечам Bybit: 240 — 4 ч (стол), 60 — 1 ч (дозор)."""
+        ticker = ticker.upper()
+        data = self._public_get(
+            "/v5/market/kline",
+            {
+                "category": "spot",
+                "symbol": self._symbol(ticker),
+                "interval": interval,
+                "limit": str(BB_PERIOD + 5),
+            },
+            f"kl:{ticker}:{interval}",
+        )
+        rows = (data.get("result") or {}).get("list") or []
+        return bollinger(closes_from_kline(rows))
 
     def _wallet(self) -> tuple[float, list[dict[str, Any]]]:
         data = self._signed("GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"})

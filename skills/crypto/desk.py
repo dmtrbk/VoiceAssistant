@@ -27,15 +27,21 @@ from .common import (
     write_trail_state,
 )
 from .desk_policy import (
+    ALT_BB_INTERVAL,
+    ALT_HELD_MIN_USD,
+    ALT_MAX_NAMES,
     ALT_MIN_HOLD_HOURS,
     CHURN_COOLDOWN_HOURS,
     DESK_ALT_SLEEVE,
     DESK_CORE,
     WATCH_DIP_BUY_FRAC,
+    alt_exit_reason,
+    alt_slot_pct,
     band_pct_for,
     cash_floor_pct,
     filter_auto_candidates,
     is_risk_off,
+    pick_watch_alt_entries,
     score_alloc,
     should_rebalance_leg,
     should_watch_dip_buy,
@@ -126,10 +132,12 @@ class CryptoDeskMixin:
         tape = self._tape()
         from_tape = {row["ticker"]: row for row in tape}
         held: dict[str, float] = {}
+        held_values: dict[str, float] = {}
         if self._api_key:
             try:
                 _cash, positions = self._wallet()
                 held = {item["ticker"]: item["qty"] for item in positions}
+                held_values = {item["ticker"]: float(item["value"] or 0) for item in positions}
             except Exception as exc:
                 logger.warning("[Крипта] кошелёк для стола: %s", exc)
         chosen: list[dict[str, Any]] = []
@@ -145,7 +153,18 @@ class CryptoDeskMixin:
                 mom = self._momentum(ticker)
             except Exception:
                 pass
-            chosen.append({**row, "held": held.get(ticker, 0), **mom})
+            bb: dict[str, Any] = {}
+            if ticker in DESK_ALT_SLEEVE:
+                bands = self._alt_bands(ticker)
+                if bands:
+                    bb = {"bb_z": bands["z"], "bb_ma": bands["ma"]}
+            chosen.append({
+                **row,
+                "held": held.get(ticker, 0),
+                "held_value": held_values.get(ticker, 0.0),
+                **mom,
+                **bb,
+            })
 
         for ticker in list(held) + list(self._watchlist) + list(DESK_CORE) + list(DESK_ALT_SLEEVE):
             row = from_tape.get(ticker)
@@ -167,6 +186,13 @@ class CryptoDeskMixin:
                 break
             add(row)
         return chosen
+
+    def _alt_bands(self, ticker: str) -> dict[str, float] | None:
+        try:
+            return self._bands(ticker, ALT_BB_INTERVAL)
+        except Exception as exc:
+            logger.info("[Крипта] полосы %s: %s", ticker, exc)
+            return None
 
     def _btc_regime(self) -> tuple[float | None, float | None]:
         chg7 = None
@@ -376,7 +402,7 @@ class CryptoDeskMixin:
         return result
 
     def _watch_react(self, target_alloc: dict[str, float]) -> str:
-        """Трейл → TP-продажи → добор ядра/альта на просадке. К сохранённой цели."""
+        """Трейл → выход альта → TP → новые альты и добор. Меняет target_alloc на месте."""
         cash, positions_list = self._wallet()
         positions = {item["ticker"]: item for item in positions_list}
         self._ensure_desk_bought(set(positions.keys()))
@@ -456,6 +482,49 @@ class CryptoDeskMixin:
                 continue
             # После срабатывания ногу из трейла убираем.
             new_trail.pop(ticker, None)
+
+        alt_bands: dict[str, dict[str, float] | None] = {}
+
+        def bands_for(ticker: str) -> dict[str, float] | None:
+            if ticker not in alt_bands:
+                alt_bands[ticker] = self._alt_bands(ticker)
+            return alt_bands[ticker]
+
+        for ticker, pos in positions.items():
+            if ticker not in DESK_ALT_SLEEVE or ticker in trail_sold:
+                continue
+            if self._is_owner_position(ticker):
+                continue
+            price = float(prices.get(ticker) or pos.get("price") or 0)
+            qty = float(pos.get("qty") or 0)
+            value = float(pos.get("value") or 0) or qty * price
+            if price <= 0 or qty <= 0 or value < min_trade:
+                continue
+            entry = float(avg_costs.get(ticker) or 0) or float(
+                (new_trail.get(ticker) or {}).get("entry") or 0
+            )
+            bands = bands_for(ticker)
+            reason = alt_exit_reason(price=price, entry=entry, ma=bands["ma"] if bands else None)
+            if not reason:
+                continue
+            try:
+                parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price))
+                time.sleep(0.4)
+            except Exception as exc:
+                logger.warning("[Крипта] выход альта %s: %s", ticker, exc)
+                continue
+            logger.info(
+                "[Крипта] альт %s: выход (%s) вход %.4g цена %.4g %+.1f%%",
+                ticker,
+                reason,
+                entry,
+                price,
+                (price / entry - 1.0) * 100.0,
+            )
+            trail_sold.add(ticker)
+            new_trail.pop(ticker, None)
+            target_alloc.pop(ticker, None)
+            target_values[ticker] = 0.0
         write_trail_state(new_trail)
 
         sells = [
@@ -490,20 +559,57 @@ class CryptoDeskMixin:
         cash, _pos = self._cash_and_held()
         budget = cash * common._BUY_CASH_BUFFER
         cash = budget
+
+        held_alts = {
+            t for t in positions
+            if t in DESK_ALT_SLEEVE
+            and t not in trail_sold
+            and current_values.get(t, 0.0) >= ALT_HELD_MIN_USD
+        }
+        taken = {t for t in target_alloc if t in DESK_ALT_SLEEVE} | held_alts
+        if len(taken) < ALT_MAX_NAMES:
+            try:
+                blocked = set(crypto_journal.cooldown_tickers(CHURN_COOLDOWN_HOURS))
+            except Exception:
+                blocked = set()
+            blocked |= trail_sold
+            blocked |= {t for t in positions if self._is_owner_position(t)}
+            for t in DESK_ALT_SLEEVE - taken - blocked:
+                bands_for(t)
+            slot = alt_slot_pct()
+            for t in pick_watch_alt_entries(
+                alt_bands,
+                target_alloc=target_alloc,
+                held_alts=held_alts,
+                blocked=blocked,
+            ):
+                target_alloc[t] = slot
+                target_values[t] = equity * slot / 100.0
+                current_values.setdefault(t, 0.0)
+                logger.info(
+                    "[Крипта] альт %s у нижней полосы 4h (z %.2f) — слот %.1f%%",
+                    t,
+                    float((alt_bands.get(t) or {}).get("z") or 0),
+                    slot,
+                )
+
         buys = []
         for ticker in target_alloc:
             if ticker in trail_sold:
                 continue
             need = target_values.get(ticker, 0) - current_values.get(ticker, 0)
+            is_alt = ticker in DESK_ALT_SLEEVE
             if not should_watch_dip_buy(
                 ticker=ticker,
                 day_chg=day_chgs.get(ticker),
                 current_value=current_values.get(ticker, 0),
                 target_value=target_values.get(ticker, 0),
                 min_trade_usd=min_trade,
+                bb_z=(bands_for(ticker) or {}).get("z") if is_alt else None,
             ):
                 continue
-            quote = max(0.0, need) * WATCH_DIP_BUY_FRAC
+            # Альт берём слотом сразу (как в бэктесте), ядро — половиной недобора.
+            quote = max(0.0, need) * (1.0 if is_alt else WATCH_DIP_BUY_FRAC)
             if quote >= _MIN_QUOTE:
                 buys.append((ticker, quote))
         buys.sort(key=lambda item: item[1], reverse=True)

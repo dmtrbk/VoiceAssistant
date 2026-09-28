@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # conky_markets.py
 # Две строки для Conky: дневной +/- биржи (Т-Инвест) и крипты (Bybit).
-# Обе: день / с покупки (ASCII `/`). Крипта ещё · кулдаун (топ-3). Без ∑ — Candara.
+# Обе: день / с покупки (ASCII `/`), только цифры. Без ∑ — Candara.
 # Цвета из ~/.conky: плюс c0c0c0 (system), минус 888888 (comands default).
 # Кэш 90 мин, сразу после сделки (дневник новее кэша). Стол заявок не запускает.
 
@@ -97,25 +97,12 @@ def color_for(value: float | None) -> str:
     return COLOR_PLUS
 
 
-def crypto_cooldown_top(limit: int = 3) -> list[str]:
-    """До limit тикеров в анти-чёрне — для Conky, без сети."""
-    try:
-        from skills.crypto.desk_policy import CHURN_COOLDOWN_HOURS
-        from skills.crypto import journal as crypto_journal
-
-        cool = crypto_journal.cooldown_tickers(CHURN_COOLDOWN_HOURS)
-    except Exception:
-        return []
-    return sorted({str(t).upper() for t in cool if t})[: max(0, int(limit))]
-
-
 def render_lines(
     stocks: float | None,
     crypto: float | None,
     *,
     stocks_life: float | None = None,
     crypto_life: float | None = None,
-    cooldown: list[str] | None = None,
 ) -> str:
     stocks_day = f"${{color {color_for(stocks)}}}{signed_amount(stocks, '₽')}"
     if stocks_life is not None:
@@ -130,9 +117,6 @@ def render_lines(
         crypto_line = f"{day} / {life}"
     else:
         crypto_line = day
-    cool = [str(t).upper() for t in (cooldown or []) if t][:3]
-    if cool:
-        crypto_line = f"{crypto_line} · ${{color {COLOR_MINUS}}}{'·'.join(cool)}"
     return f"{stocks_line}\n{crypto_line}"
 
 
@@ -323,25 +307,21 @@ def fetch_day_pnl() -> tuple[float | None, float | None]:
     return stocks, crypto
 
 
-def fetch_crypto_extras() -> tuple[float | None, list[str]]:
-    """Lifetime (уже обновлённый в fetch_day_pnl) и кулдаун — без лишней сети."""
+def fetch_crypto_life() -> float | None:
+    """Lifetime (уже обновлённый в fetch_day_pnl) — без лишней сети."""
     try:
-        life = crypto_lifetime_pnl(refresh=False)
+        return crypto_lifetime_pnl(refresh=False)
     except Exception:
-        life = None
-    return life, crypto_cooldown_top(3)
+        return None
 
 
 def fetch_lines() -> str:
     stocks, crypto = fetch_day_pnl()
-    stocks_life = fetch_stocks_life()
-    life, cool = fetch_crypto_extras()
     return render_lines(
         stocks,
         crypto,
-        stocks_life=stocks_life,
-        crypto_life=life,
-        cooldown=cool,
+        stocks_life=fetch_stocks_life(),
+        crypto_life=fetch_crypto_life(),
     )
 
 
@@ -422,20 +402,18 @@ def _store(
     crypto: float | None,
     stocks_life: float | None = None,
     crypto_life: float | None = None,
-    cooldown: list[str] | None = None,
     *,
     fetch_missing_life: bool = True,
 ) -> str:
     if fetch_missing_life and stocks_life is None:
         stocks_life = fetch_stocks_life()
-    if crypto_life is None and cooldown is None:
-        crypto_life, cooldown = fetch_crypto_extras()
+    if fetch_missing_life and crypto_life is None:
+        crypto_life = fetch_crypto_life()
     text = render_lines(
         stocks,
         crypto,
         stocks_life=stocks_life,
         crypto_life=crypto_life,
-        cooldown=cooldown,
     )
     try:
         write_cache(text)
@@ -455,14 +433,11 @@ def load_text() -> str:
         if cache_is_fresh():
             return read_cache()
         stocks, crypto = fetch_day_pnl()
-        stocks_life = fetch_stocks_life()
-        life, cool = fetch_crypto_extras()
         return _store(
             stocks,
             crypto,
-            stocks_life=stocks_life,
-            crypto_life=life,
-            cooldown=cool,
+            stocks_life=fetch_stocks_life(),
+            crypto_life=fetch_crypto_life(),
             fetch_missing_life=False,
         )
 

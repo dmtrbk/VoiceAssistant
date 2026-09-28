@@ -26,10 +26,13 @@ BTC_RISK_OFF_DAY = -3.0
 BTC_BULL_7D = 5.0
 # Ядро: лёгкий mean-reversion на откате 7д.
 CORE_CHG7_FLOOR = -8.0
-# Альты: mean-reversion — берём просадку, не разгон; потолок 7д отсекает уже выросшее.
-ALT_CHG7_FLOOR = -18.0
-ALT_CHG7_CEIL = 8.0
-ALT_ENTRY_MAX_DAY_PCT = 2.0  # новые альты не берём, если сутки уже в плюсе сильно
+# Альты: Боллинджер 4h (MA20 ± 2σ), равные слоты рукава. Пороги подобраны crypto_backtest.py
+# (333 дня часовых свечей Bybit, комиссия 0.1% за сторону).
+ALT_BB_INTERVAL = "240"
+ALT_BB_ENTRY_Z = -2.5
+ALT_EXIT_MIN_GAIN_PCT = 1.0  # выход у средней, только если прибыль перекрывает 2×комиссию с запасом
+ALT_STOP_LOSS_PCT = 15.0
+ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
 MAX_DAY_PUMP_PCT = 25.0
 # Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
@@ -39,7 +42,6 @@ TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем н�
 WATCH_TP_DAY_PCT = 12.0
 WATCH_TP_ALT_DAY_PCT = 8.0
 WATCH_DIP_DAY_PCT = -5.0
-WATCH_DIP_ALT_DAY_PCT = -4.0
 WATCH_DIP_BUY_FRAC = 0.5
 WATCH_MAX_TRADES_PER_HOUR = 2
 # Трейлинг-стоп дозора: защита пика с покупки (только позиции стола).
@@ -63,8 +65,35 @@ def watch_tp_day_pct_for(ticker: str) -> float:
     return WATCH_TP_ALT_DAY_PCT if is_alt_sleeve(ticker) else WATCH_TP_DAY_PCT
 
 
-def watch_dip_day_pct_for(ticker: str) -> float:
-    return WATCH_DIP_ALT_DAY_PCT if is_alt_sleeve(ticker) else WATCH_DIP_DAY_PCT
+def alt_slot_pct(sleeve_pct: float = ALT_SLEEVE_MAX_PCT, max_names: int = ALT_MAX_NAMES) -> float:
+    return round(max(0.0, float(sleeve_pct)) / max(1, int(max_names)), 1)
+
+
+def alt_entry_ok(bb_z: Any) -> bool:
+    """Новый альт / докуп: цена у нижней полосы 4h."""
+    if bb_z is None:
+        return False
+    return float(bb_z) <= ALT_BB_ENTRY_Z
+
+
+def alt_exit_reason(*, price: float, entry: float, ma: float | None) -> str | None:
+    """Выход альта целиком: стоп от входа или возврат к средней 4h с прибылью."""
+    px = float(price or 0)
+    ent = float(entry or 0)
+    if px <= 0 or ent <= 0:
+        return None
+    gain = (px / ent - 1.0) * 100.0
+    if gain <= -ALT_STOP_LOSS_PCT:
+        return "стоп"
+    if ma is not None and px >= float(ma) and gain >= ALT_EXIT_MIN_GAIN_PCT:
+        return "средняя"
+    return None
+
+
+def _held_value(row: dict[str, Any]) -> float:
+    if row.get("held_value") is not None:
+        return float(row.get("held_value") or 0)
+    return float(row.get("held") or 0) * float(row.get("price") or 0)
 
 
 
@@ -106,8 +135,6 @@ def _chg7_allowed(ticker: str, chg7: Any) -> bool:
     t = str(ticker or "").upper()
     if t in DESK_CORE:
         return c >= CORE_CHG7_FLOOR
-    if t in DESK_ALT_SLEEVE:
-        return ALT_CHG7_FLOOR <= c <= ALT_CHG7_CEIL
     return c >= 0.0
 
 
@@ -139,9 +166,6 @@ def filter_auto_candidates(
                 continue
             if chg >= MAX_DAY_PUMP_PCT:
                 continue
-            # Mean-reversion: новые альты не берём уже на дневном разгоне.
-            if ticker in DESK_ALT_SLEEVE and chg > ALT_ENTRY_MAX_DAY_PCT:
-                continue
         seen.add(ticker)
         out.append(row)
     return out
@@ -161,24 +185,32 @@ def _row_score(row: dict[str, Any]) -> float:
     return score
 
 
-def _alt_row_score(row: dict[str, Any]) -> float:
-    """Скор альта: mean-reversion — выше при дневной/недельной просадке, не на пампе."""
-    chg = float(row.get("chg") or 0)
-    chg7 = row.get("chg_7")
-    if chg <= -15.0:
-        dip = 0.0  # обвал — не ловим нож
-    elif chg < 0:
-        dip = -chg
-    else:
-        dip = -chg * 0.8  # растущие штрафуем
-    score = dip * 1.5
-    if chg7 is not None:
-        c7 = float(chg7)
-        if c7 < 0:
-            score += min(-c7, 12.0) * 0.4
-        else:
-            score -= c7 * 0.35
-    return score
+def pick_alts(
+    rows: list[dict[str, Any]],
+    *,
+    sleeve_pct: float = ALT_SLEEVE_MAX_PCT,
+    max_names: int = ALT_MAX_NAMES,
+) -> dict[str, float]:
+    """Рукав альтов: держанные до выхода + новые у нижней полосы 4h, по равному слоту."""
+    slot = alt_slot_pct(sleeve_pct, max_names)
+    if slot <= 0:
+        return {}
+    alts = [r for r in rows if str(r.get("ticker") or "").upper() in DESK_ALT_SLEEVE]
+    held = sorted(
+        (r for r in alts if _held_value(r) >= ALT_HELD_MIN_USD),
+        key=_held_value,
+        reverse=True,
+    )
+    held_t = {str(r["ticker"]).upper() for r in held}
+    fresh = sorted(
+        (
+            r for r in alts
+            if str(r["ticker"]).upper() not in held_t and alt_entry_ok(r.get("bb_z"))
+        ),
+        key=lambda r: float(r["bb_z"]),
+    )
+    picked = (held + fresh)[: max(0, int(max_names))]
+    return {str(r["ticker"]).upper(): slot for r in picked}
 
 
 def _pick_bucket(
@@ -237,7 +269,7 @@ def score_alloc(
     alt_sleeve_pct: float = ALT_SLEEVE_MAX_PCT,
     alt_max_names: int = ALT_MAX_NAMES,
 ) -> tuple[dict[str, float], str]:
-    """Ядро + рукав альта (MR). Недобор рукава → кэш. Сумма ≤ 100 − cash_floor."""
+    """Ядро + рукав альта (Боллинджер 4h). Недобор рукава → кэш. Сумма ≤ 100 − cash_floor."""
     floor = max(0.0, min(100.0, float(cash_floor_pct)))
     if floor >= 100.0:
         return {}, "Рынок слабый — держу кэш в тетере."
@@ -260,13 +292,7 @@ def score_alloc(
         allow_weak_core=True,
         score_fn=_row_score,
     )
-    alt_alloc = _pick_bucket(
-        alt_rows,
-        budget_pct=sleeve,
-        max_names=alt_max_names,
-        allow_weak_core=False,
-        score_fn=_alt_row_score,
-    )
+    alt_alloc = pick_alts(alt_rows, sleeve_pct=sleeve, max_names=alt_max_names)
     if not core_alloc and not alt_alloc:
         return {}, "Рынок слабый — держу кэш в тетере."
 
@@ -356,21 +382,50 @@ def should_watch_dip_buy(
     target_value: float,
     min_trade_usd: float,
     dip_pct: float | None = None,
+    bb_z: float | None = None,
 ) -> bool:
-    """Докупка ядра и альта к сохранённой цели на дневной просадке."""
+    """Добор к сохранённой цели: ядро — на дневной просадке, альт — вход у нижней полосы 4h.
+
+    Держанный альт не усредняем: стоп считается от цены входа.
+    """
     t = str(ticker or "").upper()
-    if t in DESK_CORE:
-        threshold = WATCH_DIP_DAY_PCT if dip_pct is None else float(dip_pct)
-    elif t in DESK_ALT_SLEEVE:
-        threshold = WATCH_DIP_ALT_DAY_PCT if dip_pct is None else float(dip_pct)
-    else:
+    if t not in DESK_CORE and t not in DESK_ALT_SLEEVE:
         return False
     gap = float(target_value) - float(current_value)
     if gap < float(min_trade_usd):
         return False
+    if t in DESK_ALT_SLEEVE:
+        return float(current_value) < ALT_HELD_MIN_USD and alt_entry_ok(bb_z)
     if day_chg is None:
         return False
+    threshold = WATCH_DIP_DAY_PCT if dip_pct is None else float(dip_pct)
     return float(day_chg) <= float(threshold)
+
+
+def pick_watch_alt_entries(
+    bands: dict[str, dict[str, float] | None],
+    *,
+    target_alloc: dict[str, float],
+    held_alts: set[str],
+    blocked: set[str],
+    max_names: int = ALT_MAX_NAMES,
+) -> list[str]:
+    """Дозор: новые альты у нижней полосы 4h, пока в рукаве есть свободные слоты."""
+    taken = {t for t in target_alloc if t in DESK_ALT_SLEEVE} | set(held_alts)
+    room = max(0, int(max_names) - len(taken))
+    if room <= 0:
+        return []
+    ready = [
+        (float(b["z"]), t)
+        for t, b in bands.items()
+        if t in DESK_ALT_SLEEVE
+        and t not in taken
+        and t not in blocked
+        and b
+        and alt_entry_ok(b.get("z"))
+    ]
+    ready.sort()
+    return [t for _z, t in ready[:room]]
 
 
 def trail_pct_for(ticker: str) -> float:
