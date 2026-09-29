@@ -39,7 +39,7 @@ class TestDeskPolicy(unittest.TestCase):
 
     def test_band_core_tighter_than_alt(self):
         self.assertEqual(policy.band_pct_for("BTC"), policy.REBALANCE_BAND_CORE_PCT)
-        self.assertEqual(policy.band_pct_for("TON"), policy.REBALANCE_BAND_ALT_PCT)
+        self.assertEqual(policy.band_pct_for("DOGE"), policy.REBALANCE_BAND_ALT_PCT)
 
     def test_filter_drops_pump_and_cooldown(self):
         rows = [

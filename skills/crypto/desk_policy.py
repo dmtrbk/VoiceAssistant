@@ -11,7 +11,7 @@ DESK_CORE = frozenset({"BTC", "ETH"})
 # Узкий spot-рукав альта поверх ядра: ≤ ALT_SLEEVE_MAX_PCT, недобор → кэш.
 # Бывшая доля SOL (~⅓ старого ядра) ушла сюда: 15% + ~20% ≈ 35%.
 DESK_ALT_SLEEVE = frozenset({
-    "XRP", "DOGE", "LINK", "AVAX", "TON", "SUI", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
+    "XRP", "DOGE", "LINK", "AVAX", "SUI", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
 })
 DESK_MAX_NAMES = 2
 ALT_SLEEVE_MAX_PCT = 35.0
@@ -122,7 +122,7 @@ def cash_floor_pct(*, btc_chg_7: float | None, btc_chg_day: float | None) -> flo
 
 
 def band_pct_for(ticker: str) -> float:
-    """Уже коридор для ядра, шире для альтов — меньше шума по TON и т.п."""
+    """Уже коридор для ядра, шире для альтов — меньше шума."""
     if str(ticker or "").upper() in DESK_CORE:
         return REBALANCE_BAND_CORE_PCT
     return REBALANCE_BAND_ALT_PCT
