@@ -245,7 +245,7 @@ def _row(name: str, s: dict[str, float]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pages", type=int, default=8, help="по 1000 часовых свечей")
-    parser.add_argument("--fee", type=float, default=0.1, help="комиссия %% за сторону")
+    parser.add_argument("--fee", type=float, default=0.18, help="комиссия %% за сторону (taker Bybit)")
     parser.add_argument("--top", type=int, default=12)
     args = parser.parse_args()
 
