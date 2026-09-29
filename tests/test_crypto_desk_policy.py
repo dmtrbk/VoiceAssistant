@@ -463,6 +463,25 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertIsNotNone(state)
         self.assertEqual(state["alloc"].get("BTC"), 50.0)
 
+    def test_desk_schedule_counts_from_last_desk(self):
+        from skills.crypto import common as crypto_common
+        from skills.crypto.desk import next_desk_at
+
+        now = 1_000_000.0
+        period = crypto_common._DESK_PERIOD_SEC
+        self.assertEqual(next_desk_at(None, now), now)
+        self.assertEqual(next_desk_at({"desk_ts": now - period - 60}, now), now)
+        self.assertEqual(next_desk_at({"desk_ts": now - 3600}, now), now - 3600 + period)
+
+    def test_watch_write_keeps_desk_ts(self):
+        from skills.crypto import common as crypto_common
+
+        crypto_common.write_alloc_state({"BTC": 40.0}, why="стол", desk_ts=123.0)
+        crypto_common.write_alloc_state({"BTC": 40.0}, why="дозор", watch_trades=[1.0])
+        state = crypto_common.read_alloc_state()
+        self.assertEqual(state["desk_ts"], 123.0)
+        self.assertGreater(state["ts"], 123.0)
+
     def test_watch_without_alloc(self):
         result = self.skill._desk_watch_locked(silent=True)
         self.assertIn("цели", result.lower())

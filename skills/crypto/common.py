@@ -308,10 +308,12 @@ def read_alloc_state(path: str | None = None) -> dict[str, Any] | None:
             watch_trades.append(float(item))
         except (TypeError, ValueError):
             continue
+    ts = float(raw.get("ts") or 0)
     return {
         "alloc": alloc,
         "why": str(raw.get("why") or ""),
-        "ts": float(raw.get("ts") or 0),
+        "ts": ts,
+        "desk_ts": float(raw.get("desk_ts") or ts),
         "watch_trades": watch_trades,
     }
 
@@ -321,9 +323,15 @@ def write_alloc_state(
     *,
     why: str = "",
     watch_trades: list[float] | None = None,
+    desk_ts: float | None = None,
     path: str | None = None,
 ) -> None:
+    """desk_ts — время полного стола; дозор его не передаёт, и метка сохраняется."""
     path = path or _ALLOC_PATH
+    now = time.time()
+    if desk_ts is None:
+        prev = read_alloc_state(path)
+        desk_ts = prev["desk_ts"] if prev else now
     clean = {
         _normalize_ticker(str(k)): float(v)
         for k, v in (alloc or {}).items()
@@ -332,7 +340,8 @@ def write_alloc_state(
     payload = {
         "alloc": clean,
         "why": str(why or ""),
-        "ts": time.time(),
+        "ts": now,
+        "desk_ts": float(desk_ts),
         "watch_trades": list(watch_trades or [])[-20:],
     }
     tmp_path = path + ".tmp"

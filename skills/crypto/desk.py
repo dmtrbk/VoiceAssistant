@@ -61,6 +61,13 @@ def _wants_advice(text: str) -> bool:
     return any(hint in text for hint in _ADVICE_HINTS)
 
 
+def next_desk_at(state: dict[str, Any] | None, now: float) -> float:
+    """После старта отсчёт от последнего полного стола: перезапуск не откладывает его ещё на период."""
+    if state is None:
+        return now
+    return max(now, float(state.get("desk_ts") or 0) + _DESK_PERIOD_SEC)
+
+
 class CryptoDeskMixin:
     def _ensure_desk_loop(self) -> None:
         with common._desk_init_lock:
@@ -335,7 +342,7 @@ class CryptoDeskMixin:
         state = read_alloc_state() or {}
         watch_trades = list(state.get("watch_trades") or [])
         if not alloc:
-            write_alloc_state({}, why=why or "кэш", watch_trades=watch_trades)
+            write_alloc_state({}, why=why or "кэш", watch_trades=watch_trades, desk_ts=time.time())
             result = why or "Стол оставил кэш."
             if silent:
                 logger.info("[Крипта] авто: %s", result)
@@ -349,7 +356,7 @@ class CryptoDeskMixin:
             return result
         desc = ", ".join(f"{_spoken(ticker)} {int(round(pct))}%" for ticker, pct in alloc.items())
         logger.info("[Крипта] целевой портфель: %s (%s)", desc, why)
-        write_alloc_state(alloc, why=why, watch_trades=watch_trades)
+        write_alloc_state(alloc, why=why, watch_trades=watch_trades, desk_ts=time.time())
         if not self._api_key:
             return f"Целевой портфель: {desc}. Ключа Bybit нет. {why}".strip()
         result = self._rebalance(alloc)
@@ -792,12 +799,8 @@ class CryptoDeskMixin:
                     return
                 continue
             now = time.time()
-            # Нет сохранённой цели (после обнуления / первый старт) — сразу полный стол.
             if next_desk <= 0:
-                if read_alloc_state() is None:
-                    next_desk = now
-                else:
-                    next_desk = now + _DESK_PERIOD_SEC
+                next_desk = next_desk_at(read_alloc_state(), now)
                 next_watch = now + _WATCH_PERIOD_SEC
             wake_at = min(next_desk, next_watch)
             while time.time() < wake_at:
