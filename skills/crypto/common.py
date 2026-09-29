@@ -111,11 +111,12 @@ _COINS: dict[str, dict[str, Any]] = {
         "short": ("sol",),
         "ambiguous": frozenset(),
     },
-    "TON": {
-        "spoken": "Тон",
-        "words": ("тонкоин", "тон", "toncoin"),
-        "short": ("ton",),
-        "ambiguous": frozenset({"тон"}),
+    # Бывший Toncoin (TON): на Bybit спот теперь только GRAMUSDT.
+    "GRAM": {
+        "spoken": "Грам",
+        "words": ("грам", "грама", "граме", "граму", "gram", "тонкоин", "тон", "toncoin"),
+        "short": ("gram", "ton"),
+        "ambiguous": frozenset({"грам", "грама", "граме", "граму", "тон"}),
     },
     "XRP": {
         "spoken": "Рипл",
@@ -133,7 +134,7 @@ _COINS: dict[str, dict[str, Any]] = {
 
 _GECKO_IDS = {
     "bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL",
-    "toncoin": "TON", "ripple": "XRP", "dogecoin": "DOGE",
+    "toncoin": "GRAM", "ton": "GRAM", "ripple": "XRP", "dogecoin": "DOGE",
 }
 
 _desk_loop_started = False

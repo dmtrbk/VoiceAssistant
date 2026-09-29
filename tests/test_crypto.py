@@ -102,6 +102,9 @@ class TestCryptoSkill(unittest.TestCase):
         self.assertTrue(is_crypto_command("продай эфир"))
         self.assertTrue(is_crypto_command("поторгуй криптой"))
         self.assertTrue(is_crypto_command("посоветуй по крипте"))
+        self.assertTrue(is_crypto_command("сколько стоит тонкоин"))
+        self.assertTrue(is_crypto_command("курс грама"))
+        self.assertFalse(is_crypto_command("купи сто грамм сыра"))
         self.assertTrue(self.skill.can_handle(RequestContext(raw_text="сколько стоит биткоин")))
 
     def test_command_negative(self):
