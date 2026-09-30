@@ -987,6 +987,36 @@ class TestEarn(unittest.TestCase):
             self.skill._earn_park_idle()
         self.assertEqual(self.orders, [])
 
+    def test_interest_from_transaction_log(self):
+        log = [
+            {"type": "FLEXIBLE_STAKING_SUBSCRIPTION", "cashFlow": "-129.13"},
+            {"type": "FLEXIBLE_STAKING_REDEMPTION", "cashFlow": "6"},
+            {"type": "FLEXIBLE_STAKING_SUBSCRIPTION", "cashFlow": "-6"},
+            {"type": "FLEXIBLE_STAKING_INTEREST", "cashFlow": "0.42"},
+            {"type": "TRADE", "cashFlow": "17.6"},
+        ]
+
+        def signed(method, path, params=None):
+            if path == "/v5/account/transaction-log":
+                return {"result": {"list": log}}
+            return self._signed(method, path, params)
+
+        self.staked = 129.13
+        with patch.object(self.skill, "_signed", side_effect=signed):
+            self.assertAlmostEqual(self.skill._earn_interest(), 0.42, places=4)
+
+    def test_interest_zero_before_first_payout(self):
+        log = [{"type": "FLEXIBLE_STAKING_SUBSCRIPTION", "cashFlow": "-129.13"}]
+
+        def signed(method, path, params=None):
+            if path == "/v5/account/transaction-log":
+                return {"result": {"list": log}}
+            return self._signed(method, path, params)
+
+        self.staked = 129.13
+        with patch.object(self.skill, "_signed", side_effect=signed):
+            self.assertAlmostEqual(self.skill._earn_interest(), 0.0, places=4)
+
     def test_disabled_without_env(self):
         with patch.dict(os.environ, {"CRYPTO_EARN": "off"}), self._patched():
             self.assertEqual(self.skill._earn_staked(), 0.0)

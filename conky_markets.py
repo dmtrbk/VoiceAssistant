@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # conky_markets.py
 # Две строки для Conky: дневной +/- биржи (Т-Инвест) и крипты (Bybit).
-# Обе: день / с покупки (ASCII `/`), только цифры. Без ∑ — Candara.
+# Обе: день / заработано (ASCII `/`), только цифры. Без ∑ — Candara.
+# Вторая цифра крипты — реальные деньги: закрытые сделки + проценты Earn, без бумажной переоценки.
 # Цвета из ~/.conky: плюс c0c0c0 (system), минус 888888 (comands default).
 # Кэш 90 мин, сразу после сделки (дневник новее кэша). Стол заявок не запускает.
 
@@ -268,16 +269,33 @@ def crypto_day_pnl() -> float | None:
     return total
 
 
+def crypto_earn_interest() -> float:
+    """Проценты Bybit Earn — в журнал сделок они не попадают."""
+    try:
+        from skills.crypto.skill import CryptoSkill
+
+        skill = CryptoSkill()
+        skill._reload_env()
+        return skill._earn_interest()
+    except Exception:
+        return 0.0
+
+
 def crypto_lifetime_pnl(*, refresh: bool = True) -> float | None:
-    """Одна цифра из журнала крипты; при refresh — пересчёт и перезапись."""
+    """Заработанное: закрытые сделки + проценты Earn. Переоценка открытых позиций не входит."""
     from skills.crypto.journal import read_lifetime_pnl, recompute_lifetime_pnl
 
     if refresh:
         try:
-            return recompute_lifetime_pnl()
+            trades = recompute_lifetime_pnl()
         except Exception:
-            return read_lifetime_pnl()
-    return read_lifetime_pnl()
+            trades = read_lifetime_pnl()
+    else:
+        trades = read_lifetime_pnl()
+    interest = crypto_earn_interest()
+    if trades is None:
+        return interest or None
+    return trades + interest
 
 
 def fetch_stocks_life() -> float | None:

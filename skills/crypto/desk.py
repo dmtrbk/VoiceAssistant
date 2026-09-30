@@ -797,7 +797,9 @@ class CryptoDeskMixin:
         if not crypto_journal.should_send_daily_report():
             return
         try:
-            text = crypto_journal.format_daily_pnl_report()
+            realized = crypto_journal.read_lifetime_pnl()
+            earned = None if realized is None else realized + self._earn_interest()
+            text = crypto_journal.format_daily_pnl_report(lifetime=earned)
             common.send_telegram_notification(text, background=False)
             crypto_journal.mark_daily_report_sent()
             logger.info("[Крипта] дневной отчёт отправлен.")

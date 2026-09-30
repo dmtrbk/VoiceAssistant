@@ -183,35 +183,21 @@ def compute_lifetime_from_trades(
     return round(realized + unrealized, 2)
 
 
-def _mark_prices_from_wallet() -> dict[str, float]:
-    try:
-        from skills.crypto import CryptoSkill
-
-        skill = CryptoSkill()
-        skill._reload_env()
-        if not skill._api_key:
-            return {}
-        _cash, positions = skill._wallet()
-        out: dict[str, float] = {}
-        for pos in positions:
-            ticker = str(pos.get("ticker") or "").upper()
-            price = float(pos.get("price") or 0)
-            if ticker and price > 0:
-                out[ticker] = price
-        return out
-    except Exception as exc:
-        logger.warning("[Крипта] цены для lifetime: %s", exc)
-        return {}
+def compute_realized_from_trades(trades: list[dict[str, Any]]) -> float | None:
+    """Только закрытые сделки: деньги уже на счёте, переоценка открытых не в счёт."""
+    return compute_lifetime_from_trades(trades, {})
 
 
 def recompute_lifetime_pnl(
     mark_prices: dict[str, float] | None = None,
     path: str | None = None,
 ) -> float | None:
-    """Пересчитать и перезаписать одну цифру lifetime_pnl_usd."""
+    """Пересчитать и перезаписать lifetime_pnl_usd — зафиксированное по журналу."""
     trades = _read_trades(path)
-    prices = mark_prices if mark_prices is not None else _mark_prices_from_wallet()
-    value = compute_lifetime_from_trades(trades, prices)
+    if mark_prices is None:
+        value = compute_realized_from_trades(trades)
+    else:
+        value = compute_lifetime_from_trades(trades, mark_prices)
     _write_trades(trades, path=path, lifetime_pnl_usd=value)
     return value
 

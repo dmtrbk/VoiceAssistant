@@ -84,6 +84,26 @@ class CryptoEarnMixin:
             logger.info("[Крипта] Earn: вернул %.2f$ под заявку", amount)
             time.sleep(1.0)
 
+    def _earn_interest(self) -> float:
+        """Накопленный процент. Размещения и возвраты гасят друг друга, остаток — доход."""
+        if not self._earn_enabled():
+            return 0.0
+        try:
+            data = self._signed(
+                "GET",
+                "/v5/account/transaction-log",
+                {"accountType": "UNIFIED", "currency": "USDT", "limit": "50"},
+            )
+        except Exception as exc:
+            logger.info("[Крипта] Earn: история операций недоступна (%s)", exc)
+            return 0.0
+        flow = 0.0
+        for row in (data.get("result") or {}).get("list") or []:
+            if not str(row.get("type") or "").startswith("FLEXIBLE_STAKING"):
+                continue
+            flow += float(row.get("cashFlow") or 0)
+        return max(0.0, flow + self._earn_staked())
+
     def _earn_park_idle(self) -> None:
         """Свободный кэш сверх буфера — под проценты."""
         if not self._earn_enabled():

@@ -14,6 +14,13 @@ class TestConkyMarkets(unittest.TestCase):
         self.assertNotIn("биржа", text)
         self.assertNotIn("крипта", text)
 
+    def test_lifetime_adds_earn_interest(self):
+        with (
+            mock.patch("skills.crypto.journal.read_lifetime_pnl", return_value=1.63),
+            mock.patch.object(conky_markets, "crypto_earn_interest", return_value=0.42),
+        ):
+            self.assertAlmostEqual(conky_markets.crypto_lifetime_pnl(refresh=False), 2.05)
+
     def test_crypto_line_only_numbers(self):
         text = conky_markets.render_lines(10, 12.4, crypto_life=48.6)
         crypto = conky_markets.select_line(text, "crypto")

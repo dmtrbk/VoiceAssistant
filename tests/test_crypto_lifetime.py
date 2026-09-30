@@ -38,6 +38,22 @@ class TestCryptoLifetime(unittest.TestCase):
     def test_empty_trades_none(self):
         self.assertIsNone(crypto_journal.compute_lifetime_from_trades([], {"BTC": 1}))
 
+    def test_realized_ignores_open_position_markup(self):
+        trades = [
+            {"ticker": "ETH", "side": "buy", "quote": 100.0, "price": 10.0},
+            {"ticker": "ETH", "side": "sell", "quote": 80.0, "price": 16.0},
+        ]
+        # Закрыто +30; остаток 5 монет по себестоимости 10 — в цифру не идёт даже при цене 20.
+        self.assertEqual(crypto_journal.compute_realized_from_trades(trades), 30.0)
+        self.assertEqual(crypto_journal.compute_lifetime_from_trades(trades, {"ETH": 20.0}), 80.0)
+
+    def test_recompute_without_prices_is_realized_only(self):
+        trades = [{"ticker": "SOL", "side": "buy", "quote": 50.0, "price": 25.0}]
+        crypto_journal._write_trades(trades, path=self.path, lifetime_pnl_usd=99.0)
+        value = crypto_journal.recompute_lifetime_pnl(path=self.path)
+        self.assertEqual(value, 0.0)  # позиция открыта — заработанного ещё нет
+        self.assertEqual(crypto_journal.read_lifetime_pnl(self.path), 0.0)
+
     def test_recompute_overwrites_single_number(self):
         trades = [
             {"ticker": "SOL", "side": "buy", "quote": 50.0, "price": 25.0},
