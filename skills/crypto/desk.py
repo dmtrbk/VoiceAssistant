@@ -236,15 +236,33 @@ class CryptoDeskMixin:
             cooldown=cool,
         )
 
+    def _held_alt_alloc(self) -> dict[str, float]:
+        """Держанные альты рукава: их слоты сохраняются, пока не выйдут у средней или по стопу."""
+        try:
+            _cash, positions = self._wallet()
+        except Exception:
+            return {}
+        held = sorted(
+            (
+                p for p in positions
+                if p["ticker"] in DESK_ALT_SLEEVE
+                and not self._is_owner_position(p["ticker"])
+                and float(p.get("value") or 0) >= ALT_HELD_MIN_USD
+            ),
+            key=lambda p: float(p.get("value") or 0),
+            reverse=True,
+        )[:ALT_MAX_NAMES]
+        return {p["ticker"]: alt_slot_pct() for p in held}
+
     def desk_score_alloc(self, candidates: list[dict[str, Any]] | None = None) -> tuple[dict[str, float], str]:
         btc7, btc_day = self._btc_regime()
         if is_risk_off(btc_chg_7=btc7, btc_chg_day=btc_day):
             why = (
-                f"Риск-офф по BTC (7д {btc7:+.1f}%, сутки {btc_day:+.1f}%) — кэш."
+                f"Риск-офф по BTC (7д {btc7:+.1f}%, сутки {btc_day:+.1f}%) — ядро в кэш, альты до выхода."
                 if btc7 is not None and btc_day is not None
-                else "Риск-офф по BTC — держу кэш."
+                else "Риск-офф по BTC — ядро в кэш, альты до выхода."
             )
-            return {}, why
+            return self._held_alt_alloc(), why
         rows = candidates if candidates is not None else self.desk_auto_candidates()
         if not rows:
             return {}, "Нет кандидатов для автостола."
@@ -346,13 +364,6 @@ class CryptoDeskMixin:
             result = why or "Стол оставил кэш."
             if silent:
                 logger.info("[Крипта] авто: %s", result)
-            # В кэш с заявками только при риске-офф по BTC — иначе не разматываем портфель.
-            btc7, btc_day = self._btc_regime()
-            if self._api_key and is_risk_off(btc_chg_7=btc7, btc_chg_day=btc_day):
-                try:
-                    result = self._rebalance({}, respect_hold=False)
-                except Exception as exc:
-                    logger.warning("[Крипта] сброс в кэш: %s", exc)
             return result
         desc = ", ".join(f"{_spoken(ticker)} {int(round(pct))}%" for ticker, pct in alloc.items())
         logger.info("[Крипта] целевой портфель: %s (%s)", desc, why)
@@ -384,17 +395,17 @@ class CryptoDeskMixin:
         alloc = dict(state.get("alloc") or {})
         btc7, btc_day = self._btc_regime()
         if is_risk_off(btc_chg_7=btc7, btc_chg_day=btc_day):
-            why = "дозор: риск-офф по BTC — кэш"
+            why = "дозор: риск-офф по BTC — ядро в кэш, альты до выхода"
             logger.info("[Крипта] %s", why)
             if not self._api_key:
                 write_alloc_state({}, why=why, watch_trades=watch_trades)
                 return why
-            result = self._rebalance({}, respect_hold=False)
+            alloc = self._held_alt_alloc()
+            result = self._rebalance(alloc, respect_hold=False)
             traded = result != "Портфель уже в коридоре цели."
             if traded:
                 watch_trades.append(now)
-                write_trail_state({})
-            write_alloc_state({}, why=why, watch_trades=watch_trades)
+            write_alloc_state(alloc, why=why, watch_trades=watch_trades)
             return result if traded else why
 
         if not self._api_key:
@@ -452,6 +463,8 @@ class CryptoDeskMixin:
             # Пыль после продажи не держит трейл — иначе новая покупка унаследует старый пик.
             leg_value = float(pos.get("value") or 0) or float(pos.get("qty") or 0) * price
             if leg_value < min_trade:
+                continue
+            if trail_pct_for(ticker) is None:
                 continue
             prev = trail_legs.get(ticker) or {}
             entry = float(prev.get("entry") or 0) or float(avg_costs.get(ticker) or 0) or price
@@ -538,6 +551,7 @@ class CryptoDeskMixin:
             (ticker, current_values[ticker] - target_values[ticker])
             for ticker in relevant
             if ticker not in trail_sold
+            and ticker not in DESK_ALT_SLEEVE
             and should_watch_take_profit(
                 day_chg=day_chgs.get(ticker),
                 current_value=current_values[ticker],
@@ -665,16 +679,16 @@ class CryptoDeskMixin:
         sells = [
             (ticker, current_values[ticker] - target_values[ticker])
             for ticker in relevant
-            if should_rebalance_leg(
+            if current_values[ticker] > target_values[ticker]
+            and should_rebalance_leg(
                 current_value=current_values[ticker],
                 target_value=target_values[ticker],
                 equity=equity,
                 band_pct=band_pct_for(ticker),
                 min_trade_usd=min_trade,
-                day_chg=day_chgs.get(ticker),
+                day_chg=None if ticker in DESK_ALT_SLEEVE else day_chgs.get(ticker),
                 take_profit_pct=take_profit_day_pct_for(ticker),
             )
-            and current_values[ticker] > target_values[ticker]
         ]
         sells.sort(key=lambda item: item[1], reverse=True)
         fresh: set[str] = set()
@@ -687,15 +701,10 @@ class CryptoDeskMixin:
         for ticker, excess in sells:
             if target_alloc.get(ticker, 0.0) <= 0 and self._is_owner_position(ticker):
                 continue
-            day_chg = day_chgs.get(ticker)
-            if (
-                ticker in fresh
-                and ticker in DESK_ALT_SLEEVE
-                and (day_chg is None or day_chg < take_profit_day_pct_for(ticker))
-            ):
+            if ticker in fresh and ticker in DESK_ALT_SLEEVE:
                 kept_alt_value += excess
                 logger.info(
-                    "[Крипта] %s куплен < %d ч назад — не ротирую",
+                    "[Крипта] %s куплен < %d ч назад — не ротирую (выход только у средней или стоп)",
                     ticker,
                     int(ALT_MIN_HOLD_HOURS),
                 )

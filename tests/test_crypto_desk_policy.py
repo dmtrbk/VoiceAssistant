@@ -370,7 +370,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(cold["hit"])
         self.assertEqual(policy.TRAIL_ARM_PCT, 5.0)
         self.assertEqual(policy.trail_pct_for("BTC"), policy.TRAIL_CORE_PCT)
-        self.assertEqual(policy.trail_pct_for("DOGE"), policy.TRAIL_ALT_PCT)
+        self.assertIsNone(policy.trail_pct_for("DOGE"))
 
 
 class TestJournalChurnAndDaily(unittest.TestCase):
@@ -574,15 +574,22 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertAlmostEqual(float(placed[0][2]), 1.0)
         self.assertNotIn("BTC", crypto_common.read_trail_state())
 
-    def test_risk_off_blocks_auto(self):
+    def test_risk_off_keeps_held_alts(self):
         rows = [{"ticker": "BTC", "chg": -4.0, "chg_7": -8.0, "turnover": 1e9, "held": 0}]
+        held = [
+            {"ticker": "DOGE", "qty": 300.0, "value": 30.0, "price": 0.1, "name": "Дож"},
+            {"ticker": "BTC", "qty": 1.0, "value": 80.0, "price": 80.0, "name": "Биткоин"},
+        ]
         with (
             patch.object(self.skill, "_btc_regime", return_value=(-8.0, -4.0)),
             patch.object(self.skill, "desk_auto_candidates", return_value=rows),
+            patch.object(self.skill, "_wallet", return_value=(100.0, held)),
         ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"DOGE", "BTC"}
             alloc, why = self.skill.desk_score_alloc(rows)
-        self.assertEqual(alloc, {})
-        self.assertIn("риск", why.lower())
+        self.assertEqual(alloc, {"DOGE": policy.alt_slot_pct()})
+        self.assertIn("альты до выхода", why)
 
     def test_desk_score_uses_bull_cash_floor(self):
         rows = [
@@ -693,7 +700,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertFalse(any(t == "MNT" and s == "Sell" for t, s in placed))
         self.assertNotIn("MNT", crypto_common.read_trail_state())
 
-    def _rebalance_with_fresh_alt(self, *, respect_hold: bool) -> list[tuple[str, str]]:
+    def _rebalance_with_fresh_alt(self, *, respect_hold: bool, target: dict | None = None) -> list[tuple[str, str]]:
         placed: list[tuple[str, str]] = []
 
         def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
@@ -718,7 +725,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         ):
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"DOGE"}
-            self.skill._rebalance({"BTC": 40.0}, respect_hold=respect_hold)
+            self.skill._rebalance(target or {"BTC": 40.0}, respect_hold=respect_hold)
         return placed
 
     def test_rebalance_keeps_fresh_alt(self):
@@ -726,9 +733,36 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertNotIn(("DOGE", "Sell"), placed)
         self.assertIn(("BTC", "Buy"), placed)
 
-    def test_risk_off_sells_fresh_alt(self):
-        placed = self._rebalance_with_fresh_alt(respect_hold=False)
-        self.assertIn(("DOGE", "Sell"), placed)
+    def test_risk_off_sells_core_keeps_alt(self):
+        placed: list[tuple[str, str]] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+            placed.append((ticker, side))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(
+                self.skill,
+                "_wallet",
+                return_value=(
+                    10.0,
+                    [
+                        {"ticker": "DOGE", "qty": 300.0, "value": 12.0, "price": 0.04, "name": "Дож"},
+                        {"ticker": "BTC", "qty": 1.0, "value": 60.0, "price": 60.0, "name": "Биткоин"},
+                    ],
+                ),
+            ),
+            patch.object(self.skill, "_cash_and_held", return_value=(10.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_ticker", return_value={"price": 0.1, "chg": 1.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"DOGE", "BTC"}
+            self.skill._rebalance({"DOGE": policy.alt_slot_pct()}, respect_hold=False)
+        self.assertIn(("BTC", "Sell"), placed)
+        self.assertNotIn(("DOGE", "Sell"), placed)
 
     def _watch_alt(self, *, price: float, entry: float, alloc: dict, positions: list, cash: float = 60.0):
         from skills.crypto import common as crypto_common

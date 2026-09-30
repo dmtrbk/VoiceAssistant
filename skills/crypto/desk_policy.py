@@ -432,10 +432,11 @@ def pick_watch_alt_entries(
     return [t for _z, t in ready[:room]]
 
 
-def trail_pct_for(ticker: str) -> float:
+def trail_pct_for(ticker: str) -> float | None:
+    """Трейл только у ядра: у альта свой выход — средняя полоса или стоп."""
     if str(ticker or "").upper() in DESK_CORE:
         return TRAIL_CORE_PCT
-    return TRAIL_ALT_PCT
+    return None
 
 
 def update_trail_leg(
