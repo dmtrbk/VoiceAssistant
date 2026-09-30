@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -18,6 +20,42 @@ _MIN_STAKE = 1.5  # минимум продукта
 # Оставляем немного свободным: мелкие заявки не гоняют деньги туда-обратно.
 _FREE_BUFFER = 5.0
 _POSITION_CACHE_SEC = 20.0
+
+
+def _earn_tx_id(row: dict[str, Any]) -> str:
+    tid = str(row.get("id") or row.get("transactionId") or "")
+    if tid:
+        return tid
+    return "|".join(
+        (
+            str(row.get("type") or ""),
+            str(row.get("transactionTime") or ""),
+            str(row.get("cashFlow") or ""),
+        )
+    )
+
+
+def _read_earn_state() -> dict[str, Any]:
+    path = common._EARN_PATH
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _write_earn_state(payload: dict[str, Any]) -> None:
+    path = common._EARN_PATH
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] Earn: не записал учёт процентов: %s", exc)
 
 
 class CryptoEarnMixin:
@@ -85,24 +123,54 @@ class CryptoEarnMixin:
             time.sleep(1.0)
 
     def _earn_interest(self) -> float:
-        """Накопленный процент. Размещения и возвраты гасят друг друга, остаток — доход."""
+        """Накопленный процент: позиция плюс все размещения и возвраты за всё время.
+
+        Считаем по своей копии истории. Последние 50 операций биржи со временем
+        теряют саму заявку «положил», и цифра прыгнула бы на размер вклада.
+        """
         if not self._earn_enabled():
             return 0.0
+        flow = self._earn_flow()
+        if flow is None:
+            return 0.0
+        return max(0.0, flow + self._earn_staked(fresh=True))
+
+    def _earn_flow(self) -> float | None:
+        state = _read_earn_state()
+        seen = set(state.get("seen") or [])
+        flow = float(state.get("flow") or 0)
+        cursor = ""
+        changed = False
         try:
-            data = self._signed(
-                "GET",
-                "/v5/account/transaction-log",
-                {"accountType": "UNIFIED", "currency": "USDT", "limit": "50"},
-            )
+            for _page in range(40):
+                params = {"accountType": "UNIFIED", "currency": "USDT", "limit": "50"}
+                if cursor:
+                    params["cursor"] = cursor
+                data = self._signed("GET", "/v5/account/transaction-log", params)
+                result = data.get("result") or {}
+                rows = result.get("list") or []
+                fresh = False
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    tid = _earn_tx_id(row)
+                    if tid in seen:
+                        continue
+                    seen.add(tid)
+                    fresh = True
+                    changed = True
+                    if str(row.get("type") or "").startswith("FLEXIBLE_STAKING"):
+                        flow += float(row.get("cashFlow") or 0)
+                cursor = str(result.get("nextPageCursor") or "")
+                if not rows or not cursor or not fresh:
+                    break
         except Exception as exc:
             logger.info("[Крипта] Earn: история операций недоступна (%s)", exc)
-            return 0.0
-        flow = 0.0
-        for row in (data.get("result") or {}).get("list") or []:
-            if not str(row.get("type") or "").startswith("FLEXIBLE_STAKING"):
-                continue
-            flow += float(row.get("cashFlow") or 0)
-        return max(0.0, flow + self._earn_staked())
+            if not state:
+                return None
+        if changed:
+            _write_earn_state({"flow": round(flow, 8), "seen": sorted(seen)})
+        return flow
 
     def _earn_park_idle(self) -> None:
         """Свободный кэш сверх буфера — под проценты."""

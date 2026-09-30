@@ -47,6 +47,7 @@ _TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trades.json")
 _DAILY_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_daily.json")
 _ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_alloc.json")
 _TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trail.json")
+_EARN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_earn.json")
 
 _ENCYCLOPEDIA = (
     "что такое", "что значит", "кто такой", "кто такая",

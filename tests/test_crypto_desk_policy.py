@@ -926,6 +926,14 @@ class TestEarn(unittest.TestCase):
         env = patch.dict(os.environ, {"CRYPTO_EARN": "on"})
         env.start()
         self.addCleanup(env.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        earn_path = patch(
+            "skills.crypto.common._EARN_PATH",
+            os.path.join(self.tmp.name, "earn.json"),
+        )
+        earn_path.start()
+        self.addCleanup(earn_path.stop)
         p = patch("skills.crypto.earn.time.sleep")
         p.start()
         self.addCleanup(p.stop)
@@ -1016,6 +1024,27 @@ class TestEarn(unittest.TestCase):
         self.staked = 129.13
         with patch.object(self.skill, "_signed", side_effect=signed):
             self.assertAlmostEqual(self.skill._earn_interest(), 0.0, places=4)
+
+    def test_interest_keeps_old_stake_after_it_leaves_the_log(self):
+        full = [
+            {"id": "sub", "type": "FLEXIBLE_STAKING_SUBSCRIPTION", "cashFlow": "-129.13"},
+            {"id": "fee", "type": "FLEXIBLE_STAKING_INTEREST", "cashFlow": "0.42"},
+        ]
+        later = [{"id": "trade-new", "type": "TRADE", "cashFlow": "20"}]
+        calls = {"n": 0}
+
+        def signed(method, path, params=None):
+            if path == "/v5/account/transaction-log":
+                calls["n"] += 1
+                rows = full if calls["n"] == 1 else later
+                return {"result": {"list": rows, "nextPageCursor": ""}}
+            return self._signed(method, path, params)
+
+        self.staked = 129.13
+        with patch.object(self.skill, "_signed", side_effect=signed):
+            self.assertAlmostEqual(self.skill._earn_interest(), 0.42, places=4)
+            self.staked = 129.55
+            self.assertAlmostEqual(self.skill._earn_interest(), 0.84, places=4)
 
     def test_disabled_without_env(self):
         with patch.dict(os.environ, {"CRYPTO_EARN": "off"}), self._patched():
