@@ -83,6 +83,16 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertLessEqual(sum(alloc.values()), core_cap + 0.5)
         self.assertIn("8%", why)
 
+    def test_core_split_equally_despite_scores(self):
+        rows = [
+            {"ticker": "BTC", "chg": -0.4, "chg_7": -0.5, "turnover": 1e9},
+            {"ticker": "ETH", "chg": 1.5, "chg_7": 3.0, "turnover": 1e9},
+        ]
+        alloc, _why = policy.score_alloc(rows)
+        core_budget = 100.0 - policy.DESK_CASH_FLOOR_PCT - policy.ALT_SLEEVE_MAX_PCT
+        self.assertEqual(alloc["BTC"], alloc["ETH"])
+        self.assertAlmostEqual(alloc["BTC"] + alloc["ETH"], core_budget, delta=0.2)
+
     def test_score_empty_when_core_below_floor(self):
         rows = [
             {"ticker": "BTC", "chg": -2.0, "chg_7": -9.0, "turnover": 1e9},
@@ -108,7 +118,7 @@ class TestDeskPolicy(unittest.TestCase):
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
             {"ticker": "ETH", "chg": 0.8, "chg_7": 2.5, "turnover": 1e9},
-            {"ticker": "SOL", "chg": 1.2, "chg_7": 4.0, "turnover": 1e9, "bb_z": -3.5},
+            {"ticker": "SOL", "chg": 1.2, "chg_7": 4.0, "turnover": 1e9, "bb_z": -1.5},
             {"ticker": "MNT", "chg": -6.0, "chg_7": -4.0, "turnover": 1e9, "bb_z": -3.1},
             {"ticker": "LINK", "chg": -4.0, "chg_7": -3.0, "turnover": 1e9, "bb_z": -2.6},
             {"ticker": "AVAX", "chg": -3.0, "chg_7": -2.0, "turnover": 1e9, "bb_z": -2.9},
@@ -126,18 +136,21 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertLessEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_PCT + 0.5)
         self.assertIn("альты", why)
 
-    def test_sol_excluded_from_core(self):
+    def test_sol_in_sleeve_not_core(self):
         self.assertNotIn("SOL", policy.DESK_CORE)
-        self.assertNotIn("SOL", policy.DESK_ALT_SLEEVE)
+        self.assertIn("SOL", policy.DESK_ALT_SLEEVE)
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
             {"ticker": "ETH", "chg": 0.8, "chg_7": 2.5, "turnover": 1e9},
-            {"ticker": "SOL", "chg": 5.0, "chg_7": 10.0, "turnover": 1e9},
+            {"ticker": "SOL", "chg": 5.0, "chg_7": 10.0, "turnover": 1e9, "bb_z": 1.0},
         ]
         alloc, _why = policy.score_alloc(rows)
         self.assertNotIn("SOL", alloc)
         self.assertIn("BTC", alloc)
         self.assertIn("ETH", alloc)
+        rows[2]["bb_z"] = -2.8
+        alloc, _why = policy.score_alloc(rows)
+        self.assertEqual(alloc.get("SOL"), policy.alt_slot_pct())
 
     def test_alt_enters_only_at_lower_band(self):
         rows = [
@@ -185,7 +198,7 @@ class TestDeskPolicy(unittest.TestCase):
             "NEAR": {"z": -2.6, "ma": 1.0},
             "DOT": {"z": -3.4, "ma": 1.0},
             "ADA": {"z": -1.0, "ma": 1.0},
-            "SOL": {"z": -4.0, "ma": 1.0},
+            "PEPE": {"z": -4.0, "ma": 1.0},
         }
         picked = policy.pick_watch_alt_entries(
             bands, target_alloc={"BTC": 40.0, "XRP": 11.7}, held_alts=set(), blocked={"DOT"}

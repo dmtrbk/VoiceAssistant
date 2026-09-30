@@ -9,9 +9,9 @@ from typing import Any
 # Ядро whitelist для авто (плюс уже держанные позиции).
 DESK_CORE = frozenset({"BTC", "ETH"})
 # Узкий spot-рукав альта поверх ядра: ≤ ALT_SLEEVE_MAX_PCT, недобор → кэш.
-# Бывшая доля SOL (~⅓ старого ядра) ушла сюда: 15% + ~20% ≈ 35%.
+# SOL — не в ядре, а здесь: берём только на провале у нижней полосы.
 DESK_ALT_SLEEVE = frozenset({
-    "XRP", "DOGE", "LINK", "AVAX", "SUI", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
+    "SOL", "XRP", "DOGE", "LINK", "AVAX", "SUI", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
 })
 DESK_MAX_NAMES = 2
 ALT_SLEEVE_MAX_PCT = 35.0
@@ -292,6 +292,10 @@ def score_alloc(
         allow_weak_core=True,
         score_fn=_row_score,
     )
+    # Скор решает только, кто в ядре; доли поровну — иначе близкие скоры BTC/ETH гоняют ребаланс туда-обратно.
+    if core_alloc:
+        share = round(core_budget / len(core_alloc), 1)
+        core_alloc = {k: share for k in core_alloc}
     alt_alloc = pick_alts(alt_rows, sleeve_pct=sleeve, max_names=alt_max_names)
     if not core_alloc and not alt_alloc:
         return {}, "Рынок слабый — держу кэш в тетере."
