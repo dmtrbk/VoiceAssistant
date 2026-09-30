@@ -266,12 +266,33 @@ class CryptoQuotesMixin:
         )
         rows = (data.get("result") or {}).get("list") or []
         if not rows:
-            return {"min_qty": 0.0, "min_amt": _MIN_QUOTE, "step": 0.0}
+            return {"min_qty": 0.0, "min_amt": _MIN_QUOTE, "step": 0.0, "tick": 0.0}
         lot = rows[0].get("lotSizeFilter") or {}
+        price_filter = rows[0].get("priceFilter") or {}
         return {
             "min_qty": float(lot.get("minOrderQty") or 0),
             "min_amt": float(lot.get("minOrderAmt") or _MIN_QUOTE),
             "step": float(lot.get("qtyStep") or lot.get("basePrecision") or 0),
+            "tick": float(price_filter.get("tickSize") or 0),
+        }
+
+    def _book(self, ticker: str) -> dict[str, float]:
+        """Лучшие bid/ask без кэша — лимитную заявку ставим по свежей книге."""
+        response = self._session.get(
+            f"{self._host()}/v5/market/tickers",
+            params={"category": "spot", "symbol": self._symbol(ticker)},
+            timeout=6,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"bybit {response.status_code}")
+        data = response.json() if response.content else {}
+        if int(data.get("retCode") or 0) != 0:
+            raise RuntimeError(str(data.get("retMsg") or "bybit error"))
+        rows = (data.get("result") or {}).get("list") or []
+        row = rows[0] if rows else {}
+        return {
+            "bid": float(row.get("bid1Price") or 0),
+            "ask": float(row.get("ask1Price") or 0),
         }
 
     def _momentum(self, ticker: str) -> dict[str, Any]:

@@ -487,7 +487,7 @@ class CryptoDeskMixin:
             if qty <= 0 or value < min_trade:
                 continue
             try:
-                parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price))
+                parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price, maker=True))
                 trail_sold.add(ticker)
                 time.sleep(0.4)
                 logger.info(
@@ -528,7 +528,7 @@ class CryptoDeskMixin:
             if not reason:
                 continue
             try:
-                parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price))
+                parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price, maker=True))
                 time.sleep(0.4)
             except Exception as exc:
                 logger.warning("[Крипта] выход альта %s: %s", ticker, exc)
@@ -571,7 +571,7 @@ class CryptoDeskMixin:
             if sell_qty <= 0:
                 continue
             try:
-                parts.append(self._place_order(ticker, "Sell", base_qty=sell_qty, price=price))
+                parts.append(self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True))
                 time.sleep(0.4)
             except Exception as exc:
                 logger.warning("[Крипта] дозор продажа %s: %s", ticker, exc)
@@ -641,7 +641,7 @@ class CryptoDeskMixin:
             if quote < _MIN_QUOTE:
                 continue
             try:
-                parts.append(self._place_order(ticker, "Buy", quote_usdt=quote))
+                parts.append(self._place_order(ticker, "Buy", quote_usdt=quote, maker=True))
                 cash -= quote
                 time.sleep(0.4)
             except Exception as exc:
@@ -719,7 +719,7 @@ class CryptoDeskMixin:
             if sell_qty <= 0:
                 continue
             try:
-                parts.append(self._place_order(ticker, "Sell", base_qty=sell_qty, price=price))
+                parts.append(self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True))
                 time.sleep(0.4)
             except Exception as exc:
                 logger.warning("[Крипта] продажа %s: %s", ticker, exc)
@@ -762,7 +762,7 @@ class CryptoDeskMixin:
             if quote < _MIN_QUOTE:
                 continue
             try:
-                parts.append(self._place_order(ticker, "Buy", quote_usdt=quote))
+                parts.append(self._place_order(ticker, "Buy", quote_usdt=quote, maker=True))
                 cash -= quote
                 time.sleep(0.4)
             except Exception as exc:

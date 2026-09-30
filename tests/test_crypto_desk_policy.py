@@ -505,7 +505,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         crypto_common.write_alloc_state({"BTC": 40.0}, why="test")
         placed: list[tuple] = []
 
-        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
             placed.append((ticker, side, base_qty, quote_usdt))
             return f"ok {ticker}"
 
@@ -542,7 +542,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         )
         placed: list[tuple] = []
 
-        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
             placed.append((ticker, side, base_qty, quote_usdt))
             return f"trail {ticker}"
 
@@ -620,7 +620,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         # Кэша мало на обе дыры → делим пропорционально need.
         placed: list[tuple[str, float]] = []
 
-        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
             placed.append((ticker, float(quote_usdt or 0)))
             return f"ok {ticker}"
 
@@ -672,7 +672,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         )
         placed: list[tuple] = []
 
-        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
             placed.append((ticker, side))
             return f"ok {ticker}"
 
@@ -703,7 +703,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
     def _rebalance_with_fresh_alt(self, *, respect_hold: bool, target: dict | None = None) -> list[tuple[str, str]]:
         placed: list[tuple[str, str]] = []
 
-        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
             placed.append((ticker, side))
             return f"ok {ticker}"
 
@@ -736,7 +736,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
     def test_risk_off_sells_core_keeps_alt(self):
         placed: list[tuple[str, str]] = []
 
-        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
             placed.append((ticker, side))
             return f"ok {ticker}"
 
@@ -770,7 +770,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         crypto_common.write_alloc_state(alloc, why="test")
         placed: list[tuple] = []
 
-        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0):
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
             placed.append((ticker, side, base_qty, quote_usdt))
             return f"ok {ticker}"
 
@@ -824,6 +824,93 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertEqual([t for t, _q in buys], ["LINK"], result)
         self.assertAlmostEqual(buys[0][1], 100.0 * policy.alt_slot_pct() / 100.0, places=1)
         self.assertEqual(state["alloc"].get("LINK"), policy.alt_slot_pct())
+
+
+class TestMakerOrders(unittest.TestCase):
+    """Лимитные заявки стола: maker 0.1% вместо taker 0.18%, остаток добираем рыночной."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for name, attr in (
+            ("holds.json", "_HOLD_PATH"),
+            ("bought.json", "_BOUGHT_PATH"),
+            ("trades.json", "_TRADE_PATH"),
+            ("trail.json", "_TRAIL_PATH"),
+        ):
+            patcher = patch(f"skills.crypto.common.{attr}", os.path.join(self.tmp.name, name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.skill = CryptoSkill()
+        self.bodies: list[dict] = []
+        self.states: list[dict] = []
+        for target, kwargs in (
+            ("_filters", {"return_value": {"min_qty": 0.0, "min_amt": 5.0, "step": 0.01, "tick": 0.01}}),
+            ("_ticker", {"return_value": {"price": 100.0, "chg": 0.0, "turnover": 1}}),
+            ("_book", {"return_value": {"bid": 99.99, "ask": 100.01}}),
+            ("_journal_trade", {}),
+            ("_bust_private_cache", {}),
+        ):
+            p = patch.object(self.skill, target, **kwargs)
+            p.start()
+            self.addCleanup(p.stop)
+        p = patch("skills.crypto.trades.time.sleep")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _signed(self, method, path, params=None):
+        if path == "/v5/order/create":
+            self.bodies.append(dict(params or {}))
+            return {"result": {"orderId": f"id{len(self.bodies)}"}}
+        if path in {"/v5/order/realtime", "/v5/order/history"}:
+            return {"result": {"list": [self.states.pop(0)] if self.states else []}}
+        return {"result": {}}
+
+    def _run(self, side, **kwargs):
+        with patch.object(self.skill, "_signed", side_effect=self._signed):
+            return self.skill._place_order("DOGE", side, maker=True, **kwargs)
+
+    def test_limit_fill_skips_market(self):
+        self.states = [{"orderStatus": "Filled", "cumExecQty": "0.26", "cumExecValue": "26.0"}]
+        phrase = self._run("Buy", quote_usdt=26.0)
+        self.assertEqual(len(self.bodies), 1)
+        self.assertEqual(self.bodies[0]["orderType"], "Limit")
+        self.assertEqual(self.bodies[0]["timeInForce"], "PostOnly")
+        self.assertEqual(self.bodies[0]["price"], "99.99")
+        self.assertIn("26", phrase)
+
+    def test_partial_fill_tops_up_with_market(self):
+        self.states = [
+            {"orderStatus": "PartiallyFilled", "cumExecQty": "0.10", "cumExecValue": "10.0"},
+            {"orderStatus": "Cancelled", "cumExecQty": "0.10", "cumExecValue": "10.0"},
+        ]
+        self._run("Buy", quote_usdt=26.0)
+        self.assertEqual([b["orderType"] for b in self.bodies], ["Limit", "Market"])
+        self.assertAlmostEqual(float(self.bodies[1]["qty"]), 16.0, places=2)
+
+    def test_unfilled_limit_falls_back_to_market(self):
+        self.states = [{"orderStatus": "Cancelled", "cumExecQty": "0", "cumExecValue": "0"}]
+        self._run("Sell", base_qty=0.26, price=100.0)
+        self.assertEqual([b["orderType"] for b in self.bodies], ["Limit", "Market"])
+        self.assertEqual(self.bodies[0]["price"], "100.01")  # продажа округляется вверх
+        self.assertAlmostEqual(float(self.bodies[1]["qty"]), 0.26, places=4)
+
+    def test_voice_order_stays_market(self):
+        with patch.object(self.skill, "_signed", side_effect=self._signed):
+            self.skill._place_order("DOGE", "Buy", quote_usdt=26.0)
+        self.assertEqual([b["orderType"] for b in self.bodies], ["Market"])
+
+    def test_maker_disabled_by_env(self):
+        with patch.dict(os.environ, {"CRYPTO_MAKER_ORDERS": "off"}):
+            self._run("Buy", quote_usdt=26.0)
+        self.assertEqual([b["orderType"] for b in self.bodies], ["Market"])
+
+    def test_price_step_rounding(self):
+        from skills.crypto.common import _price_str
+
+        self.assertEqual(_price_str(0.094999, 0.0001), "0.0949")
+        self.assertEqual(_price_str(0.094999, 0.0001, round_up=True), "0.095")
+        self.assertEqual(_price_str(123.456, 0.0), "123.456")
 
 
 class TestBollinger(unittest.TestCase):

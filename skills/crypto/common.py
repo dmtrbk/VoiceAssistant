@@ -36,6 +36,9 @@ _SMALL_EQUITY = 50.0
 _AI_MAX_NAMES = 4
 # Запас под комиссию/пыль при market buy «на весь кэш» или хвост ребаланса.
 _BUY_CASH_BUFFER = 0.998
+# Лимитные заявки стола: maker 0.1% вместо taker 0.18%. Не исполнилась — добираем рыночной.
+_MAKER_WAIT_SEC = 24.0
+_MAKER_POLL_SEC = 1.5
 _TRADE_HISTORY_KEEP = 5000
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_holds.json")
@@ -191,6 +194,25 @@ def _qty_str(value: float, step: float, *, round_up: bool = False) -> str:
         return str(int(value))
     text = f"{value:.8f}".rstrip("0").rstrip(".")
     return text or "0"
+
+
+def _price_str(value: float, tick: float, *, round_up: bool = False) -> str:
+    """Цена по шагу инструмента: покупку округляем вниз, продажу вверх — остаёмся maker'ом."""
+    tick = float(tick or 0)
+    if tick > 0:
+        units = value / tick
+        if round_up:
+            value = math.ceil(units - 1e-9) * tick
+        else:
+            value = math.floor(units + 1e-9) * tick
+    text = f"{value:.10f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _maker_orders_enabled() -> bool:
+    """Стол торгует лимитными заявками, пока явно не выключено."""
+    raw = (os.getenv("CRYPTO_MAKER_ORDERS") or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _testnet() -> bool:
