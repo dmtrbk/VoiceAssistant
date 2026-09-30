@@ -332,7 +332,8 @@ class CryptoQuotesMixin:
         rows = (data.get("result") or {}).get("list") or []
         return bollinger(closes_from_kline(rows))
 
-    def _wallet(self) -> tuple[float, list[dict[str, Any]]]:
+    def _wallet(self, *, with_earn: bool = True) -> tuple[float, list[dict[str, Any]]]:
+        """Кэш и позиции. with_earn=False — только спот, без денег под процентами."""
         data = self._signed("GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"})
         accounts = (data.get("result") or {}).get("list") or []
         coins = (accounts[0].get("coin") or []) if accounts else []
@@ -358,6 +359,9 @@ class CryptoQuotesMixin:
                 }
             )
         positions.sort(key=lambda item: item["value"], reverse=True)
+        # Деньги под процентами — тот же кэш: иначе стол считает капитал меньше, чем есть.
+        if with_earn:
+            cash += self._earn_staked()
         return cash, positions
 
     def _speak_one(self, ticker: str) -> str:

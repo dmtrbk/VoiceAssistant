@@ -351,7 +351,10 @@ class CryptoDeskMixin:
 
     def _trade_auto(self, silent: bool = False) -> str:
         with common._TRADE_LOCK:
-            return self._trade_auto_locked(silent)
+            try:
+                return self._trade_auto_locked(silent)
+            finally:
+                self._earn_park_idle()
 
     def _trade_auto_locked(self, silent: bool = False) -> str:
         # Авто и «поторгуй» — скор + режим BTC, без Groq.
@@ -377,7 +380,10 @@ class CryptoDeskMixin:
 
     def _desk_watch(self, silent: bool = True) -> str:
         with common._TRADE_LOCK:
-            return self._desk_watch_locked(silent)
+            try:
+                return self._desk_watch_locked(silent)
+            finally:
+                self._earn_park_idle()
 
     def _desk_watch_locked(self, silent: bool = True) -> str:
         """Быстрый дозор: к сохранённой цели. Без нового скора."""

@@ -215,6 +215,12 @@ def _maker_orders_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _earn_enabled() -> bool:
+    """Простаивающий кэш под проценты Bybit. Включается явно: нужно право Earn у ключа."""
+    raw = (os.getenv("CRYPTO_EARN") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _testnet() -> bool:
     return (os.getenv("BYBIT_TESTNET") or os.getenv("CRYPTO_TESTNET") or "").strip().lower() in {
         "1", "true", "yes", "on",

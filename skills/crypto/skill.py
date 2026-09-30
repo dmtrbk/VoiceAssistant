@@ -15,6 +15,7 @@ from skills.text_utils import norm as _norm
 from . import common
 from .common import _DEFAULT_WATCH, _FOLLOWUP, _YIELD_HINTS, _read_ticker_set
 from .desk import CryptoDeskMixin, _wants_advice
+from .earn import CryptoEarnMixin
 from .journal import CryptoJournalMixin, _wants_journal
 from .quotes import CryptoQuotesMixin, _coin_hits, is_crypto_command
 from .trades import CryptoTradesMixin, _trade_kind
@@ -26,6 +27,7 @@ class CryptoSkill(
     CryptoQuotesMixin,
     CryptoTradesMixin,
     CryptoDeskMixin,
+    CryptoEarnMixin,
     CryptoJournalMixin,
     BaseSkill,
 ):

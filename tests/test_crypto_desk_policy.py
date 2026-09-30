@@ -913,6 +913,89 @@ class TestMakerOrders(unittest.TestCase):
         self.assertEqual(_price_str(123.456, 0.0), "123.456")
 
 
+class TestEarn(unittest.TestCase):
+    """Простаивающий кэш под проценты: капитал не теряется, перед покупкой деньги возвращаются."""
+
+    def setUp(self):
+        self.skill = CryptoSkill()
+        self.skill._api_key = "x"
+        self.skill._api_secret = "y"
+        self.staked = 100.0
+        self.spot = 10.0
+        self.orders: list[tuple[str, float]] = []
+        env = patch.dict(os.environ, {"CRYPTO_EARN": "on"})
+        env.start()
+        self.addCleanup(env.stop)
+        p = patch("skills.crypto.earn.time.sleep")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _signed(self, method, path, params=None):
+        if path == "/v5/earn/position":
+            return {"result": {"list": [{"amount": str(self.staked)}]}}
+        if path == "/v5/earn/place-order":
+            amount = float((params or {}).get("amount") or 0)
+            kind = str((params or {}).get("orderType") or "")
+            self.orders.append((kind, amount))
+            if kind == "Redeem":
+                self.staked -= amount
+                self.spot += amount
+            else:
+                self.staked += amount
+                self.spot -= amount
+            return {"result": {"orderId": "1"}}
+        if path == "/v5/account/wallet-balance":
+            return {"result": {"list": [{"coin": [
+                {"coin": "USDT", "walletBalance": str(self.spot), "usdValue": str(self.spot)},
+            ]}]}}
+        return {"result": {}}
+
+    def _patched(self):
+        return patch.object(self.skill, "_signed", side_effect=self._signed)
+
+    def test_wallet_counts_staked_as_cash(self):
+        with self._patched():
+            cash, _pos = self.skill._wallet()
+            spot_only, _pos = self.skill._wallet(with_earn=False)
+        self.assertAlmostEqual(cash, 110.0)
+        self.assertAlmostEqual(spot_only, 10.0)
+
+    def test_redeem_before_buy(self):
+        with self._patched():
+            self.skill._earn_free_cash(26.0)
+        self.assertEqual(self.orders[0][0], "Redeem")
+        self.assertAlmostEqual(self.orders[0][1], 21.0)  # дыра 16$ + буфер 5$
+        self.assertAlmostEqual(self.spot, 31.0)
+
+    def test_no_redeem_when_spot_enough(self):
+        self.spot = 40.0
+        with self._patched():
+            self.skill._earn_free_cash(26.0)
+        self.assertEqual(self.orders, [])
+
+    def test_park_idle_cash(self):
+        self.spot = 80.0
+        with self._patched():
+            self.skill._earn_park_idle()
+        self.assertEqual(self.orders[0][0], "Stake")
+        self.assertAlmostEqual(self.orders[0][1], 75.0)
+        self.assertAlmostEqual(self.spot, 5.0)
+
+    def test_park_skips_small_leftover(self):
+        self.spot = 6.0
+        with self._patched():
+            self.skill._earn_park_idle()
+        self.assertEqual(self.orders, [])
+
+    def test_disabled_without_env(self):
+        with patch.dict(os.environ, {"CRYPTO_EARN": "off"}), self._patched():
+            self.assertEqual(self.skill._earn_staked(), 0.0)
+            self.skill._earn_park_idle()
+            cash, _pos = self.skill._wallet()
+        self.assertEqual(self.orders, [])
+        self.assertAlmostEqual(cash, 10.0)
+
+
 class TestBollinger(unittest.TestCase):
     def test_bands_and_z(self):
         from skills.crypto.indicators import bollinger

@@ -276,6 +276,8 @@ class CryptoTradesMixin:
                 raise RuntimeError("no lots")
             want_quote = want_qty * px
 
+        if side == "Buy":
+            self._earn_free_cash(want_quote)
         maker_qty = maker_quote = 0.0
         if maker and common._maker_orders_enabled():
             try:
