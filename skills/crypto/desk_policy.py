@@ -42,6 +42,12 @@ TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем н�
 WATCH_TP_DAY_PCT = 12.0
 WATCH_TP_ALT_DAY_PCT = 8.0
 WATCH_DIP_DAY_PCT = -5.0
+# Отдельный карман: $100 BTC на дневной просадке. Ядро 20% этим не двигаем.
+# −5% у BTC бывает ~раз в 3 недели, −3% ~раз в 9 дней. Докуп ядра остаётся на −5%.
+BTC_DIP_USD = 100.0
+BTC_DIP_DAY_PCT = -3.0
+BTC_DIP_EXIT_PCT = 1.0
+BTC_DIP_STOP_PCT = 15.0
 WATCH_DIP_BUY_FRAC = 0.5
 WATCH_MAX_TRADES_PER_HOUR = 2
 # Трейлинг-стоп дозора: защита пика с покупки (только позиции стола).
@@ -51,6 +57,27 @@ TRAIL_ALT_PCT = 8.0
 CHURN_COOLDOWN_HOURS = 12.0
 # Свежекупленный альт не ротируем полным столом (трейл, TP и risk-off продают как обычно).
 ALT_MIN_HOLD_HOURS = 12.0
+
+
+def btc_dip_should_buy(*, day_chg: float | None, qty: float) -> bool:
+    """Докупка $100, только если кармана ещё нет и сутки просели как дозор ядра."""
+    if qty > 0 or day_chg is None:
+        return False
+    return float(day_chg) <= BTC_DIP_DAY_PCT
+
+
+def btc_dip_exit_reason(*, price: float, entry: float) -> str | None:
+    """Выход кармана: +1% от своей цены или стоп −15%. Ядро не продаём."""
+    px = float(price or 0)
+    ent = float(entry or 0)
+    if px <= 0 or ent <= 0:
+        return None
+    gain = (px / ent - 1.0) * 100.0
+    if gain >= BTC_DIP_EXIT_PCT:
+        return "отскок"
+    if gain <= -BTC_DIP_STOP_PCT:
+        return "стоп"
+    return None
 
 
 def is_alt_sleeve(ticker: str) -> bool:

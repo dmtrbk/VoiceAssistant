@@ -48,6 +48,7 @@ _DAILY_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_daily.json")
 _ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_alloc.json")
 _TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trail.json")
 _EARN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_earn.json")
+_BTC_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_btc_dip.json")
 
 _ENCYCLOPEDIA = (
     "что такое", "что значит", "кто такой", "кто такая",
@@ -414,6 +415,47 @@ def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
             "armed": bool(value.get("armed")),
         }
     return out
+
+
+def read_btc_dip(path: str | None = None) -> dict[str, float]:
+    """Отдельные $100 на просадку BTC. Пусто — кармана нет."""
+    path = path or _BTC_DIP_PATH
+    if not os.path.isfile(path):
+        return {"qty": 0.0, "entry": 0.0}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return {"qty": 0.0, "entry": 0.0}
+    if not isinstance(raw, dict):
+        return {"qty": 0.0, "entry": 0.0}
+    try:
+        qty = float(raw.get("qty") or 0)
+        entry = float(raw.get("entry") or 0)
+    except (TypeError, ValueError):
+        return {"qty": 0.0, "entry": 0.0}
+    if qty <= 0 or entry <= 0:
+        return {"qty": 0.0, "entry": 0.0}
+    return {"qty": qty, "entry": entry}
+
+
+def write_btc_dip(qty: float, entry: float, path: str | None = None) -> None:
+    path = path or _BTC_DIP_PATH
+    if qty <= 0 or entry <= 0:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("[Крипта] не стёр карман BTC: %s", exc)
+        return
+    payload = {"qty": float(qty), "entry": float(entry), "ts": time.time()}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал карман BTC: %s", exc)
 
 
 def write_trail_state(

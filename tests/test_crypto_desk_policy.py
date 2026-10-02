@@ -328,6 +328,14 @@ class TestDeskPolicy(unittest.TestCase):
             )
         )
 
+    def test_btc_dip_rules(self):
+        self.assertTrue(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))
+        self.assertFalse(policy.btc_dip_should_buy(day_chg=-3.0, qty=0.01))
+        self.assertFalse(policy.btc_dip_should_buy(day_chg=-2.0, qty=0))
+        self.assertEqual(policy.btc_dip_exit_reason(price=101.0, entry=100.0), "отскок")
+        self.assertEqual(policy.btc_dip_exit_reason(price=85.0, entry=100.0), "стоп")
+        self.assertIsNone(policy.btc_dip_exit_reason(price=100.4, entry=100.0))
+
     def test_watch_rate_limit(self):
         now = time.time()
         self.assertTrue(policy.watch_rate_ok([], now=now))
@@ -437,6 +445,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ("daily.json", "_DAILY_PATH"),
             ("alloc.json", "_ALLOC_PATH"),
             ("trail.json", "_TRAIL_PATH"),
+            ("btc_dip.json", "_BTC_DIP_PATH"),
         ):
             path = os.path.join(self.tmp.name, name)
             patcher = patch(f"skills.crypto.common.{attr}", path)
@@ -732,6 +741,59 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         placed = self._rebalance_with_fresh_alt(respect_hold=True)
         self.assertNotIn(("DOGE", "Sell"), placed)
         self.assertIn(("BTC", "Buy"), placed)
+
+    def test_rebalance_keeps_btc_dip_pocket(self):
+        from skills.crypto.common import write_btc_dip
+
+        write_btc_dip(1.0, 100.0)
+        placed: list[tuple[str, str]] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(
+                self.skill,
+                "_wallet",
+                return_value=(
+                    252.0,
+                    [{"ticker": "BTC", "qty": 1.88, "value": 188.0, "price": 100.0, "name": "Биткоин"}],
+                ),
+            ),
+            patch.object(self.skill, "_cash_and_held", return_value=(252.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_ticker", return_value={"price": 100.0, "chg": 0.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"BTC"}
+            # equity 440, цель BTC 20% = 88. Карман 100 не продаём.
+            self.skill._rebalance({"BTC": 20.0, "ETH": 20.0})
+        self.assertNotIn(("BTC", "Sell"), placed)
+
+    def test_btc_dip_sells_only_pocket_on_bounce(self):
+        from skills.crypto.common import read_btc_dip, write_btc_dip
+
+        write_btc_dip(0.01, 100.0)
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, base_qty))
+            return f"ok {ticker}"
+
+        phrase = None
+        with patch.object(self.skill, "_place_order", side_effect=place):
+            phrase = self.skill._trade_btc_dip(
+                day_chg=-6.0,
+                positions={"BTC": {"qty": 1.0, "value": 101.0, "price": 101.0}},
+                price=101.0,
+                blocked=False,
+            )
+        self.assertIn("ok", phrase or "")
+        self.assertEqual(placed[0][2], 0.01)
+        self.assertEqual(read_btc_dip()["qty"], 0.0)
 
     def test_risk_off_sells_core_keeps_alt(self):
         placed: list[tuple[str, str]] = []
