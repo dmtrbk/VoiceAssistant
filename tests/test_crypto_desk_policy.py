@@ -742,7 +742,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertNotIn(("DOGE", "Sell"), placed)
         self.assertIn(("BTC", "Buy"), placed)
 
-    def test_rebalance_keeps_btc_dip_pocket(self):
+    def test_rebalance_keeps_sol_dip_pocket(self):
         from skills.crypto.common import write_btc_dip
 
         write_btc_dip(1.0, 100.0)
@@ -758,7 +758,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
                 "_wallet",
                 return_value=(
                     252.0,
-                    [{"ticker": "BTC", "qty": 1.88, "value": 188.0, "price": 100.0, "name": "Биткоин"}],
+                    [{"ticker": "SOL", "qty": 1.0, "value": 100.0, "price": 100.0, "name": "Солана"}],
                 ),
             ),
             patch.object(self.skill, "_cash_and_held", return_value=(252.0, {})),
@@ -768,10 +768,9 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch("skills.crypto.desk.time.sleep"),
         ):
             self.skill._desk_bought_ready = True
-            self.skill._desk_bought = {"BTC"}
-            # equity 440, цель BTC 20% = 88. Карман 100 не продаём.
+            self.skill._desk_bought = {"SOL"}
             self.skill._rebalance({"BTC": 20.0, "ETH": 20.0})
-        self.assertNotIn(("BTC", "Sell"), placed)
+        self.assertNotIn(("SOL", "Sell"), placed)
 
     def test_btc_dip_sells_only_pocket_on_bounce(self):
         from skills.crypto.common import read_btc_dip, write_btc_dip
@@ -787,11 +786,12 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         with patch.object(self.skill, "_place_order", side_effect=place):
             phrase = self.skill._trade_btc_dip(
                 day_chg=-6.0,
-                positions={"BTC": {"qty": 1.0, "value": 101.0, "price": 101.0}},
+                positions={"SOL": {"qty": 1.0, "value": 101.0, "price": 101.0}},
                 price=101.0,
                 blocked=False,
             )
         self.assertIn("ok", phrase or "")
+        self.assertEqual(placed[0][0], "SOL")
         self.assertEqual(placed[0][2], 0.01)
         self.assertEqual(read_btc_dip()["qty"], 0.0)
 

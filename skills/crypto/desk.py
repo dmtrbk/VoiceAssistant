@@ -36,6 +36,7 @@ from .desk_policy import (
     CHURN_COOLDOWN_HOURS,
     DESK_ALT_SLEEVE,
     DESK_CORE,
+    BTC_DIP_TICKER,
     BTC_DIP_USD,
     WATCH_DIP_BUY_FRAC,
     alt_exit_reason,
@@ -170,10 +171,15 @@ class CryptoDeskMixin:
                 bands = self._alt_bands(ticker)
                 if bands:
                     bb = {"bb_z": bands["z"], "bb_ma": bands["ma"]}
+            held_value = held_values.get(ticker, 0.0)
+            if ticker == BTC_DIP_TICKER:
+                dip = read_btc_dip()
+                px = float(row.get("price") or 0)
+                held_value = max(0.0, held_value - float(dip.get("qty") or 0) * px)
             chosen.append({
                 **row,
                 "held": held.get(ticker, 0),
-                "held_value": held_values.get(ticker, 0.0),
+                "held_value": held_value,
                 **mom,
                 **bb,
             })
@@ -439,7 +445,7 @@ class CryptoDeskMixin:
         min_trade = _min_trade_usd(equity)
         prices = {item["ticker"]: float(item["price"] or 0) for item in positions_list}
         day_chgs: dict[str, float | None] = {}
-        for ticker in set(target_alloc) | set(positions):
+        for ticker in set(target_alloc) | set(positions) | {BTC_DIP_TICKER}:
             need_px = ticker not in prices or prices[ticker] <= 0
             try:
                 px = self._ticker(ticker)
@@ -457,6 +463,12 @@ class CryptoDeskMixin:
         current_values = {
             ticker: float(positions.get(ticker, {}).get("value") or 0) for ticker in relevant
         }
+        dip_qty_watch = float(read_btc_dip().get("qty") or 0)
+        dip_px_watch = float(prices.get(BTC_DIP_TICKER) or 0)
+        if dip_qty_watch > 0 and dip_px_watch > 0 and BTC_DIP_TICKER in current_values:
+            current_values[BTC_DIP_TICKER] = max(
+                0.0, current_values[BTC_DIP_TICKER] - dip_qty_watch * dip_px_watch
+            )
         parts: list[str] = []
         trail_sold: set[str] = set()
         try:
@@ -494,7 +506,7 @@ class CryptoDeskMixin:
             if not updated["hit"]:
                 continue
             qty = float(pos.get("qty") or 0)
-            if ticker == "BTC":
+            if ticker == BTC_DIP_TICKER:
                 qty = max(0.0, qty - float(read_btc_dip().get("qty") or 0))
             value = qty * price
             if qty <= 0 or value < min_trade:
@@ -530,6 +542,8 @@ class CryptoDeskMixin:
                 continue
             price = float(prices.get(ticker) or pos.get("price") or 0)
             qty = float(pos.get("qty") or 0)
+            if ticker == BTC_DIP_TICKER:
+                qty = max(0.0, qty - float(read_btc_dip().get("qty") or 0))
             value = float(pos.get("value") or 0) or qty * price
             if price <= 0 or qty <= 0 or value < min_trade:
                 continue
@@ -660,10 +674,10 @@ class CryptoDeskMixin:
             except Exception as exc:
                 logger.warning("[Крипта] дозор покупка %s: %s", ticker, exc)
         dip_phrase = self._trade_btc_dip(
-            day_chg=day_chgs.get("BTC"),
+            day_chg=day_chgs.get(BTC_DIP_TICKER),
             positions=positions,
-            price=float(prices.get("BTC") or 0),
-            blocked="BTC" in trail_sold,
+            price=float(prices.get(BTC_DIP_TICKER) or 0),
+            blocked=BTC_DIP_TICKER in trail_sold,
         )
         if dip_phrase:
             parts.append(dip_phrase)
@@ -679,22 +693,24 @@ class CryptoDeskMixin:
         price: float,
         blocked: bool,
     ) -> str | None:
-        """$100 на просадку BTC. Долю ядра 20% не продаём и не раздуваем целью."""
+        """$100 на просадку SOL. Ядро 20% и обычный слот рукава не трогаем."""
+        ticker = BTC_DIP_TICKER
         dip = read_btc_dip()
         qty = float(dip.get("qty") or 0)
         if qty > 0:
             reason = btc_dip_exit_reason(price=price, entry=float(dip.get("entry") or 0))
             if not reason or price <= 0:
                 return None
-            held = float((positions.get("BTC") or {}).get("qty") or 0)
+            held = float((positions.get(ticker) or {}).get("qty") or 0)
             sell_qty = min(qty, held)
             if sell_qty <= 0:
                 write_btc_dip(0, 0)
                 return None
-            phrase = self._place_order("BTC", "Sell", base_qty=sell_qty, price=price, maker=True)
+            phrase = self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
             write_btc_dip(0, 0)
             logger.info(
-                "[Крипта] карман BTC: выход (%s) %.6g по %.4g",
+                "[Крипта] карман %s: выход (%s) %.6g по %.4g",
+                ticker,
                 reason,
                 sell_qty,
                 price,
@@ -702,14 +718,14 @@ class CryptoDeskMixin:
             return phrase
         if blocked or not btc_dip_should_buy(day_chg=day_chg, qty=0):
             return None
-        before = float((positions.get("BTC") or {}).get("qty") or 0)
-        phrase = self._place_order("BTC", "Buy", quote_usdt=BTC_DIP_USD, maker=True)
+        before = float((positions.get(ticker) or {}).get("qty") or 0)
+        phrase = self._place_order(ticker, "Buy", quote_usdt=BTC_DIP_USD, maker=True)
         _cash, held = self._cash_and_held()
-        after = float((held.get("BTC") or {}).get("qty") or 0)
+        after = float((held.get(ticker) or {}).get("qty") or 0)
         bought = after - before
         if bought > 0:
             write_btc_dip(bought, BTC_DIP_USD / bought)
-            logger.info("[Крипта] карман BTC: купил на %d$ по просадке суток", int(BTC_DIP_USD))
+            logger.info("[Крипта] карман %s: купил на %d$ по просадке суток", ticker, int(BTC_DIP_USD))
         return phrase
 
     def _rebalance(self, target_alloc: dict[str, float], *, respect_hold: bool = True) -> str:
@@ -738,11 +754,12 @@ class CryptoDeskMixin:
             for ticker in relevant
         }
         dip_qty = float(read_btc_dip().get("qty") or 0)
-        btc_px = float(prices.get("BTC") or 0)
-        if dip_qty > 0 and btc_px > 0 and "BTC" in current_values:
-            # Карман не считается избытком ядра, пока цель BTC ещё есть.
-            if target_alloc.get("BTC", 0.0) > 0:
-                current_values["BTC"] = max(0.0, current_values["BTC"] - dip_qty * btc_px)
+        dip_px = float(prices.get(BTC_DIP_TICKER) or 0)
+        if dip_qty > 0 and dip_px > 0 and respect_hold and BTC_DIP_TICKER in current_values:
+            # Карман не продаём как лишний альт и не занимаем им слот ядра.
+            current_values[BTC_DIP_TICKER] = max(
+                0.0, current_values[BTC_DIP_TICKER] - dip_qty * dip_px
+            )
         parts: list[str] = []
         sells = [
             (ticker, current_values[ticker] - target_values[ticker])
@@ -779,7 +796,7 @@ class CryptoDeskMixin:
                 continue
             price = prices.get(ticker) or 0.0
             qty = float(positions.get(ticker, {}).get("qty") or 0)
-            if ticker == "BTC" and target_alloc.get("BTC", 0.0) > 0:
+            if ticker == BTC_DIP_TICKER and dip_qty > 0 and respect_hold:
                 qty = max(0.0, qty - dip_qty)
             if target_alloc.get(ticker, 0.0) <= 0:
                 sell_qty = qty
@@ -790,7 +807,7 @@ class CryptoDeskMixin:
                 continue
             try:
                 parts.append(self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True))
-                if ticker == "BTC" and target_alloc.get("BTC", 0.0) <= 0:
+                if ticker == BTC_DIP_TICKER and not respect_hold:
                     write_btc_dip(0, 0)
                 time.sleep(0.4)
             except Exception as exc:
