@@ -37,8 +37,8 @@ class TestDeskPolicy(unittest.TestCase):
             100.0,
         )
 
-    def test_band_core_tighter_than_alt(self):
-        self.assertEqual(policy.band_pct_for("BTC"), policy.REBALANCE_BAND_CORE_PCT)
+    def test_band_is_alt_corridor(self):
+        self.assertEqual(policy.band_pct_for("BTC"), policy.REBALANCE_BAND_ALT_PCT)
         self.assertEqual(policy.band_pct_for("DOGE"), policy.REBALANCE_BAND_ALT_PCT)
 
     def test_filter_drops_pump_and_cooldown(self):
@@ -98,8 +98,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(alloc, {})
         self.assertIn("кэш", why.lower())
 
-    def test_score_allows_core_mild_dip(self):
-        # Mean-reversion: ядро с откатом 7д до -8 ещё в игре.
+    def test_score_without_sleeve_signal_stays_cash(self):
         rows = [
             {"ticker": "BTC", "chg": 0.5, "chg_7": -4.0, "turnover": 1e9},
             {"ticker": "DOGE", "chg": 2.0, "chg_7": -1.0, "turnover": 1e9},
@@ -122,17 +121,14 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         alloc, why = policy.score_alloc(rows)
         alts = {k: v for k, v in alloc.items() if k in policy.DESK_ALT_SLEEVE}
-        core_sum = sum(v for k, v in alloc.items() if k in policy.DESK_CORE)
         self.assertNotIn("SOL", alloc)
         self.assertEqual(set(alts), {"MNT", "AVAX", "NEAR"})
         self.assertTrue(all(v == policy.alt_slot_pct() for v in alts.values()))
         self.assertLessEqual(sum(alts.values()), policy.ALT_SLEEVE_MAX_PCT + 0.5)
-        self.assertEqual(core_sum, 0.0)
         self.assertLessEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_PCT + 0.5)
         self.assertIn("альты", why)
 
-    def test_sol_in_sleeve_not_core(self):
-        self.assertNotIn("SOL", policy.DESK_CORE)
+    def test_sol_in_sleeve(self):
         self.assertIn("SOL", policy.DESK_ALT_SLEEVE)
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 3.0, "turnover": 1e9},
@@ -267,7 +263,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.should_watch_dip_buy(
                 ticker="BTC",
-                day_chg=policy.WATCH_DIP_DAY_PCT,
+                day_chg=-5.0,
                 current_value=50.0,
                 target_value=100.0,
                 min_trade_usd=5.0,
@@ -323,6 +319,21 @@ class TestDeskPolicy(unittest.TestCase):
             )
         )
 
+    def test_exclusion_follows_week(self):
+        entered = policy.update_exclusions(
+            set(),
+            [
+                {"ticker": "DOGE", "chg_7": -4.0},
+                {"ticker": "SOL", "chg_7": -1.0},
+                {"ticker": "BTC", "chg_7": -20.0},
+            ],
+        )
+        self.assertEqual(entered, {"DOGE"})
+        stayed = policy.update_exclusions(entered, [{"ticker": "DOGE", "chg_7": -1.0}])
+        self.assertEqual(stayed, {"DOGE"})
+        left = policy.update_exclusions(stayed, [{"ticker": "DOGE", "chg_7": 0.2}])
+        self.assertEqual(left, set())
+
     def test_btc_dip_rules(self):
         self.assertTrue(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-3.0, qty=0.01))
@@ -331,9 +342,6 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertAlmostEqual(policy.btc_dip_quote(1000.0), 250.0)
         self.assertEqual(policy.pocket_cash_reserve(1000.0, pocket_open=False), 250.0)
         self.assertEqual(policy.pocket_cash_reserve(1000.0, pocket_open=True), 0.0)
-        self.assertFalse(policy.core_sell_allowed(price=84.0, qty=1.0, cost=88.0))
-        self.assertTrue(policy.core_sell_allowed(price=90.0, qty=1.0, cost=88.0))
-        self.assertFalse(policy.core_sell_allowed(price=90.0, qty=1.0, cost=0.0))
         self.assertEqual(policy.btc_dip_exit_reason(price=101.1, entry=100.0), "отскок")
         self.assertIsNone(policy.btc_dip_exit_reason(price=101.0, entry=100.0))
         self.assertEqual(policy.btc_dip_exit_reason(price=85.0, entry=100.0), "стоп")
@@ -380,7 +388,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(cold["armed"])
         self.assertFalse(cold["hit"])
         self.assertEqual(policy.TRAIL_ARM_PCT, 5.0)
-        self.assertEqual(policy.trail_pct_for("BTC"), policy.TRAIL_CORE_PCT)
+        self.assertIsNone(policy.trail_pct_for("BTC"))
         self.assertIsNone(policy.trail_pct_for("DOGE"))
 
 
@@ -449,6 +457,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ("alloc.json", "_ALLOC_PATH"),
             ("trail.json", "_TRAIL_PATH"),
             ("btc_dip.json", "_BTC_DIP_PATH"),
+            ("excluded.json", "_EXCLUDED_PATH"),
         ):
             path = os.path.join(self.tmp.name, name)
             patcher = patch(f"skills.crypto.common.{attr}", path)
@@ -596,13 +605,13 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             self.skill._desk_bought = {"DOGE", "BTC"}
             alloc, why = self.skill.desk_score_alloc(rows)
         self.assertEqual(alloc, {"DOGE": policy.alt_slot_pct()})
-        self.assertIn("альты до выхода", why)
+        self.assertIn("новые альты не беру", why)
 
     def test_desk_score_uses_bull_cash_floor(self):
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 4.0, "turnover": 1e9, "held": 0},
             {"ticker": "ETH", "chg": 0.5, "chg_7": 3.0, "turnover": 1e9, "held": 0},
-            {"ticker": "MNT", "chg": -6.0, "chg_7": -4.0, "turnover": 1e9, "bb_z": -3.1, "held": 0},
+            {"ticker": "MNT", "chg": -6.0, "chg_7": 1.0, "turnover": 1e9, "bb_z": -3.1, "held": 0},
         ]
         with (
             patch.object(self.skill, "_btc_regime", return_value=(6.0, 1.0)),

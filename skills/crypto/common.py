@@ -42,6 +42,7 @@ _MAKER_POLL_SEC = 1.5
 _TRADE_HISTORY_KEEP = 5000
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_holds.json")
+_EXCLUDED_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_excluded.json")
 _BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_bought.json")
 _TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trades.json")
 _DAILY_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_daily.json")
