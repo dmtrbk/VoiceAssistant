@@ -8,13 +8,18 @@ from typing import Any
 
 # Ядро whitelist для авто (плюс уже держанные позиции).
 DESK_CORE = frozenset({"BTC", "ETH"})
-# Узкий spot-рукав альта поверх ядра: ≤ ALT_SLEEVE_MAX_PCT, недобор → кэш.
+# Ядро больше не набираем: BTC и ETH на этой истории просто дешевели.
+# Уже купленное продаём целиком, только когда выручка покрывает себестоимость
+# даже если лимит не встанет и остаток доберётся рыночной (taker 0.18%).
+CORE_ACTIVE = False
+CORE_EXIT_FEE_PCT = 0.18
+# Рукав альтов: до 75% счёта. Остальные 25% — резерв кармана SOL.
 # SOL — не в ядре, а здесь: берём только на провале у нижней полосы.
 DESK_ALT_SLEEVE = frozenset({
     "SOL", "XRP", "DOGE", "LINK", "AVAX", "SUI", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
 })
 DESK_MAX_NAMES = 2
-ALT_SLEEVE_MAX_PCT = 35.0
+ALT_SLEEVE_MAX_PCT = 75.0
 ALT_MAX_NAMES = 3
 DESK_CASH_FLOOR_PCT = 25.0
 DESK_CASH_FLOOR_BULL_PCT = 8.0
@@ -42,12 +47,12 @@ TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем н�
 WATCH_TP_DAY_PCT = 12.0
 WATCH_TP_ALT_DAY_PCT = 8.0
 WATCH_DIP_DAY_PCT = -5.0
-# Отдельный карман: $100 SOL на дневной просадке. Ядро BTC/ETH 20% не двигаем.
-# На истории 333 дней эта схема на SOL была в плюсе, на BTC в минусе.
+# Карман SOL: 25% счёта на дневной просадке. Ядро BTC/ETH не покупаем.
+# Уже открытый карман не добираем: новый размер — со следующего входа.
 BTC_DIP_TICKER = "SOL"
-BTC_DIP_USD = 100.0
+BTC_DIP_PCT = 25.0
 BTC_DIP_DAY_PCT = -3.0
-BTC_DIP_EXIT_PCT = 1.5
+BTC_DIP_EXIT_PCT = 1.1
 BTC_DIP_STOP_PCT = 15.0
 WATCH_DIP_BUY_FRAC = 0.5
 WATCH_MAX_TRADES_PER_HOUR = 2
@@ -60,6 +65,18 @@ CHURN_COOLDOWN_HOURS = 12.0
 ALT_MIN_HOLD_HOURS = 12.0
 
 
+def core_sell_allowed(*, price: float, qty: float, cost: float) -> bool:
+    """Продажа ядра целиком не в минус: монеты на счёте × цена × (1 − комиссия) ≥ себестоимость."""
+    if CORE_ACTIVE:
+        return True
+    px = float(price or 0)
+    held = float(qty or 0)
+    basis = float(cost or 0)
+    if px <= 0 or held <= 0 or basis <= 0:
+        return False
+    return held * px * (1.0 - CORE_EXIT_FEE_PCT / 100.0) >= basis
+
+
 def btc_dip_should_buy(*, day_chg: float | None, qty: float) -> bool:
     """Докупка $100, только если кармана ещё нет и сутки просели как дозор ядра."""
     if qty > 0 or day_chg is None:
@@ -68,13 +85,13 @@ def btc_dip_should_buy(*, day_chg: float | None, qty: float) -> bool:
 
 
 def btc_dip_exit_reason(*, price: float, entry: float) -> str | None:
-    """Выход кармана: +1.5% от своей цены или стоп −15%. Ядро не продаём."""
+    """Выход кармана: +1.1% от своей цены или стоп −15%. Ядро не продаём."""
     px = float(price or 0)
     ent = float(entry or 0)
     if px <= 0 or ent <= 0:
         return None
     gain = (px / ent - 1.0) * 100.0
-    # 1.5% на цене 101.5/100 в float чуть меньше порога — иначе отскок молчит.
+    # Ровно +1.1% в float чуть меньше порога — иначе отскок молчит.
     if gain >= BTC_DIP_EXIT_PCT - 1e-6:
         return "отскок"
     if gain <= -BTC_DIP_STOP_PCT:
@@ -92,6 +109,18 @@ def take_profit_day_pct_for(ticker: str) -> float:
 
 def watch_tp_day_pct_for(ticker: str) -> float:
     return WATCH_TP_ALT_DAY_PCT if is_alt_sleeve(ticker) else WATCH_TP_DAY_PCT
+
+
+def btc_dip_quote(equity: float) -> float:
+    """Сколько USDT класть в карман при входе: доля счёта."""
+    return max(0.0, float(equity or 0)) * BTC_DIP_PCT / 100.0
+
+
+def pocket_cash_reserve(equity: float, *, pocket_open: bool) -> float:
+    """Пока кармана нет, эти деньги не отдаём рукаву: они ждут просадку SOL."""
+    if pocket_open:
+        return 0.0
+    return btc_dip_quote(equity)
 
 
 def alt_slot_pct(sleeve_pct: float = ALT_SLEEVE_MAX_PCT, max_names: int = ALT_MAX_NAMES) -> float:
@@ -314,19 +343,23 @@ def score_alloc(
         if str(row.get("ticker") or "").upper() in DESK_ALT_SLEEVE
     ]
 
-    core_alloc = _pick_bucket(
-        core_rows,
-        budget_pct=core_budget,
-        max_names=max_names,
-        allow_weak_core=True,
-        score_fn=_row_score,
-    )
-    # Скор решает только, кто в ядре; доли поровну — иначе близкие скоры BTC/ETH гоняют ребаланс туда-обратно.
-    if core_alloc:
-        share = round(core_budget / len(core_alloc), 1)
-        core_alloc = {k: share for k in core_alloc}
+    core_alloc: dict[str, float] = {}
+    if CORE_ACTIVE:
+        core_alloc = _pick_bucket(
+            core_rows,
+            budget_pct=core_budget,
+            max_names=max_names,
+            allow_weak_core=True,
+            score_fn=_row_score,
+        )
+        # Скор решает только, кто в ядре; доли поровну — иначе близкие скоры BTC/ETH гоняют ребаланс туда-обратно.
+        if core_alloc:
+            share = round(core_budget / len(core_alloc), 1)
+            core_alloc = {k: share for k in core_alloc}
     alt_alloc = pick_alts(alt_rows, sleeve_pct=sleeve, max_names=alt_max_names)
     if not core_alloc and not alt_alloc:
+        if not CORE_ACTIVE:
+            return {}, "Ядро не набираем, держу кэш. Уже купленное продаём не ниже себестоимости."
         return {}, "Рынок слабый — держу кэш в тетере."
 
     alloc = {**core_alloc, **alt_alloc}
@@ -336,6 +369,8 @@ def score_alloc(
             "ядро "
             + ", ".join(f"{k} {int(round(v))}%" for k, v in core_alloc.items())
         )
+    elif not CORE_ACTIVE:
+        parts.append("ядро 0%")
     if alt_alloc:
         parts.append(
             "альты "
@@ -422,6 +457,8 @@ def should_watch_dip_buy(
     Держанный альт не усредняем: стоп считается от цены входа.
     """
     t = str(ticker or "").upper()
+    if not CORE_ACTIVE and t in DESK_CORE:
+        return False
     if t not in DESK_CORE and t not in DESK_ALT_SLEEVE:
         return False
     gap = float(target_value) - float(current_value)

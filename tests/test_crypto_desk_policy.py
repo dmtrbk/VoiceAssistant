@@ -64,23 +64,19 @@ class TestDeskPolicy(unittest.TestCase):
             {"ticker": "ETH", "chg": 0.5, "chg_7": 3.0, "turnover": 1e9},
         ]
         alloc, why = policy.score_alloc(rows)
-        self.assertTrue(alloc)
-        # Ядро ≤ 100 − floor − рукав; без альтов рукав остаётся кэшем.
-        core_cap = 100.0 - policy.DESK_CASH_FLOOR_PCT - policy.ALT_SLEEVE_MAX_PCT
-        self.assertLessEqual(sum(alloc.values()), core_cap + 0.5)
-        self.assertIn("Скор", why)
-        self.assertIn("альты 0%", why)
+        self.assertEqual(alloc, {})
+        self.assertIn("кэш", why.lower())
 
     def test_score_alloc_bull_cash_floor(self):
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 4.0, "turnover": 1e9},
             {"ticker": "ETH", "chg": 0.5, "chg_7": 3.0, "turnover": 1e9},
         ]
+        rows.append({"ticker": "MNT", "chg": -6.0, "chg_7": -4.0, "turnover": 1e9, "bb_z": -3.1})
         alloc, why = policy.score_alloc(rows, cash_floor_pct=policy.DESK_CASH_FLOOR_BULL_PCT)
-        self.assertTrue(alloc)
-        core_cap = 100.0 - policy.DESK_CASH_FLOOR_BULL_PCT - policy.ALT_SLEEVE_MAX_PCT
-        self.assertGreaterEqual(sum(alloc.values()), core_cap - 0.5)
-        self.assertLessEqual(sum(alloc.values()), core_cap + 0.5)
+        self.assertNotIn("BTC", alloc)
+        self.assertNotIn("ETH", alloc)
+        self.assertEqual(alloc.get("MNT"), policy.alt_slot_pct())
         self.assertIn("8%", why)
 
     def test_core_split_equally_despite_scores(self):
@@ -88,10 +84,10 @@ class TestDeskPolicy(unittest.TestCase):
             {"ticker": "BTC", "chg": -0.4, "chg_7": -0.5, "turnover": 1e9},
             {"ticker": "ETH", "chg": 1.5, "chg_7": 3.0, "turnover": 1e9},
         ]
-        alloc, _why = policy.score_alloc(rows)
-        core_budget = 100.0 - policy.DESK_CASH_FLOOR_PCT - policy.ALT_SLEEVE_MAX_PCT
-        self.assertEqual(alloc["BTC"], alloc["ETH"])
-        self.assertAlmostEqual(alloc["BTC"] + alloc["ETH"], core_budget, delta=0.2)
+        alloc, why = policy.score_alloc(rows)
+        self.assertNotIn("BTC", alloc)
+        self.assertNotIn("ETH", alloc)
+        self.assertIn("кэш", why.lower())
 
     def test_score_empty_when_core_below_floor(self):
         rows = [
@@ -109,9 +105,9 @@ class TestDeskPolicy(unittest.TestCase):
             {"ticker": "DOGE", "chg": 2.0, "chg_7": -1.0, "turnover": 1e9},
         ]
         alloc, why = policy.score_alloc(rows)
-        self.assertIn("BTC", alloc)
+        self.assertNotIn("BTC", alloc)
         self.assertNotIn("DOGE", alloc)
-        self.assertIn("Скор", why)
+        self.assertIn("кэш", why.lower())
 
     def test_alt_sleeve_caps_and_leaves_unused_as_cash(self):
         # В рукав идут альты у нижней полосы 4h: самые глубокие, по равному слоту.
@@ -131,8 +127,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(set(alts), {"MNT", "AVAX", "NEAR"})
         self.assertTrue(all(v == policy.alt_slot_pct() for v in alts.values()))
         self.assertLessEqual(sum(alts.values()), policy.ALT_SLEEVE_MAX_PCT + 0.5)
-        core_cap = 100.0 - policy.DESK_CASH_FLOOR_PCT - policy.ALT_SLEEVE_MAX_PCT
-        self.assertLessEqual(core_sum, core_cap + 0.5)
+        self.assertEqual(core_sum, 0.0)
         self.assertLessEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_PCT + 0.5)
         self.assertIn("альты", why)
 
@@ -146,8 +141,8 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         alloc, _why = policy.score_alloc(rows)
         self.assertNotIn("SOL", alloc)
-        self.assertIn("BTC", alloc)
-        self.assertIn("ETH", alloc)
+        self.assertNotIn("BTC", alloc)
+        self.assertNotIn("ETH", alloc)
         rows[2]["bb_z"] = -2.8
         alloc, _why = policy.score_alloc(rows)
         self.assertEqual(alloc.get("SOL"), policy.alt_slot_pct())
@@ -160,7 +155,7 @@ class TestDeskPolicy(unittest.TestCase):
             {"ticker": "NEAR", "chg": -9.0, "chg_7": -20.0, "turnover": 1e9},
         ]
         alloc, why = policy.score_alloc(rows)
-        self.assertIn("BTC", alloc)
+        self.assertNotIn("BTC", alloc)
         self.assertIn("MNT", alloc)
         self.assertNotIn("LINK", alloc)
         self.assertNotIn("NEAR", alloc)  # без полос не входим
@@ -269,7 +264,7 @@ class TestDeskPolicy(unittest.TestCase):
                 min_trade_usd=5.0,
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             policy.should_watch_dip_buy(
                 ticker="BTC",
                 day_chg=policy.WATCH_DIP_DAY_PCT,
@@ -332,7 +327,14 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-3.0, qty=0.01))
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-2.0, qty=0))
-        self.assertEqual(policy.btc_dip_exit_reason(price=101.5, entry=100.0), "отскок")
+        self.assertEqual(policy.alt_slot_pct(), 25.0)
+        self.assertAlmostEqual(policy.btc_dip_quote(1000.0), 250.0)
+        self.assertEqual(policy.pocket_cash_reserve(1000.0, pocket_open=False), 250.0)
+        self.assertEqual(policy.pocket_cash_reserve(1000.0, pocket_open=True), 0.0)
+        self.assertFalse(policy.core_sell_allowed(price=84.0, qty=1.0, cost=88.0))
+        self.assertTrue(policy.core_sell_allowed(price=90.0, qty=1.0, cost=88.0))
+        self.assertFalse(policy.core_sell_allowed(price=90.0, qty=1.0, cost=0.0))
+        self.assertEqual(policy.btc_dip_exit_reason(price=101.1, entry=100.0), "отскок")
         self.assertIsNone(policy.btc_dip_exit_reason(price=101.0, entry=100.0))
         self.assertEqual(policy.btc_dip_exit_reason(price=85.0, entry=100.0), "стоп")
         self.assertIsNone(policy.btc_dip_exit_reason(price=100.4, entry=100.0))
@@ -534,11 +536,12 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_ticker", return_value={"price": 100.0, "chg": 15.0, "turnover": 1}),
             patch.object(self.skill, "_place_order", side_effect=place),
             patch.object(self.skill, "_api_key", "x"),
+            patch("skills.crypto.journal.open_lots", return_value={"BTC": {"qty": 2.0, "cost": 50.0}}),
             patch("skills.crypto.desk.time.sleep"),
         ):
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"BTC"}
-            # equity≈220, target BTC 40%≈88, current 200 → excess, day +15% ≥ watch TP
+            # 2 × 100 выше себестоимости 50 — ядро продаётся целиком, не добором.
             result = self.skill._desk_watch_locked(silent=True)
         self.assertTrue(any(side == "Sell" for _t, side, *_ in placed), result)
         self.assertIn("дозор", result.lower())
@@ -573,6 +576,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_place_order", side_effect=place),
             patch.object(self.skill, "_api_key", "x"),
             patch("skills.crypto.journal.open_avg_costs", return_value={"BTC": 100.0}),
+            patch("skills.crypto.journal.open_lots", return_value={"BTC": {"qty": 1.0, "cost": 50.0}}),
             patch("skills.crypto.desk.time.sleep"),
         ):
             self.skill._desk_bought_ready = True
@@ -605,16 +609,15 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         rows = [
             {"ticker": "BTC", "chg": 1.0, "chg_7": 4.0, "turnover": 1e9, "held": 0},
             {"ticker": "ETH", "chg": 0.5, "chg_7": 3.0, "turnover": 1e9, "held": 0},
+            {"ticker": "MNT", "chg": -6.0, "chg_7": -4.0, "turnover": 1e9, "bb_z": -3.1, "held": 0},
         ]
         with (
             patch.object(self.skill, "_btc_regime", return_value=(6.0, 1.0)),
             patch.object(self.skill, "desk_auto_candidates", return_value=rows),
         ):
             alloc, why = self.skill.desk_score_alloc(rows)
-        self.assertTrue(alloc)
-        core_cap = 100.0 - policy.DESK_CASH_FLOOR_BULL_PCT - policy.ALT_SLEEVE_MAX_PCT
-        self.assertGreaterEqual(sum(alloc.values()), core_cap - 0.5)
-        self.assertLessEqual(sum(alloc.values()), core_cap + 0.5)
+        self.assertNotIn("BTC", alloc)
+        self.assertEqual(alloc.get("MNT"), policy.alt_slot_pct())
         self.assertIn("8%", why)
 
     def test_missing_bought_file_does_not_claim_held(self):
@@ -647,15 +650,16 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch("skills.crypto.desk.should_rebalance_leg", return_value=True),
             patch("skills.crypto.desk.time.sleep"),
         ):
-            # цели: BTC 60, ETH 40 при equity≈100 → need 60 и 40, budget≈99.8
+            # цели: LINK 60, AVAX 40 при equity≈100 → need 60 и 40, budget≈99.8
             self.skill._desk_bought_ready = True
-            self.skill._desk_bought = {"BTC", "ETH"}
-            self.skill._rebalance({"BTC": 60.0, "ETH": 40.0})
+            self.skill._desk_bought = {"LINK", "AVAX"}
+            self.skill._rebalance({"LINK": 60.0, "AVAX": 40.0})
         by_ticker = {t: q for t, q in placed}
-        self.assertIn("BTC", by_ticker)
-        self.assertIn("ETH", by_ticker)
-        self.assertGreater(by_ticker["BTC"], by_ticker["ETH"])
-        self.assertAlmostEqual(sum(by_ticker.values()), 100.0 * 0.998, places=1)
+        self.assertIn("LINK", by_ticker)
+        self.assertIn("AVAX", by_ticker)
+        self.assertGreater(by_ticker["LINK"], by_ticker["AVAX"])
+        # 25% счёта остаются резерву кармана и в рукав не уходят.
+        self.assertAlmostEqual(sum(by_ticker.values()), 100.0 * 0.998 - 25.0, places=1)
 
     def test_buy_resets_stale_trail_leg(self):
         from skills.crypto import common as crypto_common
@@ -735,13 +739,13 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         ):
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"DOGE"}
-            self.skill._rebalance(target or {"BTC": 40.0}, respect_hold=respect_hold)
+            self.skill._rebalance(target or {"LINK": 40.0}, respect_hold=respect_hold)
         return placed
 
     def test_rebalance_keeps_fresh_alt(self):
         placed = self._rebalance_with_fresh_alt(respect_hold=True)
         self.assertNotIn(("DOGE", "Sell"), placed)
-        self.assertIn(("BTC", "Buy"), placed)
+        self.assertIn(("LINK", "Buy"), placed)
 
     def test_rebalance_keeps_sol_dip_pocket(self):
         from skills.crypto.common import write_btc_dip
@@ -787,8 +791,8 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         with patch.object(self.skill, "_place_order", side_effect=place):
             phrase = self.skill._trade_btc_dip(
                 day_chg=-6.0,
-                positions={"SOL": {"qty": 1.0, "value": 101.0, "price": 101.0}},
-                price=101.0,
+                positions={"SOL": {"qty": 1.0, "value": 101.5, "price": 101.5}},
+                price=101.5,
                 blocked=False,
             )
         self.assertIn("ok", phrase or "")
@@ -824,7 +828,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"DOGE", "BTC"}
             self.skill._rebalance({"DOGE": policy.alt_slot_pct()}, respect_hold=False)
-        self.assertIn(("BTC", "Sell"), placed)
+        self.assertNotIn(("BTC", "Sell"), placed)
         self.assertNotIn(("DOGE", "Sell"), placed)
 
     def _watch_alt(self, *, price: float, entry: float, alloc: dict, positions: list, cash: float = 60.0):

@@ -98,10 +98,10 @@ def read_lifetime_pnl(path: str | None = None) -> float | None:
         return None
 
 
-def open_avg_costs(
+def open_lots(
     trades: list[dict[str, Any]] | None = None,
-) -> dict[str, float]:
-    """Средняя цена оставшихся лотов по журналу (FIFO-cost)."""
+) -> dict[str, dict[str, float]]:
+    """Оставшиеся лоты: qty по журналу и сколько USDT в них ещё сидит."""
     rows = trades if trades is not None else _read_trades()
     lots: dict[str, dict[str, float]] = {}
     for entry in rows:
@@ -128,11 +128,21 @@ def open_avg_costs(
         if lot["qty"] < 1e-12:
             lot["qty"] = 0.0
             lot["cost"] = 0.0
-    out: dict[str, float] = {}
-    for ticker, lot in lots.items():
-        if lot["qty"] > 0 and lot["cost"] > 0:
-            out[ticker] = lot["cost"] / lot["qty"]
-    return out
+    return {
+        ticker: lot
+        for ticker, lot in lots.items()
+        if lot["qty"] > 0 and lot["cost"] > 0
+    }
+
+
+def open_avg_costs(
+    trades: list[dict[str, Any]] | None = None,
+) -> dict[str, float]:
+    """Средняя цена оставшихся лотов по журналу (FIFO-cost)."""
+    return {
+        ticker: lot["cost"] / lot["qty"]
+        for ticker, lot in open_lots(trades).items()
+    }
 
 
 def compute_lifetime_from_trades(

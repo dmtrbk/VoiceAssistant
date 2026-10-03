@@ -37,14 +37,17 @@ from .desk_policy import (
     DESK_ALT_SLEEVE,
     DESK_CORE,
     BTC_DIP_TICKER,
-    BTC_DIP_USD,
+    btc_dip_quote,
+    pocket_cash_reserve,
     WATCH_DIP_BUY_FRAC,
     alt_exit_reason,
     btc_dip_exit_reason,
     btc_dip_should_buy,
     alt_slot_pct,
     band_pct_for,
+    CORE_ACTIVE,
     cash_floor_pct,
+    core_sell_allowed,
     filter_auto_candidates,
     is_risk_off,
     pick_watch_alt_entries,
@@ -470,6 +473,12 @@ class CryptoDeskMixin:
                 0.0, current_values[BTC_DIP_TICKER] - dip_qty_watch * dip_px_watch
             )
         parts: list[str] = []
+        parts.extend(self._unwind_core(positions, prices))
+        for ticker in DESK_CORE:
+            if ticker not in positions:
+                target_alloc.pop(ticker, None)
+                current_values[ticker] = 0.0
+                target_values[ticker] = 0.0
         trail_sold: set[str] = set()
         try:
             avg_costs = crypto_journal.open_avg_costs()
@@ -488,6 +497,8 @@ class CryptoDeskMixin:
             if leg_value < min_trade:
                 continue
             if trail_pct_for(ticker) is None:
+                continue
+            if ticker in DESK_CORE and not CORE_ACTIVE:
                 continue
             prev = trail_legs.get(ticker) or {}
             entry = float(prev.get("entry") or 0) or float(avg_costs.get(ticker) or 0) or price
@@ -579,6 +590,7 @@ class CryptoDeskMixin:
             for ticker in relevant
             if ticker not in trail_sold
             and ticker not in DESK_ALT_SLEEVE
+            and (CORE_ACTIVE or ticker not in DESK_CORE)
             and should_watch_take_profit(
                 day_chg=day_chgs.get(ticker),
                 current_value=current_values[ticker],
@@ -606,7 +618,10 @@ class CryptoDeskMixin:
         self._bust_private_cache()
         cash, _pos = self._cash_and_held()
         budget = cash * common._BUY_CASH_BUFFER
-        cash = budget
+        reserve = pocket_cash_reserve(
+            equity, pocket_open=float(read_btc_dip().get("qty") or 0) > 0
+        )
+        cash = max(0.0, budget - reserve)
 
         held_alts = {
             t for t in positions
@@ -678,6 +693,7 @@ class CryptoDeskMixin:
             positions=positions,
             price=float(prices.get(BTC_DIP_TICKER) or 0),
             blocked=BTC_DIP_TICKER in trail_sold,
+            equity=equity,
         )
         if dip_phrase:
             parts.append(dip_phrase)
@@ -692,8 +708,9 @@ class CryptoDeskMixin:
         positions: dict[str, dict[str, Any]],
         price: float,
         blocked: bool,
+        equity: float = 0.0,
     ) -> str | None:
-        """$100 на просадку SOL. Ядро 20% и обычный слот рукава не трогаем."""
+        """Карман SOL на долю счёта. Уже открытый не добираем, слот рукава не трогаем."""
         ticker = BTC_DIP_TICKER
         dip = read_btc_dip()
         qty = float(dip.get("qty") or 0)
@@ -718,15 +735,56 @@ class CryptoDeskMixin:
             return phrase
         if blocked or not btc_dip_should_buy(day_chg=day_chg, qty=0):
             return None
+        budget = btc_dip_quote(equity)
+        free_cash, _held_now = self._cash_and_held()
+        quote = min(budget, free_cash * common._BUY_CASH_BUFFER)
+        if budget < _MIN_QUOTE or quote < budget * 0.9:
+            return None
         before = float((positions.get(ticker) or {}).get("qty") or 0)
-        phrase = self._place_order(ticker, "Buy", quote_usdt=BTC_DIP_USD, maker=True)
+        phrase = self._place_order(ticker, "Buy", quote_usdt=quote, maker=True)
         _cash, held = self._cash_and_held()
         after = float((held.get(ticker) or {}).get("qty") or 0)
         bought = after - before
         if bought > 0:
-            write_btc_dip(bought, BTC_DIP_USD / bought)
-            logger.info("[Крипта] карман %s: купил на %d$ по просадке суток", ticker, int(BTC_DIP_USD))
+            write_btc_dip(bought, quote / bought)
+            logger.info("[Крипта] карман %s: купил на %.0f$ по просадке суток", ticker, quote)
         return phrase
+
+    def _unwind_core(
+        self,
+        positions: dict[str, dict[str, Any]],
+        prices: dict[str, float],
+    ) -> list[str]:
+        """Продать BTC/ETH целиком, только если выручка покрывает себестоимость."""
+        if CORE_ACTIVE:
+            return []
+        try:
+            lots = crypto_journal.open_lots()
+        except Exception:
+            lots = {}
+        parts: list[str] = []
+        for ticker in DESK_CORE:
+            pos = positions.get(ticker)
+            if not pos or self._is_owner_position(ticker):
+                continue
+            price = float(prices.get(ticker) or pos.get("price") or 0)
+            qty = float(pos.get("qty") or 0)
+            cost = float((lots.get(ticker) or {}).get("cost") or 0)
+            if not core_sell_allowed(price=price, qty=qty, cost=cost):
+                continue
+            try:
+                parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price, maker=True))
+                positions.pop(ticker, None)
+                logger.info(
+                    "[Крипта] ядро %s: продажа не ниже себестоимости, %.6g по %.4g",
+                    ticker,
+                    qty,
+                    price,
+                )
+                time.sleep(0.4)
+            except Exception as exc:
+                logger.warning("[Крипта] ядро %s не продал: %s", ticker, exc)
+        return parts
 
     def _rebalance(self, target_alloc: dict[str, float], *, respect_hold: bool = True) -> str:
         cash, positions_list = self._wallet()
@@ -761,6 +819,12 @@ class CryptoDeskMixin:
                 0.0, current_values[BTC_DIP_TICKER] - dip_qty * dip_px
             )
         parts: list[str] = []
+        parts.extend(self._unwind_core(positions, prices))
+        for ticker in DESK_CORE:
+            if ticker not in positions:
+                target_alloc.pop(ticker, None)
+                current_values[ticker] = 0.0
+                target_values[ticker] = 0.0
         sells = [
             (ticker, current_values[ticker] - target_values[ticker])
             for ticker in relevant
@@ -784,6 +848,8 @@ class CryptoDeskMixin:
                 fresh = set()
         kept_alt_value = 0.0
         for ticker, excess in sells:
+            if ticker in DESK_CORE and not CORE_ACTIVE:
+                continue
             if target_alloc.get(ticker, 0.0) <= 0 and self._is_owner_position(ticker):
                 continue
             if ticker in fresh and ticker in DESK_ALT_SLEEVE:
@@ -816,7 +882,10 @@ class CryptoDeskMixin:
         self._bust_private_cache()
         cash, _pos = self._cash_and_held()
         budget = cash * common._BUY_CASH_BUFFER
-        cash = budget
+        reserve = pocket_cash_reserve(
+            equity, pocket_open=float(read_btc_dip().get("qty") or 0) > 0
+        )
+        cash = max(0.0, budget - reserve)
         buys = [
             (ticker, target_values.get(ticker, 0) - current_values.get(ticker, 0))
             for ticker in target_alloc
@@ -841,6 +910,8 @@ class CryptoDeskMixin:
         buys.sort(key=lambda item: item[1], reverse=True)
         need_sum = sum(need for _ticker, need in buys)
         for ticker, need in buys:
+            if ticker in DESK_CORE and not CORE_ACTIVE:
+                continue
             if cash < _MIN_QUOTE:
                 break
             if need_sum > budget + 1e-9:
