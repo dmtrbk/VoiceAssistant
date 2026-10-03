@@ -536,15 +536,12 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_ticker", return_value={"price": 100.0, "chg": 15.0, "turnover": 1}),
             patch.object(self.skill, "_place_order", side_effect=place),
             patch.object(self.skill, "_api_key", "x"),
-            patch("skills.crypto.journal.open_lots", return_value={"BTC": {"qty": 2.0, "cost": 50.0}}),
             patch("skills.crypto.desk.time.sleep"),
         ):
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"BTC"}
-            # 2 × 100 выше себестоимости 50 — ядро продаётся целиком, не добором.
             result = self.skill._desk_watch_locked(silent=True)
-        self.assertTrue(any(side == "Sell" for _t, side, *_ in placed), result)
-        self.assertIn("дозор", result.lower())
+        self.assertFalse(any(t == "BTC" and side == "Sell" for t, side, *_ in placed), result)
 
     def test_watch_trailing_stop_sells_full_leg(self):
         from skills.crypto import common as crypto_common
@@ -576,16 +573,12 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_place_order", side_effect=place),
             patch.object(self.skill, "_api_key", "x"),
             patch("skills.crypto.journal.open_avg_costs", return_value={"BTC": 100.0}),
-            patch("skills.crypto.journal.open_lots", return_value={"BTC": {"qty": 1.0, "cost": 50.0}}),
             patch("skills.crypto.desk.time.sleep"),
         ):
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"BTC"}
             result = self.skill._desk_watch_locked(silent=True)
-        self.assertTrue(placed, result)
-        self.assertEqual(placed[0][0], "BTC")
-        self.assertEqual(placed[0][1], "Sell")
-        self.assertAlmostEqual(float(placed[0][2]), 1.0)
+        self.assertFalse(placed, result)
         self.assertNotIn("BTC", crypto_common.read_trail_state())
 
     def test_risk_off_keeps_held_alts(self):

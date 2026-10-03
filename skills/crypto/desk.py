@@ -47,7 +47,6 @@ from .desk_policy import (
     band_pct_for,
     CORE_ACTIVE,
     cash_floor_pct,
-    core_sell_allowed,
     filter_auto_candidates,
     is_risk_off,
     pick_watch_alt_entries,
@@ -473,12 +472,6 @@ class CryptoDeskMixin:
                 0.0, current_values[BTC_DIP_TICKER] - dip_qty_watch * dip_px_watch
             )
         parts: list[str] = []
-        parts.extend(self._unwind_core(positions, prices))
-        for ticker in DESK_CORE:
-            if ticker not in positions:
-                target_alloc.pop(ticker, None)
-                current_values[ticker] = 0.0
-                target_values[ticker] = 0.0
         trail_sold: set[str] = set()
         try:
             avg_costs = crypto_journal.open_avg_costs()
@@ -750,42 +743,6 @@ class CryptoDeskMixin:
             logger.info("[Крипта] карман %s: купил на %.0f$ по просадке суток", ticker, quote)
         return phrase
 
-    def _unwind_core(
-        self,
-        positions: dict[str, dict[str, Any]],
-        prices: dict[str, float],
-    ) -> list[str]:
-        """Продать BTC/ETH целиком, только если выручка покрывает себестоимость."""
-        if CORE_ACTIVE:
-            return []
-        try:
-            lots = crypto_journal.open_lots()
-        except Exception:
-            lots = {}
-        parts: list[str] = []
-        for ticker in DESK_CORE:
-            pos = positions.get(ticker)
-            if not pos or self._is_owner_position(ticker):
-                continue
-            price = float(prices.get(ticker) or pos.get("price") or 0)
-            qty = float(pos.get("qty") or 0)
-            cost = float((lots.get(ticker) or {}).get("cost") or 0)
-            if not core_sell_allowed(price=price, qty=qty, cost=cost):
-                continue
-            try:
-                parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price, maker=True))
-                positions.pop(ticker, None)
-                logger.info(
-                    "[Крипта] ядро %s: продажа не ниже себестоимости, %.6g по %.4g",
-                    ticker,
-                    qty,
-                    price,
-                )
-                time.sleep(0.4)
-            except Exception as exc:
-                logger.warning("[Крипта] ядро %s не продал: %s", ticker, exc)
-        return parts
-
     def _rebalance(self, target_alloc: dict[str, float], *, respect_hold: bool = True) -> str:
         cash, positions_list = self._wallet()
         positions = {item["ticker"]: item for item in positions_list}
@@ -819,12 +776,6 @@ class CryptoDeskMixin:
                 0.0, current_values[BTC_DIP_TICKER] - dip_qty * dip_px
             )
         parts: list[str] = []
-        parts.extend(self._unwind_core(positions, prices))
-        for ticker in DESK_CORE:
-            if ticker not in positions:
-                target_alloc.pop(ticker, None)
-                current_values[ticker] = 0.0
-                target_values[ticker] = 0.0
         sells = [
             (ticker, current_values[ticker] - target_values[ticker])
             for ticker in relevant
