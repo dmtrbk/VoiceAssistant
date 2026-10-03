@@ -47,7 +47,7 @@ WATCH_DIP_DAY_PCT = -5.0
 BTC_DIP_TICKER = "SOL"
 BTC_DIP_USD = 100.0
 BTC_DIP_DAY_PCT = -3.0
-BTC_DIP_EXIT_PCT = 1.0
+BTC_DIP_EXIT_PCT = 1.5
 BTC_DIP_STOP_PCT = 15.0
 WATCH_DIP_BUY_FRAC = 0.5
 WATCH_MAX_TRADES_PER_HOUR = 2
@@ -68,13 +68,14 @@ def btc_dip_should_buy(*, day_chg: float | None, qty: float) -> bool:
 
 
 def btc_dip_exit_reason(*, price: float, entry: float) -> str | None:
-    """Выход кармана: +1% от своей цены или стоп −15%. Ядро не продаём."""
+    """Выход кармана: +1.5% от своей цены или стоп −15%. Ядро не продаём."""
     px = float(price or 0)
     ent = float(entry or 0)
     if px <= 0 or ent <= 0:
         return None
     gain = (px / ent - 1.0) * 100.0
-    if gain >= BTC_DIP_EXIT_PCT:
+    # 1.5% на цене 101.5/100 в float чуть меньше порога — иначе отскок молчит.
+    if gain >= BTC_DIP_EXIT_PCT - 1e-6:
         return "отскок"
     if gain <= -BTC_DIP_STOP_PCT:
         return "стоп"

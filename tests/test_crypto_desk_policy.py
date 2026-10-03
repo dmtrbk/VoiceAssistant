@@ -332,7 +332,8 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-3.0, qty=0.01))
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-2.0, qty=0))
-        self.assertEqual(policy.btc_dip_exit_reason(price=101.0, entry=100.0), "отскок")
+        self.assertEqual(policy.btc_dip_exit_reason(price=101.5, entry=100.0), "отскок")
+        self.assertIsNone(policy.btc_dip_exit_reason(price=101.0, entry=100.0))
         self.assertEqual(policy.btc_dip_exit_reason(price=85.0, entry=100.0), "стоп")
         self.assertIsNone(policy.btc_dip_exit_reason(price=100.4, entry=100.0))
 
