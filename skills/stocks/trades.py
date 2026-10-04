@@ -149,7 +149,15 @@ class StocksTradesMixin:
             return False
         return any(marker in status for marker in ("FILL", "PARTIAL"))
 
-    def _place_order(self, ticker: str, direction: str, lots: int) -> str:
+    def _place_order(
+        self,
+        ticker: str,
+        direction: str,
+        lots: int,
+        *,
+        reason: str = "",
+        notify: bool = True,
+    ) -> str:
         if lots <= 0:
             raise RuntimeError("no lots")
         ticker = ticker.upper()
@@ -177,7 +185,8 @@ class StocksTradesMixin:
                 "api forbidden" in str(exc) or _is_api_buy_forbidden_text(str(exc))
             ):
                 self._buy_blocked.add(ticker)
-                self._recommend_manual_buys([ticker])
+                if ticker != common._park_ticker():
+                    self._recommend_manual_buys([ticker])
                 if "api forbidden" not in str(exc):
                     raise RuntimeError("api forbidden") from exc
             raise
@@ -185,11 +194,11 @@ class StocksTradesMixin:
         if not self._order_filled(data):
             message = str(data.get("message") or data.get("rejectReason") or "заявка не прошла")
             raise RuntimeError(message)
-        if direction == "ORDER_DIRECTION_BUY":
+        if direction == "ORDER_DIRECTION_BUY" and ticker != common._park_ticker():
             self._mark_desk_bought(ticker)
         verb = "купил" if direction == "ORDER_DIRECTION_BUY" else "продал"
         phrase = f"{verb.capitalize()} {_lots_phrase(lots)}: {spoken}."
-        self._journal_trade(ticker, direction, lots, spoken)
+        self._journal_trade(ticker, direction, lots, spoken, data=data, reason=reason, notify=notify)
         return phrase
 
     def _resolve_trade_ticker(self, ticker: str | None) -> str | None:

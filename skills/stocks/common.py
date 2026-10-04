@@ -39,7 +39,11 @@ _HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_holds.json")
 _BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_bought.json")
 _TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_trades.json")
 _ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_stocks_alloc.json")
+_TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_stocks_trail.json")
+_DAILY_PATH = os.path.join(_PROJECT_DIR, "jarvis_stocks_daily.json")
 _MOEX_HISTORY = "https://iss.moex.com/iss/history/engines/stock/markets/shares"
+_IMOEX_NOW = "https://iss.moex.com/iss/engines/stock/markets/index/securities/IMOEX.json"
+_IMOEX_HISTORY = "https://iss.moex.com/iss/history/engines/stock/markets/index/boards/SNDX/securities/IMOEX.json"
 _RU_CA = os.path.join(_PROJECT_DIR, "certs", "russian_trusted_root_ca.pem")
 _DESK_PERIOD_SEC = 3 * 60 * 60  # полный скор сигналов + ребаланс
 _WATCH_PERIOD_SEC = 15 * 60  # дозор: к сохранённой цели, без нового скора
@@ -246,10 +250,20 @@ def read_alloc_state(path: str | None = None) -> dict[str, Any] | None:
             continue
         if pct > 0:
             alloc[ticker] = pct
+    watch_raw = raw.get("watch_trades") or []
+    watch_trades: list[float] = []
+    if isinstance(watch_raw, list):
+        for item in watch_raw:
+            try:
+                watch_trades.append(float(item))
+            except (TypeError, ValueError):
+                continue
     return {
         "alloc": alloc,
         "why": str(raw.get("why") or ""),
         "ts": float(raw.get("ts") or 0),
+        "risk_off": bool(raw.get("risk_off")),
+        "watch_trades": watch_trades,
     }
 
 
@@ -257,6 +271,8 @@ def write_alloc_state(
     alloc: dict[str, float],
     *,
     why: str = "",
+    risk_off: bool = False,
+    watch_trades: list[float] | None = None,
     path: str | None = None,
 ) -> None:
     path = path or _ALLOC_PATH
@@ -265,7 +281,14 @@ def write_alloc_state(
         for k, v in (alloc or {}).items()
         if str(k).strip() and float(v) > 0
     }
-    payload = {"alloc": clean, "why": str(why or ""), "ts": time.time()}
+    cutoff = time.time() - 3600.0
+    payload = {
+        "alloc": clean,
+        "why": str(why or ""),
+        "ts": time.time(),
+        "risk_off": bool(risk_off),
+        "watch_trades": [float(ts) for ts in (watch_trades or []) if float(ts) >= cutoff],
+    }
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:
@@ -428,6 +451,45 @@ def _auto_trade_enabled() -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return _sandbox()
+
+
+def _park_enabled() -> bool:
+    """Свободный кэш в фонд денежного рынка. Включается явно: сделки с фондом платные."""
+    raw = (os.getenv("STOCKS_PARK") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _park_ticker() -> str:
+    return (os.getenv("STOCKS_PARK_TICKER") or "LQDT").strip().upper() or "LQDT"
+
+
+def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
+    path = path or _TRAIL_PATH
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k).upper(): v for k, v in raw.items() if isinstance(v, dict)}
+
+
+def write_trail_state(legs: dict[str, dict[str, Any]], path: str | None = None) -> None:
+    path = path or _TRAIL_PATH
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(legs, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Биржа] не записал трейл: %s", exc)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def _voice_trade_enabled() -> bool:

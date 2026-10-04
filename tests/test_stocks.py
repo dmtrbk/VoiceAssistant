@@ -527,6 +527,8 @@ class TestStocks(unittest.TestCase):
         write_alloc_state({"SBER": 50.0}, why="цель")
         with (
             patch.object(self.skill, "_market_open", return_value=True),
+            patch.object(self.skill, "_desk_exits", return_value=([], set())),
+            patch.object(self.skill, "_imoex_regime", return_value=(None, None)),
             patch.object(self.skill, "_rebalance_portfolio", return_value="ок") as reb,
         ):
             self.skill._token = "tok"
