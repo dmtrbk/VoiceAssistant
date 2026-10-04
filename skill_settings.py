@@ -22,6 +22,7 @@ OPTIONAL_SKILLS = (
     ("weather", "Погода", "Прогноз Open-Meteo"),
     ("stocks", "Биржа и портфель", "Котировки Мосбиржи и сводка счёта Т-Инвест. Сделки — тумблеры ниже"),
     ("crypto", "Крипта", "Спот Bybit: курс, портфель, сделки. ИИ выбирает монеты"),
+    ("crypto_brief", "Разбор крипты", "Подробный разбор счёта Bybit: вход, выход, исключения. Без заявок"),
     ("timer", "Таймеры", "Отсчёт и оповещение"),
     ("calculator", "Калькулятор", "Счёт без облака"),
     ("games", "Игры и рандомайзер", "Больше-Меньше, кубики d6/d20, случайные числа"),
@@ -42,7 +43,7 @@ SKILL_GROUPS = (
     ("Дом", ("home_assistant", "xiaomi_bulb", "security")),
     ("Медиа", ("audacious", "movie", "image_gen", "site_apps")),
     ("Сеть", ("web_search", "wikipedia", "maps", "telegram")),
-    ("Сервисы", ("weather", "stocks", "crypto", "timer", "calculator")),
+    ("Сервисы", ("weather", "stocks", "crypto", "crypto_brief", "timer", "calculator")),
     ("Разное", ("games", "jokes", "pentagon")),
 )
 
@@ -208,6 +209,7 @@ def _skill_map() -> dict[str, Any]:
         home_assistant_skill,
         stocks_skill,
         crypto_skill,
+        crypto_brief_skill,
         image_gen_skill,
         wikipedia_skill,
         site_apps_skill,
@@ -230,6 +232,7 @@ def _skill_map() -> dict[str, Any]:
         "home_assistant": home_assistant_skill,
         "stocks": stocks_skill,
         "crypto": crypto_skill,
+        "crypto_brief": crypto_brief_skill,
         "image_gen": image_gen_skill,
         "wikipedia": wikipedia_skill,
         "site_apps": site_apps_skill,
