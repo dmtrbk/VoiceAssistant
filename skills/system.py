@@ -9,7 +9,7 @@ import time
 from context_manager import push_context
 from skills.base import BaseSkill, RequestContext
 from skills.security import set_display_power
-from skills.text_utils import has_any_word
+from skills.text_utils import has_any_word, has_word
 from window_control import (
     close_all_windows,
     close_focused_window,
@@ -89,12 +89,13 @@ class SystemSkill(BaseSkill):
         text = context.raw_text.lower().strip()
 
         triggers = [
-            "терминал", "файлы", "проводник", "настройки",
+            "файлы", "проводник", "настройки",
             "громче", "громкость плюс", "тише", "громкость минус",
             "системный монитор", "шахматы", "chess",
         ]
         return (
-            any(w in text for w in triggers)
+            has_word(text, "терминал")
+            or any(w in text for w in triggers)
             or is_shutdown_text(text)
             or detect_display_power_action(text) is not None
             or is_close_browser_text(text)
@@ -191,7 +192,7 @@ class SystemSkill(BaseSkill):
             return
 
         # 4. Системные и стандартные приложения
-        if "терминал" in text:
+        if has_word(text, "терминал"):
             context.speak("Открываю.")
             subprocess.Popen(["gnome-terminal"])
             return

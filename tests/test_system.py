@@ -26,6 +26,14 @@ class TestDisplayPowerCommand(unittest.TestCase):
             self.assertEqual(detect_display_power_action(phrase), "off", phrase)
             self.assertTrue(self.skill.can_handle(RequestContext(raw_text=phrase)), phrase)
 
+    def test_terminal_is_a_whole_word(self):
+        self.assertTrue(self.skill.can_handle(RequestContext(raw_text="открой терминал")))
+        self.assertFalse(
+            self.skill.can_handle(
+                RequestContext(raw_text="выучим слово из терминологии камнетесов")
+            )
+        )
+
     def test_detect_on_phrases(self):
         self.assertEqual(detect_display_power_action("включи экран"), "on")
         self.assertEqual(detect_display_power_action("включи монитор"), "on")

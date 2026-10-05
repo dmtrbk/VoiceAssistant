@@ -79,6 +79,12 @@ class TestConkyMarkets(unittest.TestCase):
         self.assertIn("биржа +10 рублей", briefing)
         self.assertIn("крипта минус 3 долларов", briefing)
         self.assertIn("нормально", briefing.lower())
+        spoken = conky_markets.mood_speech_from(0, 0, 0, 12)
+        self.assertIn("0 рублей за день", spoken)
+        self.assertIn("0 рублей с покупки", spoken)
+        self.assertIn("0 долларов за сутки", spoken)
+        self.assertIn("+12 долларов с покупки", spoken)
+        self.assertNotIn("23", spoken)
         empty = conky_markets.mood_briefing_for_prompt(None, None)
         self.assertIn("цифр нет", empty)
 

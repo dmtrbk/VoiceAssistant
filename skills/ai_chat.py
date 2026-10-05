@@ -703,6 +703,20 @@ class AIChatSkill(BaseSkill):
             self._trim_history()
             messages_for_api = list(self.history)
 
+        try:
+            import conky_markets
+
+            if conky_markets.is_how_are_you(text):
+                reply = conky_markets.mood_speech()
+                speak_func(reply)
+                with _HISTORY_LOCK:
+                    self.history.append({"role": "assistant", "content": reply})
+                    self._trim_history()
+                    self._save_history()
+                return
+        except Exception as exc:
+            logging.warning("[Groq] День рынков без модели не собрался: %s", exc)
+
         now = datetime.datetime.now()
         extra = f"[Сейчас {now.strftime('%H:%M')}, {DAYS_RU[now.weekday()]}, {now.strftime('%d.%m.%Y')}."
         city = (os.getenv("DEFAULT_CITY") or "").strip()

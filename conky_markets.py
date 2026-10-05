@@ -475,6 +475,26 @@ def load_day_pnl() -> tuple[float | None, float | None]:
         return stocks, crypto
 
 
+def mood_speech_from(
+    stocks: float | None,
+    crypto: float | None,
+    stocks_life: float | None,
+    crypto_life: float | None,
+) -> str:
+    """Та же пара, что на Conky: день / с покупки. Цифры не отдаём модели."""
+    return (
+        f"Нормально. Биржа {speech_amount(stocks, rub=True)} за день, "
+        f"{speech_amount(stocks_life, rub=True)} с покупки. "
+        f"Крипта {speech_amount(crypto, rub=False)} за сутки, "
+        f"{speech_amount(crypto_life, rub=False)} с покупки."
+    )
+
+
+def mood_speech() -> str:
+    stocks, crypto = load_day_pnl()
+    return mood_speech_from(stocks, crypto, fetch_stocks_life(), fetch_crypto_life())
+
+
 def mood_briefing() -> str:
     """Готовый хвост в extra Groq на «как дела»."""
     try:
