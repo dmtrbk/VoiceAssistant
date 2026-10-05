@@ -229,24 +229,34 @@ def write_cache(text: str, cache_path: str = CACHE_PATH) -> None:
 
 
 def stocks_day_pnl() -> float | None:
-    from skills.stocks import StocksSkill
-
-    skill = StocksSkill()
-    if not skill._token:
-        return None
-    _positions, day_total, _total = skill._positions()
-    return float(day_total or 0.0)
+    book = _stocks_day_and_life()
+    return None if book is None else book[0]
 
 
 def stocks_all_time_pnl() -> float | None:
     """С покупки: expectedYield портфеля Т-Инвест."""
+    book = _stocks_day_and_life()
+    return None if book is None else book[1]
+
+
+_STOCKS_BOOK: tuple[float, float, float] | None = None
+
+
+def _stocks_day_and_life() -> tuple[float, float] | None:
+    """Один запрос портфеля на день и «с покупки», чтобы вторая цифра не отваливалась отдельно."""
+    global _STOCKS_BOOK
+    now = time.time()
+    if _STOCKS_BOOK is not None and now - _STOCKS_BOOK[0] < 20:
+        return _STOCKS_BOOK[1], _STOCKS_BOOK[2]
     from skills.stocks import StocksSkill
 
     skill = StocksSkill()
     if not skill._token:
         return None
-    _positions, _day, total_yield = skill._positions()
-    return float(total_yield or 0.0)
+    _positions, day, life = skill._positions()
+    pair = (float(day or 0.0), float(life or 0.0))
+    _STOCKS_BOOK = (now, pair[0], pair[1])
+    return pair
 
 
 def crypto_day_pnl() -> float | None:
@@ -381,7 +391,8 @@ def select_line(text: str, which: str) -> str:
     return text
 
 
-def read_pnl_cache(cache_path: str = PNL_CACHE_PATH) -> tuple[float | None, float | None] | None:
+def _read_pnl_raw(cache_path: str | None = None) -> dict | None:
+    cache_path = cache_path or PNL_CACHE_PATH
     if not os.path.isfile(cache_path):
         return None
     try:
@@ -389,26 +400,47 @@ def read_pnl_cache(cache_path: str = PNL_CACHE_PATH) -> tuple[float | None, floa
             raw = json.load(handle)
     except Exception:
         return None
-    if not isinstance(raw, dict):
+    return raw if isinstance(raw, dict) else None
+
+
+def _num_field(raw: dict, key: str) -> float | None:
+    if key not in raw or raw[key] is None:
+        return None
+    try:
+        return float(raw[key])
+    except (TypeError, ValueError):
         return None
 
-    def _num(key: str) -> float | None:
-        if key not in raw or raw[key] is None:
-            return None
-        try:
-            return float(raw[key])
-        except (TypeError, ValueError):
-            return None
 
-    return _num("stocks"), _num("crypto")
+def read_pnl_cache(cache_path: str | None = None) -> tuple[float | None, float | None] | None:
+    raw = _read_pnl_raw(cache_path)
+    if raw is None:
+        return None
+    return _num_field(raw, "stocks"), _num_field(raw, "crypto")
+
+
+def read_life_cache(cache_path: str | None = None) -> tuple[float | None, float | None]:
+    """Последние «с покупки». Пусто, если файл ещё без этих полей."""
+    raw = _read_pnl_raw(cache_path)
+    if raw is None:
+        return None, None
+    return _num_field(raw, "stocks_life"), _num_field(raw, "crypto_life")
 
 
 def write_pnl_cache(
     stocks: float | None,
     crypto: float | None,
-    cache_path: str = PNL_CACHE_PATH,
+    stocks_life: float | None = None,
+    crypto_life: float | None = None,
+    cache_path: str | None = None,
 ) -> None:
-    payload = {"stocks": stocks, "crypto": crypto}
+    cache_path = cache_path or PNL_CACHE_PATH
+    payload = {
+        "stocks": stocks,
+        "crypto": crypto,
+        "stocks_life": stocks_life,
+        "crypto_life": crypto_life,
+    }
     tmp_path = cache_path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False)
@@ -423,10 +455,15 @@ def _store(
     *,
     fetch_missing_life: bool = True,
 ) -> str:
-    if fetch_missing_life and stocks_life is None:
+    remembered_stocks, remembered_crypto = read_life_cache()
+    if stocks_life is None and fetch_missing_life:
         stocks_life = fetch_stocks_life()
-    if fetch_missing_life and crypto_life is None:
+    if stocks_life is None:
+        stocks_life = remembered_stocks
+    if crypto_life is None and fetch_missing_life:
         crypto_life = fetch_crypto_life()
+    if crypto_life is None:
+        crypto_life = remembered_crypto
     text = render_lines(
         stocks,
         crypto,
@@ -438,7 +475,7 @@ def _store(
     except Exception:
         pass
     try:
-        write_pnl_cache(stocks, crypto)
+        write_pnl_cache(stocks, crypto, stocks_life, crypto_life)
     except Exception:
         pass
     return text
@@ -456,7 +493,6 @@ def load_text() -> str:
             crypto,
             stocks_life=fetch_stocks_life(),
             crypto_life=fetch_crypto_life(),
-            fetch_missing_life=False,
         )
 
 
