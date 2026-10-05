@@ -474,7 +474,12 @@ class StocksDeskMixin:
 
         park = _park_ticker()
         target_alloc.pop(park, None)
-        positions_list, _day, _total = self._safe_positions()
+        try:
+            positions_list, _day, _total = self._positions()
+        except Exception as exc:
+            # Пустой список здесь значит «бумаг нет» — стол докупил бы то, что уже держит.
+            logger.warning("[Биржа] портфель недоступен — ребаланс пропускаю: %s", exc)
+            return "Портфель недоступен — ребаланс пропускаю."
         positions = {p["ticker"]: p for p in positions_list}
         self._ensure_desk_bought(set(positions.keys()) - {park})
         cash = self._broker_cash()
@@ -577,7 +582,11 @@ class StocksDeskMixin:
         if acted:
             time.sleep(1.0)
             self._bust_broker_cache()
-            positions_list, _day, _total = self._safe_positions()
+            try:
+                positions_list, _day, _total = self._positions()
+            except Exception as exc:
+                logger.warning("[Биржа] портфель недоступен после продаж — покупки отложил: %s", exc)
+                return "Ребалансировал портфель: " + " ".join(parts) + " Покупки отложил: портфель недоступен."
             positions = {item["ticker"]: item for item in positions_list}
             current_values = {
                 ticker: positions.get(ticker, {}).get("qty", 0.0) * prices.get(ticker, 0.0)

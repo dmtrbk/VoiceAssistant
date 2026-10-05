@@ -252,7 +252,7 @@ class TestStocks(unittest.TestCase):
     def test_rebalance_small_account_buys_target(self):
         self.skill._token = "test-token"
         with (
-            patch.object(self.skill, "_safe_positions", return_value=([], 0.0, 0.0)),
+            patch.object(self.skill, "_positions", return_value=([], 0.0, 0.0)),
             patch.object(self.skill, "_broker_cash", return_value=300.0),
             patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
             patch.object(self.skill, "_lot_size", return_value=1),
@@ -267,7 +267,7 @@ class TestStocks(unittest.TestCase):
     def test_rebalance_drops_tmos_and_buys_the_rest(self):
         self.skill._token = "test-token"
         with (
-            patch.object(self.skill, "_safe_positions", return_value=([], 0.0, 0.0)),
+            patch.object(self.skill, "_positions", return_value=([], 0.0, 0.0)),
             patch.object(self.skill, "_broker_cash", return_value=300.0),
             patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
             patch.object(self.skill, "_lot_size", return_value=1),
@@ -425,7 +425,7 @@ class TestStocks(unittest.TestCase):
         self.skill._manual_holds.add("SIBN")
         positions = ([{"ticker": "SIBN", "qty": 1.0, "price": 500.0}], 0.0, 0.0)
         with (
-            patch.object(self.skill, "_safe_positions", return_value=positions),
+            patch.object(self.skill, "_positions", return_value=positions),
             patch.object(self.skill, "_broker_cash", return_value=0.0),
             patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
             patch.object(self.skill, "_lot_size", return_value=1),
@@ -442,7 +442,7 @@ class TestStocks(unittest.TestCase):
         self.skill._desk_bought_ready = True
         positions = ([{"ticker": "GMKN", "qty": 1.0, "price": 3000.0}], 0.0, 0.0)
         with (
-            patch.object(self.skill, "_safe_positions", return_value=positions),
+            patch.object(self.skill, "_positions", return_value=positions),
             patch.object(self.skill, "_broker_cash", return_value=0.0),
             patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
             patch.object(self.skill, "_lot_size", return_value=1),
@@ -459,7 +459,7 @@ class TestStocks(unittest.TestCase):
         self.skill._desk_bought_ready = True
         positions = ([{"ticker": "EUTR", "qty": 10.0, "price": 100.0}], 0.0, 0.0)
         with (
-            patch.object(self.skill, "_safe_positions", return_value=positions),
+            patch.object(self.skill, "_positions", return_value=positions),
             patch.object(self.skill, "_broker_cash", return_value=0.0),
             patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
             patch.object(self.skill, "_lot_size", return_value=1),

@@ -196,7 +196,7 @@ class TestStocksDeskRules(unittest.TestCase):
         ])
         positions = ([{"ticker": "EUTR", "qty": 10.0, "price": 100.0}], 0.0, 0.0)
         with (
-            patch.object(self.skill, "_safe_positions", return_value=positions),
+            patch.object(self.skill, "_positions", return_value=positions),
             patch.object(self.skill, "_broker_cash", return_value=0.0),
             patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
             patch.object(self.skill, "_lot_size", return_value=1),
@@ -212,7 +212,7 @@ class TestStocksDeskRules(unittest.TestCase):
         self.skill._desk_bought_ready = True
         positions = ([{"ticker": "SBER", "qty": 170.0, "price": 300.0}], 0.0, 0.0)
         with (
-            patch.object(self.skill, "_safe_positions", return_value=positions),
+            patch.object(self.skill, "_positions", return_value=positions),
             patch.object(self.skill, "_broker_cash", return_value=49_000.0),
             patch.object(self.skill, "_lot_size", return_value=10),
             patch.object(self.skill, "_max_lots", return_value=(100, 17)),
@@ -222,6 +222,33 @@ class TestStocksDeskRules(unittest.TestCase):
             result = self.skill._rebalance_portfolio({"SBER": 50.0})
         place.assert_not_called()
         self.assertIn("сбалансирован", result)
+
+    def test_rebalance_skips_when_portfolio_unavailable(self):
+        with (
+            patch.object(self.skill, "_positions", side_effect=RuntimeError("http 500")),
+            patch.object(self.skill, "_broker_cash", return_value=3400.0),
+            patch.object(self.skill, "_place_order") as place,
+        ):
+            result = self.skill._rebalance_portfolio({"CNRU": 26.0, "PRMD": 16.0})
+        place.assert_not_called()
+        self.assertIn("недоступен", result)
+
+    def test_rebalance_defers_buys_when_portfolio_lost_after_sells(self):
+        self.skill._desk_bought = {"EUTR"}
+        self.skill._desk_bought_ready = True
+        positions = ([{"ticker": "EUTR", "qty": 10.0, "price": 100.0}], 0.0, 0.0)
+        with (
+            patch.object(self.skill, "_positions", side_effect=[positions, RuntimeError("timeout")]),
+            patch.object(self.skill, "_broker_cash", return_value=0.0),
+            patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=(10, 10)),
+            patch.object(self.skill, "_day_changes", return_value={}),
+            patch.object(self.skill, "_place_order", return_value="Продал 10 лотов: EUTR.") as place,
+        ):
+            result = self.skill._rebalance_portfolio({"VTBR": 100.0})
+        place.assert_called_once_with("EUTR", "ORDER_DIRECTION_SELL", 10)
+        self.assertIn("Покупки отложил", result)
 
     def test_desk_choose_skips_cooldown(self):
         candidates = [
@@ -371,7 +398,7 @@ class TestStocksDeskRules(unittest.TestCase):
         positions = ([{"ticker": "LQDT", "qty": 1000.0, "price": 1.8}], 0.0, 0.0)
         with (
             patch.dict(os.environ, {"STOCKS_PARK": ""}),
-            patch.object(self.skill, "_safe_positions", return_value=positions),
+            patch.object(self.skill, "_positions", return_value=positions),
             patch.object(self.skill, "_broker_cash", return_value=0.0),
             patch.object(self.skill, "_quote", return_value=("ВТБ", 80.0, 0.0)),
             patch.object(self.skill, "_lot_size", return_value=1),
