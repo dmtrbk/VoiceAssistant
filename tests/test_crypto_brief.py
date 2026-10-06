@@ -11,8 +11,8 @@ class TestCryptoBrief(unittest.TestCase):
     def test_phrase(self):
         self.assertTrue(wants_crypto_brief("разбери крипту"))
         self.assertTrue(wants_crypto_brief("подробный отчёт по крипте"))
+        self.assertTrue(wants_crypto_brief("подробный отчет"))
         self.assertFalse(wants_crypto_brief("что с криптой"))
-        self.assertFalse(wants_crypto_brief("подробный отчёт"))
 
     def test_registered_before_crypto(self):
         self.assertLess(ALL_SKILLS.index(crypto_brief_skill), ALL_SKILLS.index(crypto_skill))
@@ -55,7 +55,7 @@ class TestCryptoBrief(unittest.TestCase):
         spoken: list[str] = []
         with (
             mock.patch("skills.crypto.skill.CryptoSkill", return_value=mock.Mock()),
-            mock.patch("skills.crypto_brief.build_crypto_brief", return_value="Готово."),
+            mock.patch("skills.crypto_brief.build_portfolio_report", return_value="Готово."),
         ):
             crypto_brief_skill.execute(RequestContext(raw_text="разбери крипту", speak=spoken.append))
         self.assertEqual(spoken, ["Готово."])

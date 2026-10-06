@@ -57,9 +57,22 @@ _HINTS = (
 
 def wants_crypto_brief(text: str) -> bool:
     text = _norm(text)
+    if "подробн" in text and "отч" in text:
+        return True
     if "крипт" not in text:
         return False
     return any(hint in text for hint in _HINTS)
+
+
+def _report_scope(text: str) -> str:
+    text = _norm(text)
+    crypto = "крипт" in text
+    stocks = any(word in text for word in ("бирж", "акци", "тиньк", "мосбирж"))
+    if crypto and not stocks:
+        return "crypto"
+    if stocks and not crypto:
+        return "stocks"
+    return "both"
 
 
 def _gap_pct(price: float, target: float) -> float:
@@ -157,6 +170,54 @@ def build_crypto_brief(skill) -> str:
     return " ".join(parts)
 
 
+def build_stocks_report() -> str:
+    """Живые бумаги Т-Инвест. Без догадок."""
+    from skills.stocks.common import _format_rub
+    from skills.stocks.skill import StocksSkill
+
+    skill = StocksSkill()
+    if not skill._token:
+        return "Биржа: ключа нет."
+    positions, day_total, total_yield = skill._positions()
+    if not positions:
+        return "Биржа: акций на счёте нет."
+    lines = []
+    for item in positions:
+        value = float(item.get("qty") or 0) * float(item.get("price") or 0)
+        line = f"{item['name']} {_format_rub(value)}"
+        daily = float(item.get("daily") or 0)
+        if daily:
+            line += f", за день {_format_rub(daily, signed=True)}"
+        lines.append(line)
+    speech = "Биржа. " + ". ".join(lines) + "."
+    speech += f" За день {_format_rub(day_total, signed=True)}."
+    speech += f" С покупки {_format_rub(total_yield, signed=True)}."
+    cash = skill._book_cash()
+    if cash:
+        speech += f" Кэшем {_format_rub(cash)}."
+    return speech
+
+
+def build_portfolio_report(text: str) -> str:
+    scope = _report_scope(text)
+    parts: list[str] = []
+    if scope in {"stocks", "both"}:
+        try:
+            parts.append(build_stocks_report())
+        except Exception as exc:
+            logger.error("[Разбор] биржа: %s", exc)
+            parts.append("Биржа сейчас не ответила.")
+    if scope in {"crypto", "both"}:
+        try:
+            from skills.crypto.skill import CryptoSkill
+
+            parts.append("Крипта. " + build_crypto_brief(CryptoSkill()))
+        except Exception as exc:
+            logger.error("[Разбор] крипта: %s", exc)
+            parts.append("Крипта сейчас не ответила.")
+    return " ".join(parts)
+
+
 class CryptoBriefSkill(BaseSkill):
     """Разбор счёта. Курсы и сделки остаются у навыка «Крипта»."""
 
@@ -168,9 +229,7 @@ class CryptoBriefSkill(BaseSkill):
         if speak is None:
             return
         try:
-            from skills.crypto.skill import CryptoSkill
-
-            speak(build_crypto_brief(CryptoSkill()))
+            speak(build_portfolio_report(context.raw_text))
         except Exception as exc:
             logger.error("[Разбор крипты] %s", exc)
             speak("Разбор крипты не вышел.")
