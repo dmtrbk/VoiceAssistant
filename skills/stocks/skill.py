@@ -43,8 +43,8 @@ class StocksSkill(
         self._account_id = (os.getenv("TINKOFF_ACCOUNT_ID") or "").strip()
         raw_watch = (os.getenv("TINKOFF_WATCHLIST") or "").strip()
         self._watchlist = [part.strip().upper() for part in raw_watch.split(",") if part.strip()]
-        self._session = requests.Session()
-        self._session.headers.update({"User-Agent": "Mozilla/5.0"})
+        self._session = common.make_http_session()
+        self._watch_period_sec = common._WATCH_PERIOD_SEC
         self._cache: dict[str, tuple[float, Any]] = {}
         self._last_tickers: list[str] = []
         self._alias_extra: dict[str, str] = {}

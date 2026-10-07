@@ -42,6 +42,7 @@ from .common import (
 from .desk_policy import (
     COOLDOWN_HOURS,
     MIN_HOLD_HOURS,
+    WATCH_PERIOD_CALM,
     apply_cash_floor,
     cash_floor_pct,
     exit_reason,
@@ -51,11 +52,41 @@ from .desk_policy import (
     park_release_lots,
     should_rebalance_leg,
     update_trail_leg,
+    watch_period_sec,
     watch_rate_ok,
+    watch_snapshot_line,
 )
 
 logger = logging.getLogger(__name__)
 _MSK = ZoneInfo("Europe/Moscow")
+_WATCH_ERROR_BACKOFF_SEC = 30.0
+
+
+def next_desk_at(state: dict[str, Any] | None, now: float) -> float:
+    """Перезапуск не откладывает полный стол ещё на период, если он уже созрел."""
+    if state is None:
+        return now
+    stamp = float(state.get("desk_ts") or state.get("ts") or 0)
+    return max(now, stamp + _DESK_PERIOD_SEC)
+
+
+def next_watch_at(period: float, now: float) -> float:
+    """Следующий тик по сетке стены, работа цикла период не сдвигает."""
+    period = max(1.0, float(period))
+    return now - (now % period) + period
+
+
+def _cycle_error_kind(exc: BaseException) -> str:
+    text = str(exc).lower()
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "502" in text or "503" in text or "504" in text:
+        return "http 5xx"
+    if "bad json" in text or "json" in text:
+        return "json"
+    if "transient" in text:
+        return "сеть"
+    return "ошибка"
 
 
 class StocksDeskMixin:
@@ -731,7 +762,9 @@ class StocksDeskMixin:
         if is_risk_off(week=week, day=day):
             why = self._regime_phrase(week, day)
             logger.info("[Биржа] %s", why)
-            write_alloc_state({}, why=why, risk_off=True, watch_trades=watch_trades)
+            write_alloc_state(
+                {}, why=why, risk_off=True, watch_trades=watch_trades, desk_ts=time.time()
+            )
             return why
         try:
             cooldown = stocks_journal.cooldown_tickers(COOLDOWN_HOURS)
@@ -742,7 +775,9 @@ class StocksDeskMixin:
             candidates,
         )
         if not alloc:
-            write_alloc_state({}, why="нечего покупать через API", watch_trades=watch_trades)
+            write_alloc_state(
+                {}, why="нечего покупать через API", watch_trades=watch_trades, desk_ts=time.time()
+            )
             return "Нечего покупать: брокер не даёт эти бумаги через API."
         floor = cash_floor_pct(week=week, day=day)
         alloc = apply_cash_floor(alloc, floor)
@@ -755,7 +790,7 @@ class StocksDeskMixin:
         if floor > 0:
             alloc_desc += f", кэш не меньше {int(floor)}%"
         logger.info("[Биржа] целевой портфель: %s", alloc_desc)
-        write_alloc_state(alloc, why=alloc_desc, watch_trades=watch_trades)
+        write_alloc_state(alloc, why=alloc_desc, watch_trades=watch_trades, desk_ts=time.time())
 
         if not self._token:
             return f"Целевой портфель: {alloc_desc}. Торгового ключа нет, пока держу на бумаге."
@@ -813,6 +848,7 @@ class StocksDeskMixin:
         """Стоп от средней цены и трейл от пика — по бумагам стола, без коридора и удержания."""
         positions, _day, _total = self._safe_positions()
         if not positions:
+            self._watch_period_sec = WATCH_PERIOD_CALM
             return [], set()
         park = _park_ticker()
         cash = self._broker_cash()
@@ -827,6 +863,7 @@ class StocksDeskMixin:
         new_legs: dict[str, dict[str, Any]] = {}
         parts: list[str] = []
         sold: set[str] = set()
+        snaps: list[dict[str, Any]] = []
         for pos in positions:
             ticker = pos["ticker"]
             if ticker == park or self._is_owner_position(ticker):
@@ -844,6 +881,14 @@ class StocksDeskMixin:
                 armed=bool(prev.get("armed")),
             )
             keep = {"entry": leg["entry"], "high": leg["high"], "armed": leg["armed"]}
+            snaps.append({
+                "ticker": ticker,
+                "price": price,
+                "entry": leg["entry"],
+                "high": leg["high"],
+                "armed": leg["armed"],
+                "stop": leg["stop"],
+            })
             reason = exit_reason(price=price, entry=entry, trail_hit=leg["hit"])
             if not reason:
                 new_legs[ticker] = keep
@@ -868,7 +913,25 @@ class StocksDeskMixin:
             except Exception as exc:
                 logger.warning("[Биржа] выход %s: %s", ticker, exc)
                 new_legs[ticker] = keep
+            else:
+                snaps.pop()
         write_trail_state(new_legs)
+        period = watch_period_sec(legs=snaps)
+        self._watch_period_sec = period
+        for row in snaps:
+            logger.info(
+                "[Биржа] дозор %s",
+                watch_snapshot_line(
+                    str(row["ticker"]),
+                    price=float(row["price"]),
+                    entry=float(row["entry"]),
+                    high=float(row["high"]),
+                    armed=bool(row["armed"]),
+                    stop=float(row["stop"]),
+                ),
+            )
+        if period < WATCH_PERIOD_CALM:
+            logger.info("[Биржа] дозор: интервал %dс", period)
         return parts, sold
 
     def _park_release(self, need_rub: float) -> bool:
@@ -967,12 +1030,10 @@ class StocksDeskMixin:
                 os.getenv("TINKOFF_INVEST_TOKEN") or os.getenv("TINKOFF_TOKEN") or ""
             ).strip()
             now = time.time()
+            period = float(getattr(self, "_watch_period_sec", _WATCH_PERIOD_SEC) or _WATCH_PERIOD_SEC)
             if next_desk <= 0:
-                if read_alloc_state() is None:
-                    next_desk = now
-                else:
-                    next_desk = now + _DESK_PERIOD_SEC
-                next_watch = now + _WATCH_PERIOD_SEC
+                next_desk = next_desk_at(read_alloc_state(), now)
+                next_watch = next_watch_at(period, now)
             try:
                 market_open = self._market_open()
             except Exception:
@@ -1004,10 +1065,18 @@ class StocksDeskMixin:
                 if now >= next_desk:
                     self._trade_auto(silent=True)
                     next_desk = time.time() + _DESK_PERIOD_SEC
-                    next_watch = time.time() + _WATCH_PERIOD_SEC
+                    next_watch = next_watch_at(
+                        getattr(self, "_watch_period_sec", _WATCH_PERIOD_SEC), time.time()
+                    )
                 elif now >= next_watch:
+                    t0 = time.time()
                     self._desk_watch(silent=True)
-                    next_watch = time.time() + _WATCH_PERIOD_SEC
+                    dt = time.time() - t0
+                    period = float(getattr(self, "_watch_period_sec", _WATCH_PERIOD_SEC))
+                    logger.info("[Биржа] дозор цикл %.1fс, след. через %dс", dt, int(period))
+                    next_watch = next_watch_at(period, time.time())
             except Exception as exc:
-                logger.warning("[Биржа] фоновый цикл торговли: %s", exc)
-                next_watch = time.time() + _WATCH_PERIOD_SEC
+                logger.warning("[Биржа] фоновый цикл (%s): %s", _cycle_error_kind(exc), exc)
+                if now >= next_desk:
+                    next_desk = time.time() + _WATCH_ERROR_BACKOFF_SEC
+                next_watch = time.time() + _WATCH_ERROR_BACKOFF_SEC

@@ -27,6 +27,10 @@ WATCH_MAX_TRADES_PER_HOUR = 2
 STOP_LOSS_PCT = 10.0
 TRAIL_ARM_PCT = 6.0
 TRAIL_PCT = 4.0
+WATCH_PERIOD_CALM = 15 * 60
+WATCH_PERIOD_NEAR = 3 * 60
+NEAR_STOP_GAP = 2.0
+NEAR_TRAIL_GAP = 1.0
 # Паркинг: в фонд уходит кэш сверх буфера, и только если сумма заметная —
 # каждая сделка с фондом стоит комиссию и спред.
 PARK_BUFFER_PCT = 2.0
@@ -110,6 +114,52 @@ def should_rebalance_leg(
         return True
     band = max(max(float(equity), 1.0) * band_pct / 100.0, float(min_trade_rub))
     return abs(excess) >= band
+
+
+def watch_period_sec(
+    *,
+    legs: list[dict[str, Any]],
+    calm: int = WATCH_PERIOD_CALM,
+    near: int = WATCH_PERIOD_NEAR,
+) -> int:
+    """15 мин спокойно; 3 мин, если цена близко к стопу −10% или к трейлу."""
+    for leg in legs:
+        px = float(leg.get("price") or 0)
+        ent = float(leg.get("entry") or 0)
+        if px <= 0 or ent <= 0:
+            continue
+        gain = (px / ent - 1.0) * 100.0
+        if gain <= -STOP_LOSS_PCT + NEAR_STOP_GAP + 1e-6:
+            return int(near)
+        stop = float(leg.get("stop") or 0)
+        if leg.get("armed") and stop > 0 and px <= stop * (1.0 + NEAR_TRAIL_GAP / 100.0):
+            return int(near)
+    return int(calm)
+
+
+def watch_snapshot_line(
+    ticker: str,
+    *,
+    price: float,
+    entry: float,
+    high: float,
+    armed: bool,
+    stop: float,
+) -> str:
+    """Нога дозора: avg, цена, дистанция до стопа и трейла."""
+    name = str(ticker or "?").upper()
+    px = float(price or 0)
+    ent = float(entry or 0)
+    if px <= 0 or ent <= 0:
+        return f"{name} px={px:.4g} avg=?"
+    gain = (px / ent - 1.0) * 100.0
+    bits = [f"{name} px={px:.4g} avg={ent:.4g} {gain:+.1f}% до стопа {gain + STOP_LOSS_PCT:.1f}пп"]
+    if armed and float(stop or 0) > 0:
+        dist = (px / float(stop) - 1.0) * 100.0
+        bits.append(f"пик {float(high):.4g} трейл {float(stop):.4g} до него {dist:+.1f}%")
+    else:
+        bits.append(f"трейл с +{TRAIL_ARM_PCT:.0f}%")
+    return " ".join(bits)
 
 
 def watch_rate_ok(

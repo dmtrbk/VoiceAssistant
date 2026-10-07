@@ -20,7 +20,11 @@ from skills.stocks.desk_policy import (
     park_release_lots,
     should_rebalance_leg,
     update_trail_leg,
+    watch_period_sec,
     watch_rate_ok,
+    watch_snapshot_line,
+    WATCH_PERIOD_CALM,
+    WATCH_PERIOD_NEAR,
 )
 
 _MSK = ZoneInfo("Europe/Moscow")
@@ -69,6 +73,26 @@ class TestStocksPolicy(unittest.TestCase):
         self.assertTrue(
             should_rebalance_leg(current_value=53_000, target_value=50_000, day_chg=8.0, **kw)
         )
+
+    def test_watch_period_near_stop_or_trail(self):
+        self.assertEqual(watch_period_sec(legs=[]), WATCH_PERIOD_CALM)
+        self.assertEqual(
+            watch_period_sec(legs=[{"price": 92.0, "entry": 100.0}]),
+            WATCH_PERIOD_NEAR,
+        )
+        self.assertEqual(
+            watch_period_sec(legs=[{"price": 95.0, "entry": 100.0}]),
+            WATCH_PERIOD_CALM,
+        )
+        self.assertEqual(
+            watch_period_sec(legs=[{
+                "price": 106.0, "entry": 100.0, "armed": True, "stop": 105.6,
+            }]),
+            WATCH_PERIOD_NEAR,
+        )
+        line = watch_snapshot_line("SBER", price=95.0, entry=100.0, high=100.0, armed=False, stop=0.0)
+        self.assertIn("avg=100", line)
+        self.assertIn("до стопа", line)
 
     def test_watch_rate(self):
         now = 10_000.0

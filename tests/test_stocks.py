@@ -1,7 +1,8 @@
+import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from skills.base import RequestContext
 from skills.stocks import (
@@ -520,6 +521,42 @@ class TestStocks(unittest.TestCase):
         self.assertEqual(state["alloc"]["SBER"], 40.0)
         self.assertEqual(state["why"], "тест")
         self.assertIn("ts", state)
+        self.assertEqual(state["desk_ts"], state["ts"])
+
+    def test_watch_write_keeps_desk_ts(self):
+        from skills.stocks.common import read_alloc_state, write_alloc_state
+        from skills.stocks.desk import next_desk_at, next_watch_at
+
+        write_alloc_state({"SBER": 40.0}, why="стол", desk_ts=123.0)
+        write_alloc_state({"SBER": 40.0}, why="дозор", watch_trades=[1.0])
+        state = read_alloc_state()
+        self.assertEqual(state["desk_ts"], 123.0)
+        self.assertEqual(next_watch_at(900, 1000.0), 1800.0)
+        self.assertEqual(next_desk_at(None, 500.0), 500.0)
+        self.assertEqual(next_desk_at({"desk_ts": 100.0}, 100.0 + 3 * 3600 - 10), 100.0 + 3 * 3600)
+
+    def test_post_retries_502(self):
+        bad = Mock(status_code=502, content=b"gateway", text="gateway")
+        good = Mock(status_code=200, content=b'{"ok":1}')
+        good.json.return_value = {"ok": 1}
+        self.skill._session.post = Mock(side_effect=[bad, good])
+        with patch("skills.stocks.quotes.time.sleep"):
+            data = self.skill._post("https://invest-public-api.tinkoff.ru/x", {})
+        self.assertEqual(data["ok"], 1)
+        self.assertEqual(self.skill._session.post.call_count, 2)
+
+    def test_post_bad_json(self):
+        resp = Mock(status_code=200, content=b"<html>")
+        resp.json.side_effect = json.JSONDecodeError("x", "doc", 0)
+        self.skill._session.post = Mock(return_value=resp)
+        with patch("skills.stocks.quotes.time.sleep"):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.skill._post("https://invest-public-api.tinkoff.ru/x", {})
+        self.assertIn("json", str(ctx.exception).lower())
+
+    def test_http_session_pool(self):
+        adapter = self.skill._session.get_adapter("https://invest-public-api.tinkoff.ru")
+        self.assertGreaterEqual(adapter._pool_maxsize, 8)
 
     def test_desk_watch_uses_saved_alloc(self):
         from skills.stocks.common import _ALLOC_PATH, write_alloc_state

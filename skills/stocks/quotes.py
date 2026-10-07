@@ -46,6 +46,27 @@ from .common import (
 
 logger = logging.getLogger(__name__)
 
+_RETRYABLE = (
+    requests.Timeout,
+    requests.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def _response_json(response: requests.Response) -> dict[str, Any]:
+    if not response.content:
+        return {}
+    try:
+        data = response.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"http bad json {response.status_code}") from exc
+    return data if isinstance(data, dict) else {}
+
+
+def _transient_http(exc: BaseException) -> bool:
+    text = str(exc)
+    return any(mark in text for mark in ("http 429", "http 502", "http 503", "http 504", "bad json"))
+
 # «Зачем тебе биржа» — характер, не сводка. Короткое «биржа» / «акции» — сводка.
 _IDENTITY_TALK = (
     "зачем",
@@ -102,46 +123,67 @@ class StocksQuotesMixin:
             hit = self._cache.get(cache_key)
             if hit and time.time() - hit[0] < _CACHE_SEC:
                 return hit[1]
-        response = self._session.post(
-            url,
-            json=body,
-            headers=self._headers(),
-            timeout=6,
-            verify=_tinkoff_verify(),
-        )
-        if response.status_code == 401:
-            raise RuntimeError("token rejected")
-        if response.status_code >= 400:
-            snippet = (response.text or "")[:240].lower()
-            if response.status_code in {403, 400} and any(
-                marker in snippet
-                for marker in ("permission", "прав", "readonly", "read only", "недостаточно прав")
-            ):
-                raise RuntimeError("trade token")
-            if _is_api_buy_forbidden_text(snippet):
-                raise RuntimeError("api forbidden")
-            raise _http_error(response)
-        data = response.json() if response.content else {}
-        if cache_key:
-            self._cache[cache_key] = (time.time(), data)
-        return data
+        last: BaseException | None = None
+        for index in range(3):
+            try:
+                response = self._session.post(
+                    url,
+                    json=body,
+                    headers=self._headers(),
+                    timeout=6,
+                    verify=_tinkoff_verify(),
+                )
+                if response.status_code == 401:
+                    raise RuntimeError("token rejected")
+                if response.status_code in {429, 502, 503, 504}:
+                    raise RuntimeError(f"http {response.status_code}")
+                if response.status_code >= 400:
+                    snippet = (response.text or "")[:240].lower()
+                    if response.status_code in {403, 400} and any(
+                        marker in snippet
+                        for marker in ("permission", "прав", "readonly", "read only", "недостаточно прав")
+                    ):
+                        raise RuntimeError("trade token")
+                    if _is_api_buy_forbidden_text(snippet):
+                        raise RuntimeError("api forbidden")
+                    raise _http_error(response)
+                data = _response_json(response)
+                if cache_key:
+                    self._cache[cache_key] = (time.time(), data)
+                return data
+            except _RETRYABLE as exc:
+                last = exc
+            except RuntimeError as exc:
+                if not _transient_http(exc):
+                    raise
+                last = exc
+            if index < 2:
+                time.sleep(0.4 * (2 ** index))
+        raise RuntimeError(f"http transient: {last}") from last
 
     def _get(self, url: str, params: dict[str, str], cache_key: str) -> dict[str, Any]:
         hit = self._cache.get(cache_key)
         if hit and time.time() - hit[0] < _CACHE_SEC:
             return hit[1]
         last_error: Exception | None = None
-        for _attempt in range(2):
+        for index in range(3):
             try:
                 response = self._session.get(url, params=params, timeout=6)
+                if response.status_code in {429, 502, 503, 504}:
+                    raise RuntimeError(f"http {response.status_code}")
                 if response.status_code >= 400:
                     raise _http_error(response)
-                data = response.json() if response.content else {}
+                data = _response_json(response)
                 self._cache[cache_key] = (time.time(), data)
                 return data
-            except (requests.Timeout, requests.ConnectionError) as exc:
+            except _RETRYABLE as exc:
                 last_error = exc
-                time.sleep(0.4)
+            except RuntimeError as exc:
+                if not _transient_http(exc):
+                    raise
+                last_error = exc
+            if index < 2:
+                time.sleep(0.4 * (2 ** index))
         if last_error:
             raise last_error
         raise RuntimeError("moex get failed")

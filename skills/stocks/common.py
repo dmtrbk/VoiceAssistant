@@ -15,6 +15,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from skills.text_utils import plural as _plural
 from skills.utils import send_telegram_notification, telegram_configured
@@ -50,6 +51,7 @@ _WATCH_PERIOD_SEC = 15 * 60  # дозор: к сохранённой цели, �
 _MOMENTUM_SPREAD = 0.8
 
 _CACHE_SEC = 25.0
+_HTTP_POOL = 8
 _MOOD_TTL_SEC = 3600.0
 _MIN_TRADE_PCT = 0.02
 _MIN_TRADE_SMALL_PCT = 0.05
@@ -258,10 +260,12 @@ def read_alloc_state(path: str | None = None) -> dict[str, Any] | None:
                 watch_trades.append(float(item))
             except (TypeError, ValueError):
                 continue
+    ts = float(raw.get("ts") or 0)
     return {
         "alloc": alloc,
         "why": str(raw.get("why") or ""),
-        "ts": float(raw.get("ts") or 0),
+        "ts": ts,
+        "desk_ts": float(raw.get("desk_ts") or ts),
         "risk_off": bool(raw.get("risk_off")),
         "watch_trades": watch_trades,
     }
@@ -273,9 +277,15 @@ def write_alloc_state(
     why: str = "",
     risk_off: bool = False,
     watch_trades: list[float] | None = None,
+    desk_ts: float | None = None,
     path: str | None = None,
 ) -> None:
+    """desk_ts — время полного стола. Дозор его не передаёт, и метка сохраняется."""
     path = path or _ALLOC_PATH
+    now = time.time()
+    if desk_ts is None:
+        prev = read_alloc_state(path)
+        desk_ts = prev["desk_ts"] if prev else now
     clean = {
         str(k).upper().strip(): float(v)
         for k, v in (alloc or {}).items()
@@ -285,7 +295,8 @@ def write_alloc_state(
     payload = {
         "alloc": clean,
         "why": str(why or ""),
-        "ts": time.time(),
+        "ts": now,
+        "desk_ts": float(desk_ts),
         "risk_off": bool(risk_off),
         "watch_trades": [float(ts) for ts in (watch_trades or []) if float(ts) >= cutoff],
     }
@@ -505,3 +516,18 @@ def _voice_trade_enabled() -> bool:
 _desk_loop_started = False
 _desk_init_lock = threading.Lock()
 _TRADE_LOCK = threading.RLock()
+
+
+def make_http_session() -> requests.Session:
+    """Пул соединений: дозор и голос не ждут свободный слот."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    adapter = HTTPAdapter(
+        pool_connections=_HTTP_POOL,
+        pool_maxsize=_HTTP_POOL,
+        max_retries=0,
+        pool_block=False,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
