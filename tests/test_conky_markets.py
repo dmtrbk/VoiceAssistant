@@ -109,6 +109,29 @@ class TestConkyMarkets(unittest.TestCase):
         self.assertIn("0 $$ / ", crypto)
         self.assertIn("+12 $$", crypto)
 
+    def test_failed_day_keeps_previous_number(self):
+        import os
+        import tempfile
+
+        folder = tempfile.mkdtemp()
+        pnl = os.path.join(folder, "pnl.json")
+        conky_markets.write_pnl_cache(18, 4, 0, 12, cache_path=pnl)
+        with (
+            mock.patch.object(conky_markets, "PNL_CACHE_PATH", pnl),
+            mock.patch.object(conky_markets, "write_cache"),
+            mock.patch.object(conky_markets, "fetch_stocks_life", return_value=None),
+            mock.patch.object(conky_markets, "fetch_crypto_life", return_value=None),
+        ):
+            text = conky_markets._store(None, None, stocks_life=None, crypto_life=None)
+        stocks = conky_markets.select_line(text, "stocks")
+        crypto = conky_markets.select_line(text, "crypto")
+        self.assertIn("+18 ₽", stocks)
+        self.assertNotIn("—", stocks)
+        self.assertIn("+4 $$", crypto)
+        self.assertNotIn("—", crypto)
+        saved = conky_markets._read_pnl_raw(pnl)
+        self.assertTrue(saved.get("day_stale"))
+
     def test_how_are_you(self):
         self.assertTrue(conky_markets.is_how_are_you("как дела"))
         self.assertTrue(conky_markets.is_how_are_you("Ну как ты?"))

@@ -203,12 +203,15 @@ def iron_pace_briefing() -> str:
     )
 
 
-def cache_is_fresh(now: float | None = None, cache_path: str = CACHE_PATH) -> bool:
+def cache_is_fresh(now: float | None = None, cache_path: str | None = None) -> bool:
+    cache_path = cache_path or CACHE_PATH
     if not os.path.isfile(cache_path):
         return False
     stamp = os.path.getmtime(cache_path)
     current = time.time() if now is None else now
-    if current - stamp > CACHE_MAX_AGE:
+    raw = _read_pnl_raw()
+    max_age = 5 * 60 if raw and raw.get("day_stale") else CACHE_MAX_AGE
+    if current - stamp > max_age:
         return False
     for path in JOURNAL_PATHS:
         if os.path.isfile(path) and os.path.getmtime(path) > stamp:
@@ -433,6 +436,8 @@ def write_pnl_cache(
     stocks_life: float | None = None,
     crypto_life: float | None = None,
     cache_path: str | None = None,
+    *,
+    day_stale: bool = False,
 ) -> None:
     cache_path = cache_path or PNL_CACHE_PATH
     payload = {
@@ -440,6 +445,7 @@ def write_pnl_cache(
         "crypto": crypto,
         "stocks_life": stocks_life,
         "crypto_life": crypto_life,
+        "day_stale": day_stale,
     }
     tmp_path = cache_path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as handle:
@@ -455,15 +461,25 @@ def _store(
     *,
     fetch_missing_life: bool = True,
 ) -> str:
+    remembered_day = read_pnl_cache() or (None, None)
     remembered_stocks, remembered_crypto = read_life_cache()
+    day_stale = False
+    if stocks is None:
+        stocks = remembered_day[0]
+        day_stale = True
+    if crypto is None:
+        crypto = remembered_day[1]
+        day_stale = True
     if stocks_life is None and fetch_missing_life:
         stocks_life = fetch_stocks_life()
     if stocks_life is None:
         stocks_life = remembered_stocks
+        day_stale = True
     if crypto_life is None and fetch_missing_life:
         crypto_life = fetch_crypto_life()
     if crypto_life is None:
         crypto_life = remembered_crypto
+        day_stale = True
     text = render_lines(
         stocks,
         crypto,
@@ -475,7 +491,7 @@ def _store(
     except Exception:
         pass
     try:
-        write_pnl_cache(stocks, crypto, stocks_life, crypto_life)
+        write_pnl_cache(stocks, crypto, stocks_life, crypto_life, day_stale=day_stale)
     except Exception:
         pass
     return text
