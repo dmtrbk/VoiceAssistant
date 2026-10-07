@@ -27,6 +27,12 @@ from .crypto_brief import CryptoBriefSkill
 from .image_gen import ImageGenSkill
 from .wikipedia import WikipediaSkill
 from .site_apps import SiteAppsSkill
+from .browser_media import BrowserMediaSkill
+
+try:
+    from .katya import KatyaSkill
+except ImportError:
+    KatyaSkill = None
 
 system_skill = SystemSkill()
 security_skill = SecuritySkill()
@@ -55,6 +61,8 @@ crypto_brief_skill = CryptoBriefSkill()
 image_gen_skill = ImageGenSkill()
 wikipedia_skill = WikipediaSkill()
 site_apps_skill = SiteAppsSkill()
+browser_media_skill = BrowserMediaSkill()
+katya_skill = KatyaSkill() if KatyaSkill is not None else None
 
 # Приоритет: узкие навыки, затем NLU (прощание / монетка), затем Groq.
 # Мелкий разговор (привет, как дела) не в NLU — его забирает Groq.
@@ -76,6 +84,7 @@ ALL_SKILLS = [
     image_gen_skill,  # до Groq и поиска, чтобы «нарисуй» не уходило в чат
     home_assistant_skill,
     xiaomi_bulb_skill,
+    browser_media_skill,  # «останови» / «продолжи» ролика в браузере, до MPV и музыки
     movie_skill,
     music_search_skill,
     audacious_skill,
@@ -84,6 +93,7 @@ ALL_SKILLS = [
     site_apps_skill,  # YouTube / TikTok и другие PWA до системы
     telegram_skill,
     system_skill,
+    *([katya_skill] if katya_skill is not None else []),  # после команд, до болтовни
     local_nlu_skill,
     ai_chat_skill,
 ]

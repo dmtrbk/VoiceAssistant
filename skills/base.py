@@ -33,6 +33,10 @@ class BaseSkill:
         """Короткая реплика вроде «а завтра?» или «ещё» после этого навыка."""
         return False
 
+    def hears_without_wake(self, text: str) -> bool:
+        """Фраза без имени ассистента всё равно будит сессию и уходит в навыки."""
+        return False
+
     def on_context_lost(self) -> None:
         """Вызывается, когда маршрутизатор переключился на другой навык."""
         return

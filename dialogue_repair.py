@@ -387,6 +387,16 @@ def early_dialogue_turn(text: str) -> tuple[str, str | None] | None:
                     return None
         return ("silent", None)
     if lowered in RESUME_EXACT:
+        # «продолжи» при паузе ролика в браузере — навыку, не повтор речи.
+        # «продолжай» по-прежнему возвращает оборванную фразу.
+        if lowered == "продолжи":
+            try:
+                from skills.browser_media import browser_is_paused
+
+                if browser_is_paused():
+                    return None
+            except Exception:
+                pass
         interrupted = current_interrupted()
         if interrupted:
             clear_interrupted()

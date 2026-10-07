@@ -15,6 +15,7 @@ generated_images/
 skills/chat_history_cache.json
 skills/user_profile.json
 skills/shared_events.json
+skills/katya.py
 quiet_book.json
 jarvis_holds.json
 jarvis_bought.json
