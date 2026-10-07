@@ -63,7 +63,7 @@ class TestConkyMarkets(unittest.TestCase):
         self.assertEqual(conky_markets.select_line(text, "crypto"), "${color 888888}-2 $$")
 
     def test_cache_age_is_90_minutes(self):
-        self.assertEqual(conky_markets.CACHE_MAX_AGE, 90 * 60)
+        self.assertEqual(conky_markets.CACHE_MAX_AGE, 5 * 60)
 
     def test_does_not_start_desks(self):
         src = __import__("inspect").getsource(conky_markets)

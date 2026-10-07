@@ -504,6 +504,32 @@ class TestStocks(unittest.TestCase):
         self.assertFalse(self.skill.can_handle(RequestContext(raw_text="купи биткоин")))
         self.assertFalse(self.skill.can_handle(RequestContext(raw_text="сколько стоит эфир")))
 
+    def test_open_yield_sums_positions_not_portfolio_percent(self):
+        payload = {
+            "expectedYield": {"units": "0", "nano": 950000000},
+            "dailyYield": {"currency": "rub", "units": "50", "nano": 0},
+            "positions": [
+                {
+                    "instrumentType": "share",
+                    "ticker": "SBER",
+                    "figi": "figi-sber",
+                    "quantity": {"units": "1", "nano": 0},
+                    "currentPrice": {"units": "100", "nano": 0},
+                    "averagePositionPrice": {"units": "90", "nano": 0},
+                    "expectedYield": {"units": "10", "nano": 0},
+                    "dailyYield": {"currency": "rub", "units": "2", "nano": 0},
+                }
+            ],
+        }
+        with (
+            patch.object(self.skill, "_pick_account_id", return_value="acc"),
+            patch.object(self.skill, "_post", return_value=payload),
+            patch.object(self.skill, "_instrument", return_value={"ticker": "SBER", "name": "Сбер"}),
+        ):
+            _positions, day, life = self.skill._positions()
+        self.assertEqual(day, 50.0)
+        self.assertEqual(life, 10.0)
+
     def test_desk_periods_and_alloc_state(self):
         from skills.stocks.common import (
             _DESK_PERIOD_SEC,

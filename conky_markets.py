@@ -4,7 +4,7 @@
 # Обе: день / заработано (ASCII `/`), только цифры. Без ∑ — Candara.
 # Вторая цифра крипты — реальные деньги: закрытые сделки + проценты Earn, без бумажной переоценки.
 # Цвета из ~/.conky: плюс c0c0c0 (system), минус 888888 (comands default).
-# Кэш 90 мин, сразу после сделки (дневник новее кэша). Стол заявок не запускает.
+# Кэш 5 мин, сразу после сделки (дневник новее кэша). Стол заявок не запускает.
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ COLOR_PLUS = "c0c0c0"
 COLOR_MINUS = "888888"
 CACHE_PATH = os.path.join(_PROJECT_DIR, ".conky_markets.cache")
 PNL_CACHE_PATH = os.path.join(_PROJECT_DIR, ".conky_markets.pnl.json")
-CACHE_MAX_AGE = 90 * 60
+CACHE_MAX_AGE = 5 * 60
 JOURNAL_PATHS = (
     os.path.join(_PROJECT_DIR, "jarvis_crypto_trades.json"),
     os.path.join(_PROJECT_DIR, "jarvis_trades.json"),
@@ -513,7 +513,7 @@ def load_text() -> str:
 
 
 def load_day_pnl() -> tuple[float | None, float | None]:
-    """Те же дневные +/- что у Conky (кэш 90 мин / после сделки)."""
+    """Те же дневные +/- что у Conky (кэш 5 мин / после сделки)."""
     lock_path = CACHE_PATH + ".lock"
     with open(lock_path, "a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -544,7 +544,12 @@ def mood_speech_from(
 
 def mood_speech() -> str:
     stocks, crypto = load_day_pnl()
-    return mood_speech_from(stocks, crypto, fetch_stocks_life(), fetch_crypto_life())
+    stocks_life, crypto_life = read_life_cache()
+    if stocks_life is None:
+        stocks_life = fetch_stocks_life()
+    if crypto_life is None:
+        crypto_life = fetch_crypto_life()
+    return mood_speech_from(stocks, crypto, stocks_life, crypto_life)
 
 
 def mood_briefing() -> str:

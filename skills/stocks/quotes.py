@@ -526,7 +526,8 @@ class StocksQuotesMixin:
         day_total = _quotation_to_float(data.get("dailyYield"))
         if not day_total:
             day_total = sum(item["daily"] for item in positions)
-        total_yield = _quotation_to_float(data.get("expectedYield"))
+        # expectedYield всего портфеля — относительный % без валюты, не рубли.
+        total_yield = sum(item["yield"] for item in positions)
         return positions, day_total, total_yield
 
     def _tinkoff_last(self, ticker: str) -> tuple[str, float]:
@@ -634,7 +635,7 @@ class StocksQuotesMixin:
         if emphasize_yield or len(positions) > 1:
             if day_total:
                 speech += f" За день {_format_rub(day_total, signed=True)}."
-            elif total_yield:
+            if total_yield:
                 speech += f" С покупки {_format_rub(total_yield, signed=True)}."
         return speech
 
