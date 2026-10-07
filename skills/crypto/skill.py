@@ -37,9 +37,10 @@ class CryptoSkill(
         self._api_key = ""
         self._api_secret = ""
         self._watchlist = list(_DEFAULT_WATCH)
-        self._session = requests.Session()
-        self._session.headers.update({"User-Agent": "VoiceAssistant/1.0"})
+        self._session = common.make_http_session()
         self._cache: dict[str, tuple[float, Any]] = {}
+        self._watch_period_sec = common._WATCH_PERIOD_SEC
+        self._quote_cache_sec = common._CACHE_SEC
         self._last_tickers: list[str] = []
         self._want_rub = False
         self._manual_holds: set[str] = _read_ticker_set(common._HOLD_PATH) or set()
@@ -50,6 +51,7 @@ class CryptoSkill(
         self._desk_enabled = threading.Event()
         self._desk_enabled.set()
         self._desk_thread: threading.Thread | None = None
+        self._bybit_tape = None
 
     def can_handle(self, context: RequestContext) -> bool:
         return is_crypto_command(context.raw_text)

@@ -44,6 +44,61 @@ from .indicators import BB_PERIOD, bollinger, closes_from_kline
 
 logger = logging.getLogger(__name__)
 
+_RETRYABLE = (
+    requests.Timeout,
+    requests.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def _is_transient_http(exc: BaseException) -> bool:
+    msg = str(exc)
+    return any(mark in msg for mark in ("bybit 429", "bybit 502", "bybit 503", "bybit 504", "bybit bad json"))
+
+
+def _parse_http(response: requests.Response, *, signed: bool = False) -> dict[str, Any]:
+    """HTTP + JSON. 502/битое тело — RuntimeError, не JSONDecodeError."""
+    if response.status_code in {401, 403} and signed:
+        raise RuntimeError("token rejected")
+    if response.status_code >= 400:
+        if signed:
+            snippet = (response.text or "")[:200].lower()
+            if any(mark in snippet for mark in ("permission", "api key", "invalid", "denied")):
+                raise RuntimeError("trade token")
+        raise RuntimeError(f"bybit {response.status_code}")
+    if not response.content:
+        return {}
+    try:
+        data = response.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"bybit bad json {response.status_code}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("bybit bad json")
+    return data
+
+
+def _retcode(data: dict[str, Any]) -> int:
+    try:
+        return int(data.get("retCode") or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("bybit bad retCode") from exc
+
+
+def _with_retry(op, *, attempts: int = 3, signed: bool = False) -> dict[str, Any]:
+    last: BaseException | None = None
+    for index in range(max(1, attempts)):
+        try:
+            return _parse_http(op(), signed=signed)
+        except _RETRYABLE as exc:
+            last = exc
+        except RuntimeError as exc:
+            if not _is_transient_http(exc):
+                raise
+            last = exc
+        if index + 1 < attempts:
+            time.sleep(0.4 * (2 ** index))
+    raise RuntimeError(f"bybit transient: {last}") from last
+
 
 def _is_encyclopedia(text: str) -> bool:
     return any(phrase in text for phrase in _ENCYCLOPEDIA)
@@ -138,21 +193,34 @@ class CryptoQuotesMixin:
 
     def _host(self) -> str:
         return _API_TEST if _testnet() else _API_PROD
-    def _public_get(self, path: str, params: dict[str, str], cache_key: str) -> dict[str, Any]:
+
+    def _quote_ttl(self, cache_sec: float | None = None) -> float:
+        if cache_sec is not None:
+            return float(cache_sec)
+        return float(getattr(self, "_quote_cache_sec", _CACHE_SEC))
+
+    def _public_get(
+        self,
+        path: str,
+        params: dict[str, str],
+        cache_key: str,
+        cache_sec: float | None = None,
+    ) -> dict[str, Any]:
+        ttl = self._quote_ttl(cache_sec)
         hit = self._cache.get(cache_key)
-        if hit and time.time() - hit[0] < _CACHE_SEC:
+        if ttl > 0 and hit and time.time() - hit[0] < ttl:
             return hit[1]
-        response = self._session.get(
-            f"{self._host()}{path}",
-            params=params,
-            timeout=6,
+        data = _with_retry(
+            lambda: self._session.get(
+                f"{self._host()}{path}",
+                params=params,
+                timeout=6,
+            )
         )
-        if response.status_code >= 400:
-            raise RuntimeError(f"bybit {response.status_code}")
-        data = response.json() if response.content else {}
-        if int(data.get("retCode") or 0) != 0:
+        if _retcode(data) != 0:
             raise RuntimeError(str(data.get("retMsg") or "bybit error"))
-        self._cache[cache_key] = (time.time(), data)
+        if ttl > 0:
+            self._cache[cache_key] = (time.time(), data)
         return data
 
     def _signed(self, method: str, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -180,21 +248,16 @@ class CryptoQuotesMixin:
             "Content-Type": "application/json",
         }
         url = f"{self._host()}{path}"
-        if method == "GET":
-            if payload:
-                url = f"{url}?{payload}"
-            response = self._session.get(url, headers=headers, timeout=8)
-        else:
-            response = self._session.post(url, data=body, headers=headers, timeout=8)
-        if response.status_code in {401, 403}:
-            raise RuntimeError("token rejected")
-        if response.status_code >= 400:
-            snippet = (response.text or "")[:200].lower()
-            if any(mark in snippet for mark in ("permission", "api key", "invalid", "denied")):
-                raise RuntimeError("trade token")
-            raise RuntimeError(f"bybit {response.status_code}")
-        data = response.json() if response.content else {}
-        code = int(data.get("retCode") or 0)
+        if method == "GET" and payload:
+            url = f"{url}?{payload}"
+
+        def op() -> requests.Response:
+            if method == "GET":
+                return self._session.get(url, headers=headers, timeout=8)
+            return self._session.post(url, data=body, headers=headers, timeout=8)
+
+        data = _with_retry(op, signed=True)
+        code = _retcode(data)
         if code != 0:
             msg = str(data.get("retMsg") or "")
             low = msg.lower()
@@ -278,15 +341,14 @@ class CryptoQuotesMixin:
 
     def _book(self, ticker: str) -> dict[str, float]:
         """Лучшие bid/ask без кэша — лимитную заявку ставим по свежей книге."""
-        response = self._session.get(
-            f"{self._host()}/v5/market/tickers",
-            params={"category": "spot", "symbol": self._symbol(ticker)},
-            timeout=6,
+        data = _with_retry(
+            lambda: self._session.get(
+                f"{self._host()}/v5/market/tickers",
+                params={"category": "spot", "symbol": self._symbol(ticker)},
+                timeout=6,
+            )
         )
-        if response.status_code >= 400:
-            raise RuntimeError(f"bybit {response.status_code}")
-        data = response.json() if response.content else {}
-        if int(data.get("retCode") or 0) != 0:
+        if _retcode(data) != 0:
             raise RuntimeError(str(data.get("retMsg") or "bybit error"))
         rows = (data.get("result") or {}).get("list") or []
         row = rows[0] if rows else {}

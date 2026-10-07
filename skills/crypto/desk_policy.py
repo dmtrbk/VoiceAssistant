@@ -47,6 +47,12 @@ BTC_DIP_DAY_PCT = -3.0
 BTC_DIP_EXIT_PCT = 1.1
 BTC_DIP_STOP_PCT = 15.0
 WATCH_MAX_TRADES_PER_HOUR = 2
+WATCH_PERIOD_CALM = 12 * 60
+WATCH_PERIOD_NEAR = 2 * 60
+WATCH_PERIOD_HOT = 60
+NEAR_TP_PCT = 0.35
+NEAR_SL_PCT = 3.0
+NEAR_MA_PCT = 0.4
 TRAIL_ARM_PCT = 5.0
 TRAIL_ALT_PCT = 8.0
 CHURN_COOLDOWN_HOURS = 12.0
@@ -314,17 +320,94 @@ def should_rebalance_leg(
     return drift_usd(current_value, target_value) >= band
 
 
+def watch_stream_tickers(
+    *,
+    held_values: dict[str, float],
+    pocket_open: bool,
+    min_usd: float = ALT_HELD_MIN_USD,
+) -> set[str]:
+    """Держанные ноги рукава выше пыли + SOL, если открыт карман."""
+    out = {
+        str(ticker).upper()
+        for ticker, value in (held_values or {}).items()
+        if str(ticker).upper() in DESK_ALT_SLEEVE and float(value or 0) >= float(min_usd)
+    }
+    if pocket_open:
+        out.add(BTC_DIP_TICKER)
+    return out
+
+
 def watch_rate_ok(
     watch_trades: list[float] | None,
     *,
     now: float | None = None,
     max_per_hour: int = WATCH_MAX_TRADES_PER_HOUR,
 ) -> bool:
-    """Не больше max_per_hour сделок дозора за последний час."""
+    """Не больше max_per_hour сделок дозора за последний час. Только входы, не стопы."""
     current = time.time() if now is None else float(now)
     cutoff = current - 3600.0
     recent = [float(ts) for ts in (watch_trades or []) if float(ts) >= cutoff]
     return len(recent) < max(0, int(max_per_hour))
+
+
+def watch_period_sec(
+    *,
+    legs: list[dict[str, Any]],
+    calm: int = WATCH_PERIOD_CALM,
+    near: int = WATCH_PERIOD_NEAR,
+    hot: int = WATCH_PERIOD_HOT,
+) -> int:
+    """12 мин спокойно; 2 мин у средней; 60 с у стопа или тейка кармана."""
+    period = int(calm)
+    for leg in legs:
+        px = float(leg.get("price") or 0)
+        ent = float(leg.get("entry") or 0)
+        if px <= 0 or ent <= 0:
+            continue
+        gain = (px / ent - 1.0) * 100.0
+        kind = str(leg.get("kind") or "alt")
+        if kind == "pocket":
+            if gain >= BTC_DIP_EXIT_PCT - NEAR_TP_PCT:
+                return int(hot)
+            if gain <= -BTC_DIP_STOP_PCT + NEAR_SL_PCT:
+                return int(hot)
+            continue
+        if gain <= -ALT_STOP_LOSS_PCT + NEAR_SL_PCT:
+            return int(hot)
+        ma = leg.get("ma")
+        if (
+            ma
+            and float(ma) > 0
+            and abs(px / float(ma) - 1.0) * 100.0 <= NEAR_MA_PCT
+            and gain >= ALT_EXIT_MIN_GAIN_PCT - 0.4
+        ):
+            period = min(period, int(near))
+    return period
+
+
+def watch_snapshot_line(
+    ticker: str,
+    *,
+    price: float,
+    entry: float,
+    ma: float | None = None,
+    kind: str = "alt",
+) -> str:
+    """Одна нога дозора: avg, цена, дистанция до стопа/тейка."""
+    name = str(ticker or "?").upper()
+    px = float(price or 0)
+    ent = float(entry or 0)
+    if px <= 0 or ent <= 0:
+        return f"{name} px={px:.4g} avg=?"
+    gain = (px / ent - 1.0) * 100.0
+    bits = [f"{name} px={px:.4g} avg={ent:.4g} {gain:+.2f}%"]
+    if kind == "pocket":
+        bits.append(f"до тейка {BTC_DIP_EXIT_PCT - gain:+.2f}пп до стопа {gain + BTC_DIP_STOP_PCT:.1f}пп")
+    elif ma and float(ma) > 0:
+        bits.append(f"MA {px / float(ma) - 1.0:+.2%} к выходу={gain >= ALT_EXIT_MIN_GAIN_PCT}")
+    else:
+        bits.append(f"до стопа {gain + ALT_STOP_LOSS_PCT:.1f}пп")
+    return " ".join(bits)
 
 
 def should_watch_take_profit(

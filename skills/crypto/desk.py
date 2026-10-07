@@ -7,7 +7,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable
 
 from . import common
 from .common import (
@@ -54,11 +55,19 @@ from .desk_policy import (
     trail_pct_for,
     update_trail_leg,
     update_exclusions,
+    watch_period_sec,
     watch_rate_ok,
+    watch_snapshot_line,
+    watch_stream_tickers,
+    WATCH_PERIOD_CALM,
+    WATCH_PERIOD_NEAR,
 )
 from . import journal as crypto_journal
 
 logger = logging.getLogger(__name__)
+
+_WATCH_FETCH_WORKERS = 6
+_WATCH_ERROR_BACKOFF_SEC = 30.0
 
 
 def _wants_advice(text: str) -> bool:
@@ -70,6 +79,25 @@ def next_desk_at(state: dict[str, Any] | None, now: float) -> float:
     if state is None:
         return now
     return max(now, float(state.get("desk_ts") or 0) + _DESK_PERIOD_SEC)
+
+
+def next_watch_at(period: float, now: float) -> float:
+    """Следующий тик по сетке стены, работа цикла период не сдвигает."""
+    period = max(1.0, float(period))
+    return now - (now % period) + period
+
+
+def _cycle_error_kind(exc: BaseException) -> str:
+    text = str(exc).lower()
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "502" in text or "503" in text or "504" in text:
+        return "bybit 5xx"
+    if "bad json" in text or "json" in text:
+        return "json"
+    if "transient" in text:
+        return "сеть"
+    return "ошибка"
 
 
 class CryptoDeskMixin:
@@ -388,6 +416,72 @@ class CryptoDeskMixin:
             return f"{result} {why}".strip()
         return result
 
+    def _set_watch_tempo(self, period: int) -> None:
+        self._watch_period_sec = int(period)
+        self._quote_cache_sec = 0.0 if period <= WATCH_PERIOD_NEAR else common._CACHE_SEC
+
+    def _ensure_tape(self) -> None:
+        tape = getattr(self, "_bybit_tape", None)
+        if tape is not None:
+            return
+        from .stream import BybitPublicTape
+
+        tape = BybitPublicTape()
+        self._bybit_tape = tape
+        state = read_alloc_state() or {}
+        seed = {t for t in (state.get("alloc") or {}) if t in DESK_ALT_SLEEVE}
+        if float(read_btc_dip().get("qty") or 0) > 0:
+            seed.add(BTC_DIP_TICKER)
+        tape.set_symbols(seed)
+        tape.start()
+
+    def _tape_quote(self, ticker: str) -> dict[str, float] | None:
+        tape = getattr(self, "_bybit_tape", None)
+        if tape is None:
+            return None
+        return tape.quote(ticker)
+
+    def _sync_tape(
+        self,
+        positions: dict[str, dict[str, Any]],
+        legs: list[dict[str, Any]],
+    ) -> None:
+        tape = getattr(self, "_bybit_tape", None)
+        if tape is None:
+            return
+        held_values = {
+            ticker: float(pos.get("value") or 0)
+            for ticker, pos in positions.items()
+            if ticker in DESK_ALT_SLEEVE and not self._is_owner_position(ticker)
+        }
+        pocket_open = float(read_btc_dip().get("qty") or 0) > 0
+        symbols = watch_stream_tickers(held_values=held_values, pocket_open=pocket_open)
+        tape.set_symbols(symbols)
+        tape.set_legs([leg for leg in legs if str(leg.get("ticker") or "").upper() in symbols])
+
+    def _gather_map(self, fn: Callable[[str], Any], keys: set[str] | list[str], *, label: str) -> dict[str, Any]:
+        items = [str(key) for key in keys]
+        if not items:
+            return {}
+        if len(items) == 1:
+            key = items[0]
+            try:
+                return {key: fn(key)}
+            except Exception as exc:
+                logger.warning("[Крипта] дозор %s %s: %s", label, key, exc)
+                return {}
+        out: dict[str, Any] = {}
+        workers = min(_WATCH_FETCH_WORKERS, len(items))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(fn, key): key for key in items}
+            for fut in as_completed(futs):
+                key = futs[fut]
+                try:
+                    out[key] = fut.result()
+                except Exception as exc:
+                    logger.warning("[Крипта] дозор %s %s: %s", label, key, exc)
+        return out
+
     def _desk_watch(self, silent: bool = True) -> str:
         with common._TRADE_LOCK:
             try:
@@ -404,10 +498,9 @@ class CryptoDeskMixin:
             return "нет цели"
         watch_trades = list(state.get("watch_trades") or [])
         now = time.time()
-        if not watch_rate_ok(watch_trades, now=now):
-            if silent:
-                logger.info("[Крипта] дозор: лимит сделок за час")
-            return "лимит дозора"
+        allow_entries = watch_rate_ok(watch_trades, now=now)
+        if not allow_entries:
+            logger.info("[Крипта] дозор: лимит входов — проверяю только выходы")
         alloc = dict(state.get("alloc") or {})
         btc7, btc_day = self._btc_regime()
         if is_risk_off(btc_chg_7=btc7, btc_chg_day=btc_day):
@@ -426,13 +519,11 @@ class CryptoDeskMixin:
 
         if not self._api_key:
             return "ключа нет"
-        result = self._watch_react(alloc)
+        result = self._watch_react(alloc, allow_entries=allow_entries)
         if result != "дозор: без сделок":
             watch_trades.append(now)
             write_alloc_state(alloc, why=str(state.get("why") or ""), watch_trades=watch_trades)
             logger.info("[Крипта] дозор: %s", result)
-        elif silent:
-            logger.info("[Крипта] дозор: без сделок")
         return result
 
     def _sync_exclusions(self, rows: list[dict[str, Any]]) -> set[str]:
@@ -446,30 +537,52 @@ class CryptoDeskMixin:
             )
         return updated
 
-    def _watch_react(self, target_alloc: dict[str, float]) -> str:
+    def _watch_react(self, target_alloc: dict[str, float], *, allow_entries: bool = True) -> str:
         """Выход альта → новые альты. Меняет target_alloc на месте."""
         for ticker in list(target_alloc):
             if ticker not in DESK_ALT_SLEEVE:
                 target_alloc.pop(ticker, None)
         excluded = _read_ticker_set(common._EXCLUDED_PATH) or set()
-        cash, positions_list = self._wallet()
+        try:
+            cash, positions_list = self._wallet()
+        except Exception as exc:
+            logger.warning("[Крипта] дозор кошелёк: %s", exc)
+            raise
         positions = {item["ticker"]: item for item in positions_list}
         self._ensure_desk_bought(set(positions.keys()))
         equity = max(cash + sum(item["value"] for item in positions_list), 1.0)
         min_trade = _min_trade_usd(equity)
         prices = {item["ticker"]: float(item["price"] or 0) for item in positions_list}
         day_chgs: dict[str, float | None] = {}
-        for ticker in set(target_alloc) | set(positions) | {BTC_DIP_TICKER}:
+
+        def _one_px(ticker: str) -> tuple[float, float]:
+            px = self._ticker(ticker)
+            return float(px.get("price") or 0), float(px.get("chg") or 0)
+
+        want_px = set(target_alloc) | set(positions) | {BTC_DIP_TICKER}
+        fetched_px: dict[str, tuple[float, float | None]] = {}
+        need_rest: set[str] = set()
+        for ticker in want_px:
+            live = self._tape_quote(ticker)
+            if live and live.get("price", 0) > 0:
+                fetched_px[ticker] = (float(live["price"]), live.get("chg"))
+            else:
+                need_rest.add(ticker)
+        if need_rest:
+            fetched_px.update(self._gather_map(_one_px, need_rest, label="px"))
+        for ticker in want_px:
             need_px = ticker not in prices or prices[ticker] <= 0
-            try:
-                px = self._ticker(ticker)
-                if need_px:
-                    prices[ticker] = float(px.get("price") or 0)
-                day_chgs[ticker] = float(px.get("chg") or 0)
-            except Exception:
+            got = fetched_px.get(ticker)
+            if got is None:
+                logger.warning("[Крипта] дозор px %s: нет котировки", ticker)
                 if need_px:
                     prices[ticker] = 0.0
                 day_chgs[ticker] = None
+                continue
+            live, chg = got
+            if need_px:
+                prices[ticker] = live
+            day_chgs[ticker] = chg
         relevant = set(positions) | set(target_alloc)
         target_values = {
             ticker: equity * (target_alloc.get(ticker, 0.0) / 100.0) for ticker in relevant
@@ -543,6 +656,8 @@ class CryptoDeskMixin:
             new_trail.pop(ticker, None)
 
         alt_bands: dict[str, dict[str, float] | None] = {}
+        fetched_bands = self._gather_map(self._alt_bands, DESK_ALT_SLEEVE, label="полосы")
+        alt_bands.update(fetched_bands)
 
         def bands_for(ticker: str) -> dict[str, float] | None:
             if ticker not in alt_bands:
@@ -604,15 +719,13 @@ class CryptoDeskMixin:
             and current_values.get(t, 0.0) >= ALT_HELD_MIN_USD
         }
         taken = {t for t in target_alloc if t in DESK_ALT_SLEEVE} | held_alts
-        if len(taken) < ALT_MAX_NAMES:
+        if allow_entries and len(taken) < ALT_MAX_NAMES:
             try:
                 blocked = set(crypto_journal.cooldown_tickers(CHURN_COOLDOWN_HOURS))
             except Exception:
                 blocked = set()
             blocked |= trail_sold
             blocked |= {t for t in positions if self._is_owner_position(t)}
-            for t in DESK_ALT_SLEEVE - taken - blocked:
-                bands_for(t)
             slot = alt_slot_pct()
             for t in pick_watch_alt_entries(
                 alt_bands,
@@ -631,49 +744,98 @@ class CryptoDeskMixin:
                     slot,
                 )
 
-        buys = []
-        for ticker in target_alloc:
-            if ticker in trail_sold:
-                continue
-            need = target_values.get(ticker, 0) - current_values.get(ticker, 0)
-            is_alt = ticker in DESK_ALT_SLEEVE
-            if not should_watch_dip_buy(
-                ticker=ticker,
-                day_chg=day_chgs.get(ticker),
-                current_value=current_values.get(ticker, 0),
-                target_value=target_values.get(ticker, 0),
-                min_trade_usd=min_trade,
-                bb_z=(bands_for(ticker) or {}).get("z") if is_alt else None,
-                excluded=excluded,
-            ):
-                continue
-            # Альт берём слотом сразу.
-            quote = max(0.0, need) if is_alt else 0.0
-            if quote >= _MIN_QUOTE:
-                buys.append((ticker, quote))
-        buys.sort(key=lambda item: item[1], reverse=True)
-        for ticker, need in buys:
-            if cash < _MIN_QUOTE:
-                break
-            quote = min(need, cash)
-            if quote < _MIN_QUOTE:
-                continue
-            try:
-                parts.append(self._place_order(ticker, "Buy", quote_usdt=quote, maker=True))
-                cash -= quote
-                time.sleep(0.4)
-            except Exception as exc:
-                logger.warning("[Крипта] дозор покупка %s: %s", ticker, exc)
+        if allow_entries:
+            buys = []
+            for ticker in target_alloc:
+                if ticker in trail_sold:
+                    continue
+                need = target_values.get(ticker, 0) - current_values.get(ticker, 0)
+                is_alt = ticker in DESK_ALT_SLEEVE
+                if not should_watch_dip_buy(
+                    ticker=ticker,
+                    day_chg=day_chgs.get(ticker),
+                    current_value=current_values.get(ticker, 0),
+                    target_value=target_values.get(ticker, 0),
+                    min_trade_usd=min_trade,
+                    bb_z=(bands_for(ticker) or {}).get("z") if is_alt else None,
+                    excluded=excluded,
+                ):
+                    continue
+                # Альт берём слотом сразу.
+                quote = max(0.0, need) if is_alt else 0.0
+                if quote >= _MIN_QUOTE:
+                    buys.append((ticker, quote))
+            buys.sort(key=lambda item: item[1], reverse=True)
+            for ticker, need in buys:
+                if cash < _MIN_QUOTE:
+                    break
+                quote = min(need, cash)
+                if quote < _MIN_QUOTE:
+                    continue
+                try:
+                    parts.append(self._place_order(ticker, "Buy", quote_usdt=quote, maker=True))
+                    cash -= quote
+                    time.sleep(0.4)
+                except Exception as exc:
+                    logger.warning("[Крипта] дозор покупка %s: %s", ticker, exc)
         dip_phrase = self._trade_btc_dip(
             day_chg=day_chgs.get(BTC_DIP_TICKER),
             positions=positions,
             price=float(prices.get(BTC_DIP_TICKER) or 0),
             blocked=BTC_DIP_TICKER in trail_sold,
             equity=equity,
+            allow_entry=allow_entries,
         )
         if dip_phrase:
             parts.append(dip_phrase)
+        legs: list[dict[str, Any]] = []
+        snap: list[str] = []
+        for ticker, pos in positions.items():
+            if ticker not in DESK_ALT_SLEEVE or self._is_owner_position(ticker):
+                continue
+            sleeve_value = float(current_values.get(ticker) or pos.get("value") or 0)
+            if sleeve_value < ALT_HELD_MIN_USD:
+                continue
+            price = float(prices.get(ticker) or pos.get("price") or 0)
+            entry = float(avg_costs.get(ticker) or 0) or float(
+                (new_trail.get(ticker) or {}).get("entry") or 0
+            )
+            bands = bands_for(ticker)
+            ma = float(bands["ma"]) if bands and bands.get("ma") else None
+            if price > 0 and entry > 0:
+                legs.append({
+                    "ticker": ticker,
+                    "price": price,
+                    "entry": entry,
+                    "ma": ma,
+                    "kind": "alt",
+                })
+                snap.append(watch_snapshot_line(ticker, price=price, entry=entry, ma=ma, kind="alt"))
+        dip = read_btc_dip()
+        dip_entry = float(dip.get("entry") or 0)
+        dip_px = float(prices.get(BTC_DIP_TICKER) or 0)
+        if float(dip.get("qty") or 0) > 0 and dip_px > 0 and dip_entry > 0:
+            legs.append({
+                "ticker": BTC_DIP_TICKER,
+                "price": dip_px,
+                "entry": dip_entry,
+                "kind": "pocket",
+            })
+            snap.append(
+                watch_snapshot_line(
+                    BTC_DIP_TICKER, price=dip_px, entry=dip_entry, kind="pocket"
+                )
+            )
+        self._sync_tape(positions, legs)
+        period = watch_period_sec(legs=legs)
+        self._set_watch_tempo(period)
         if not parts:
+            for line in snap:
+                logger.info("[Крипта] дозор %s", line)
+            if period < WATCH_PERIOD_CALM:
+                logger.info("[Крипта] дозор: без сделок, интервал %dс", period)
+            else:
+                logger.info("[Крипта] дозор: без сделок")
             return "дозор: без сделок"
         return "дозор: " + " ".join(parts)
 
@@ -685,6 +847,7 @@ class CryptoDeskMixin:
         price: float,
         blocked: bool,
         equity: float = 0.0,
+        allow_entry: bool = True,
     ) -> str | None:
         """Карман SOL на долю счёта. Уже открытый не добираем, слот рукава не трогаем."""
         ticker = BTC_DIP_TICKER
@@ -709,7 +872,7 @@ class CryptoDeskMixin:
                 price,
             )
             return phrase
-        if blocked or not btc_dip_should_buy(day_chg=day_chg, qty=0):
+        if blocked or not allow_entry or not btc_dip_should_buy(day_chg=day_chg, qty=0):
             return None
         budget = btc_dip_quote(equity)
         free_cash, _held_now = self._cash_and_held()
@@ -898,6 +1061,10 @@ class CryptoDeskMixin:
             logger.warning("[Крипта] дневной отчёт: %s", exc)
 
     def _desk_loop(self) -> None:
+        try:
+            self._ensure_tape()
+        except Exception as exc:
+            logger.warning("[Крипта] лента старт: %s", exc)
         self._desk_stop.wait(90)
         next_desk = 0.0
         next_watch = 0.0
@@ -907,31 +1074,55 @@ class CryptoDeskMixin:
                     return
                 continue
             now = time.time()
+            period = float(getattr(self, "_watch_period_sec", _WATCH_PERIOD_SEC) or _WATCH_PERIOD_SEC)
             if next_desk <= 0:
                 next_desk = next_desk_at(read_alloc_state(), now)
-                next_watch = now + _WATCH_PERIOD_SEC
+                next_watch = next_watch_at(period, now)
             wake_at = min(next_desk, next_watch)
+            tape = getattr(self, "_bybit_tape", None)
             while time.time() < wake_at:
                 remaining = min(2.0, wake_at - time.time())
                 if remaining <= 0:
                     break
-                if self._desk_stop.wait(remaining):
+                if tape is not None:
+                    fired = tape.wait(remaining)
+                    if self._desk_stop.is_set():
+                        return
+                    if fired:
+                        break
+                elif self._desk_stop.wait(remaining):
                     return
                 if not self._desk_ready():
                     break
             if not self._desk_ready():
                 continue
             now = time.time()
+            tape_why = tape.consume_signals() if tape is not None else ""
             try:
                 self._reload_env()
                 if now >= next_desk:
                     self._trade_auto(silent=True)
                     self._maybe_daily_report()
                     next_desk = time.time() + _DESK_PERIOD_SEC
-                    next_watch = time.time() + _WATCH_PERIOD_SEC
-                elif now >= next_watch:
+                    next_watch = next_watch_at(
+                        getattr(self, "_watch_period_sec", _WATCH_PERIOD_SEC), time.time()
+                    )
+                elif now >= next_watch or tape_why:
+                    t0 = time.time()
                     self._desk_watch(silent=True)
-                    next_watch = time.time() + _WATCH_PERIOD_SEC
+                    dt = time.time() - t0
+                    period = float(getattr(self, "_watch_period_sec", _WATCH_PERIOD_SEC))
+                    why = "сетка" if now >= next_watch else tape_why or "лента"
+                    logger.info(
+                        "[Крипта] дозор цикл %.1fс, след. через %dс (%s)",
+                        dt,
+                        int(period),
+                        why,
+                    )
+                    next_watch = next_watch_at(period, time.time())
             except Exception as exc:
-                logger.warning("[Крипта] фоновый цикл: %s", exc)
-                next_watch = time.time() + _WATCH_PERIOD_SEC
+                logger.warning("[Крипта] фоновый цикл (%s): %s", _cycle_error_kind(exc), exc)
+                next_watch = time.time() + _WATCH_ERROR_BACKOFF_SEC
+        tape = getattr(self, "_bybit_tape", None)
+        if tape is not None:
+            tape.stop()

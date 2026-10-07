@@ -1,7 +1,8 @@
+import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from skill_settings import (
     CRYPTO_AUTO_TRADE_KEY,
@@ -214,6 +215,30 @@ class TestCryptoSkill(unittest.TestCase):
 
         self.assertEqual(crypto_common._DESK_PERIOD_SEC, 6 * 60 * 60)
         self.assertEqual(crypto_common._WATCH_PERIOD_SEC, 12 * 60)
+
+    def test_http_session_pool(self):
+        adapter = self.skill._session.get_adapter("https://api.bybit.com")
+        self.assertGreaterEqual(adapter._pool_maxsize, 16)
+        self.assertGreaterEqual(adapter._pool_connections, 16)
+
+    def test_public_get_retries_502(self):
+        bad = Mock(status_code=502, content=b"gateway", text="gateway")
+        good = Mock(status_code=200, content=b'{"retCode":0,"result":{}}')
+        good.json.return_value = {"retCode": 0, "result": {}}
+        self.skill._session.get = Mock(side_effect=[bad, good])
+        with patch("skills.crypto.quotes.time.sleep"):
+            data = self.skill._public_get("/v5/market/tickers", {"category": "spot"}, "retry502")
+        self.assertEqual(data["retCode"], 0)
+        self.assertEqual(self.skill._session.get.call_count, 2)
+
+    def test_public_get_bad_json(self):
+        resp = Mock(status_code=200, content=b"<html>")
+        resp.json.side_effect = json.JSONDecodeError("x", "doc", 0)
+        self.skill._session.get = Mock(return_value=resp)
+        with patch("skills.crypto.quotes.time.sleep"):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.skill._public_get("/v5/x", {}, "bad-json")
+        self.assertIn("json", str(ctx.exception).lower())
 
     def test_voice_trade_sell_min_not_dust(self):
         spoken: list[str] = []

@@ -347,11 +347,50 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.btc_dip_exit_reason(price=85.0, entry=100.0), "стоп")
         self.assertIsNone(policy.btc_dip_exit_reason(price=100.4, entry=100.0))
 
+    def test_watch_stream_tickers_skips_dust(self):
+        self.assertEqual(
+            policy.watch_stream_tickers(
+                held_values={"BNB": 80.0, "MNT": 0.3, "BTC": 10.0},
+                pocket_open=False,
+            ),
+            {"BNB"},
+        )
+        self.assertEqual(
+            policy.watch_stream_tickers(held_values={"BNB": 80.0}, pocket_open=True),
+            {"BNB", "SOL"},
+        )
+
     def test_watch_rate_limit(self):
         now = time.time()
         self.assertTrue(policy.watch_rate_ok([], now=now))
         self.assertTrue(policy.watch_rate_ok([now - 10, now - 20], now=now, max_per_hour=3))
         self.assertFalse(policy.watch_rate_ok([now - 10, now - 20], now=now, max_per_hour=2))
+
+    def test_watch_period_sec_and_snapshot(self):
+        self.assertEqual(policy.watch_period_sec(legs=[]), policy.WATCH_PERIOD_CALM)
+        self.assertEqual(
+            policy.watch_period_sec(legs=[{"price": 100.8, "entry": 100.0, "kind": "pocket"}]),
+            policy.WATCH_PERIOD_HOT,
+        )
+        self.assertEqual(
+            policy.watch_period_sec(legs=[{"price": 87.0, "entry": 100.0, "kind": "alt"}]),
+            policy.WATCH_PERIOD_HOT,
+        )
+        self.assertEqual(
+            policy.watch_period_sec(
+                legs=[{"price": 101.2, "entry": 100.0, "ma": 101.3, "kind": "alt"}]
+            ),
+            policy.WATCH_PERIOD_NEAR,
+        )
+        line = policy.watch_snapshot_line("SOL", price=101.0, entry=100.0, kind="pocket")
+        self.assertIn("avg=100", line)
+        self.assertIn("до тейка", line)
+
+    def test_next_watch_at_aligns_to_wall(self):
+        from skills.crypto.desk import next_watch_at
+
+        self.assertEqual(next_watch_at(720, 1000.0), 1440.0)
+        self.assertEqual(next_watch_at(60, 1445.0), 1500.0)
 
     def test_trail_arm_and_stop(self):
         # +10% от входа → armed; high 110, trail 6% → stop 103.4; цена 103 → hit
@@ -894,6 +933,79 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertAlmostEqual(buys[0][1], 100.0 * policy.alt_slot_pct() / 100.0, places=1)
         self.assertEqual(state["alloc"].get("LINK"), policy.alt_slot_pct())
 
+    def test_watch_rate_limit_still_exits_alt(self):
+        from skills.crypto import common as crypto_common
+
+        now = time.time()
+        crypto_common.write_alloc_state(
+            {"XRP": 11.7}, why="test", watch_trades=[now, now - 10]
+        )
+        self.bands = {"XRP": {"z": -3.0, "ma": 2.4}}
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, base_qty))
+            return f"ok {ticker}"
+
+        pos = [{"ticker": "XRP", "qty": 20.0, "value": 33.0, "price": 1.65, "name": "XRP"}]
+        with (
+            patch.object(self.skill, "_wallet", return_value=(60.0, pos)),
+            patch.object(self.skill, "_cash_and_held", return_value=(60.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_btc_regime", return_value=(2.0, 1.0)),
+            patch.object(self.skill, "_ticker", return_value={"price": 1.65, "chg": 0.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch.object(self.skill, "_api_key", "x"),
+            patch("skills.crypto.journal.open_avg_costs", return_value={"XRP": 2.0}),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"XRP"}
+            result = self.skill._desk_watch_locked(silent=True)
+        self.assertIn(("XRP", "Sell", 20.0), placed, result)
+
+    def test_watch_rate_limit_blocks_new_entry(self):
+        from skills.crypto import common as crypto_common
+
+        now = time.time()
+        crypto_common.write_alloc_state(
+            {"BTC": 40.0}, why="test", watch_trades=[now, now - 10]
+        )
+        self.bands = {"LINK": {"z": -2.9, "ma": 20.0}}
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(self.skill, "_wallet", return_value=(100.0, [])),
+            patch.object(self.skill, "_cash_and_held", return_value=(100.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_btc_regime", return_value=(2.0, 1.0)),
+            patch.object(self.skill, "_ticker", return_value={"price": 18.0, "chg": 0.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch.object(self.skill, "_api_key", "x"),
+            patch("skills.crypto.journal.open_avg_costs", return_value={}),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = set()
+            result = self.skill._desk_watch_locked(silent=True)
+        self.assertFalse(placed, result)
+        self.assertNotIn("LINK", crypto_common.read_alloc_state()["alloc"])
+
+    def test_watch_sets_hot_period_near_stop(self):
+        # −13% ещё не стоп (−15%), но уже горячая зона.
+        self.bands = {"XRP": {"z": -2.0, "ma": 2.2}}
+        pos = [{"ticker": "XRP", "qty": 20.0, "value": 34.8, "price": 1.74, "name": "XRP"}]
+        placed, _result, _state = self._watch_alt(
+            price=1.74, entry=2.0, alloc={"XRP": 11.7}, positions=pos
+        )
+        self.assertFalse(any(t == "XRP" and side == "Sell" for t, side, *_ in placed))
+        self.assertEqual(self.skill._watch_period_sec, policy.WATCH_PERIOD_HOT)
+        self.assertEqual(self.skill._quote_cache_sec, 0.0)
+
 
 class TestMakerOrders(unittest.TestCase):
     """Лимитные заявки стола: maker 0.1% вместо taker 0.18%, остаток добираем рыночной."""
@@ -1142,6 +1254,49 @@ class TestBollinger(unittest.TestCase):
 
         rows = [["3", "0", "0", "0", "3.0"], ["2", "0", "0", "0", "2.0"], ["1", "0", "0", "0", "1.0"]]
         self.assertEqual(closes_from_kline(rows), [1.0, 2.0, 3.0])
+
+
+class TestBybitTape(unittest.TestCase):
+    def test_topics_and_hot_edge(self):
+        from skills.crypto.stream import BybitPublicTape, stream_topics
+
+        self.assertEqual(
+            stream_topics({"SOL", "BNB"}),
+            ["tickers.BNBUSDT", "kline.240.BNBUSDT", "tickers.SOLUSDT", "kline.240.SOLUSDT"],
+        )
+        tape = BybitPublicTape()
+        tape.set_legs([{"ticker": "SOL", "entry": 100.0, "price": 100.0, "kind": "pocket"}])
+        tape.apply_message(
+            {
+                "topic": "tickers.SOLUSDT",
+                "data": {"symbol": "SOLUSDT", "lastPrice": "100.80", "price24hPcnt": "-0.016"},
+            }
+        )
+        q = tape.quote("SOL")
+        self.assertIsNotNone(q)
+        self.assertAlmostEqual(q["price"], 100.8)
+        self.assertAlmostEqual(q["chg"], -1.6)
+        self.assertEqual(tape.consume_signals(), "зона")
+        tape.apply_message(
+            {
+                "topic": "tickers.SOLUSDT",
+                "data": {"symbol": "SOLUSDT", "lastPrice": "100.85"},
+            }
+        )
+        self.assertEqual(tape.consume_signals(), "")
+
+    def test_kline_confirm_wakes(self):
+        from skills.crypto.stream import BybitPublicTape
+
+        tape = BybitPublicTape()
+        tape.apply_message(
+            {"topic": "kline.240.BNBUSDT", "data": [{"confirm": False, "close": "1"}]}
+        )
+        self.assertEqual(tape.consume_signals(), "")
+        tape.apply_message(
+            {"topic": "kline.240.BNBUSDT", "data": [{"confirm": True, "close": "1"}]}
+        )
+        self.assertEqual(tape.consume_signals(), "свеча")
 
 
 if __name__ == "__main__":

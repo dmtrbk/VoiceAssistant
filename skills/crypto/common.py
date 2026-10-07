@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from skills.text_utils import plural as _plural
 from skills.utils import send_telegram_notification, telegram_configured
@@ -27,7 +28,8 @@ _API_TEST = "https://api-testnet.bybit.com"
 _QUOTE = "USDT"
 _CACHE_SEC = 25.0
 _DESK_PERIOD_SEC = 6 * 60 * 60  # полный скор + ребаланс
-_WATCH_PERIOD_SEC = 12 * 60  # дозор: TP / risk-off / добор ядра к сохранённой цели
+_WATCH_PERIOD_SEC = 12 * 60  # базовый дозор: стоп / тейк / новые альты к сохранённой цели
+_HTTP_POOL = 16  # параллельные тикеры/полосы дозора + голос на одной Session
 _DEFAULT_WATCH = ("BTC", "ETH")
 _STABLES = frozenset({"USDT", "USDC", "DAI", "FDUSD", "USDE"})
 _MIN_QUOTE = 5.0
@@ -146,6 +148,21 @@ _GECKO_IDS = {
 _desk_loop_started = False
 _desk_init_lock = threading.Lock()
 _TRADE_LOCK = threading.RLock()
+
+
+def make_http_session() -> requests.Session:
+    """Общий HTTPS-пул: дозор бьёт в Bybit пачкой, голос не ждёт свободный слот."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": "VoiceAssistant/1.0"})
+    adapter = HTTPAdapter(
+        pool_connections=_HTTP_POOL,
+        pool_maxsize=_HTTP_POOL,
+        max_retries=0,
+        pool_block=False,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 def _format_pct(value: float) -> str:
     rounded = round(value, 1)
     if abs(rounded - int(rounded)) < 0.05:

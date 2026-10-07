@@ -7,5 +7,6 @@ groq==1.6.0
 opencv-python==5.0.0.93
 Wikipedia-API==0.16.0
 requests==2.34.2
+websocket-client==1.8.0
 yeelight==0.7.16
 python-miio==0.5.12
