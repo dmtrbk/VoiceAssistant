@@ -29,11 +29,6 @@ from .wikipedia import WikipediaSkill
 from .site_apps import SiteAppsSkill
 from .browser_media import BrowserMediaSkill
 
-try:
-    from .katya import KatyaSkill
-except ImportError:
-    KatyaSkill = None
-
 system_skill = SystemSkill()
 security_skill = SecuritySkill()
 ai_chat_skill = AIChatSkill()
@@ -62,7 +57,6 @@ image_gen_skill = ImageGenSkill()
 wikipedia_skill = WikipediaSkill()
 site_apps_skill = SiteAppsSkill()
 browser_media_skill = BrowserMediaSkill()
-katya_skill = KatyaSkill() if KatyaSkill is not None else None
 
 # Приоритет: узкие навыки, затем NLU (прощание / монетка), затем Groq.
 # Мелкий разговор (привет, как дела) не в NLU — его забирает Groq.
@@ -93,7 +87,6 @@ ALL_SKILLS = [
     site_apps_skill,  # YouTube / TikTok и другие PWA до системы
     telegram_skill,
     system_skill,
-    *([katya_skill] if katya_skill is not None else []),  # после команд, до болтовни
     local_nlu_skill,
     ai_chat_skill,
 ]

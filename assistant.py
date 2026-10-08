@@ -855,9 +855,6 @@ def main():
                     dispatch_phrase(phrase)
                 else:
                     speak_activation()
-        elif phrase and commands.wakes_without_name(phrase):
-            wake_session()
-            dispatch_phrase(phrase)
 
     def refine_once(captured_audio: bytes, vosk_text: str, wake: str | None, epoch: int) -> None:
         # Без thinking монитор внимания успел бы усыпить сессию прямо на уточнении.

@@ -71,22 +71,6 @@ def _match_narrow_skill(context: RequestContext):
     return None, disabled
 
 
-def wakes_without_name(text: str) -> bool:
-    """Навык просит разбудить сессию фразой без имени ассистента."""
-    clean = (text or "").lower().strip()
-    if not clean:
-        return False
-    for skill in ALL_SKILLS:
-        if not is_skill_enabled(skill):
-            continue
-        try:
-            if skill.hears_without_wake(clean):
-                return True
-        except Exception as e:
-            logging.error(f"[Маршрутизатор] Ошибка hears_without_wake у {skill.__class__.__name__}: {e}")
-    return False
-
-
 def _hush_remote_speech(text: str, channel: str) -> None:
     """Telegram/CLI: сразу гасим Piper, даже если фразу потом заберёт игра."""
     if channel == "voice":
