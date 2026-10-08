@@ -45,7 +45,7 @@ _SYSTEM = (
 
 def collect_signal_rows(skill: StocksSkill, limit: int = _SIGNAL_LIMIT) -> list[dict[str, Any]]:
     ranked = sorted(
-        skill._fetch_buy_signals(),
+        skill._fetch_buy_signals() or [],
         key=lambda sig: _signal_weight(sig.get("probability")),
         reverse=True,
     )

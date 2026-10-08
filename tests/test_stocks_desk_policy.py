@@ -321,6 +321,45 @@ class TestStocksDeskRules(unittest.TestCase):
         reb.assert_called_once()
         self.assertEqual(reb.call_args[0][0], {"SBER": 90.0})
 
+    def test_signals_error_is_not_empty_signals(self):
+        with patch.object(self.skill, "_post", side_effect=RuntimeError("http 500")):
+            self.assertIsNone(self.skill._fetch_buy_signals())
+            self.assertIsNone(self.skill._desk_choose([{"ticker": "SBER", "price": 300.0}], equity=20_000))
+
+    def test_full_desk_does_nothing_without_signals(self):
+        write_alloc_state({"SBER": 90.0}, why="SBER 90%")
+        with (
+            patch.object(self.skill, "_desk_candidates", return_value=[{"ticker": "SBER", "price": 300.0}]),
+            patch.object(self.skill, "_equity_estimate", return_value=100_000.0),
+            patch.object(self.skill, "_imoex_regime", return_value=(0.5, 0.1)),
+            patch.object(self.skill, "_fetch_buy_signals", return_value=[]),
+            patch.object(self.skill, "_market_open", return_value=True),
+            patch.object(self.skill, "_rebalance_portfolio") as reb,
+            patch.object(self.skill, "_place_order") as order,
+        ):
+            out = self.skill._trade_auto_locked(silent=True)
+            watch = self.skill._desk_watch_locked(silent=True)
+        reb.assert_not_called()
+        order.assert_not_called()
+        self.assertIn("ничего не делаю", out)
+        self.assertEqual(read_alloc_state()["alloc"], {})
+        self.assertIn("без сделок", watch)
+
+    def test_full_desk_keeps_target_when_signals_fail(self):
+        write_alloc_state({"NVTK": 40.0, "SBER": 50.0}, why="NVTK 40%, SBER 50%")
+        with (
+            patch.object(self.skill, "_desk_candidates", return_value=[{"ticker": "SBER", "price": 300.0}]),
+            patch.object(self.skill, "_equity_estimate", return_value=100_000.0),
+            patch.object(self.skill, "_imoex_regime", return_value=(0.5, 0.1)),
+            patch.object(self.skill, "_fetch_buy_signals", return_value=None),
+            patch.object(self.skill, "_market_open", return_value=True),
+            patch.object(self.skill, "_rebalance_portfolio") as reb,
+        ):
+            out = self.skill._trade_auto_locked(silent=True)
+        reb.assert_not_called()
+        self.assertIn("недоступны", out)
+        self.assertEqual(read_alloc_state()["alloc"], {"NVTK": 40.0, "SBER": 50.0})
+
     def test_exits_stop_sells_desk_position_and_skips_owner(self):
         self.skill._desk_bought = {"SBER"}
         self.skill._desk_bought_ready = True

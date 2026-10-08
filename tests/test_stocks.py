@@ -170,13 +170,8 @@ class TestStocks(unittest.TestCase):
         self.assertEqual(_min_trade_rub(10_000), 1000)
         self.assertEqual(_min_trade_rub(100_000), 2000)
 
-    def test_fallback_uses_available_ticker(self):
-        self.assertEqual(self.skill._fallback_allocation([{"ticker": "VTBR"}]), {"VTBR": 100.0})
-        self.assertEqual(
-            self.skill._fallback_allocation([{"ticker": "TMOS"}, {"ticker": "VTBR"}]),
-            {"VTBR": 100.0},
-        )
-        self.assertEqual(self.skill._fallback_allocation([{"ticker": "TMOS"}]), {})
+    def test_filter_buy_alloc_all_blocked_is_empty(self):
+        self.assertEqual(self.skill._filter_buy_alloc({"TMOS": 100.0}, [{"ticker": "VTBR"}]), {})
 
     def test_filter_buy_alloc_drops_tmos_and_renormalizes(self):
         cleaned = self.skill._filter_buy_alloc(
@@ -370,11 +365,11 @@ class TestStocks(unittest.TestCase):
             alloc = self.skill._desk_choose(candidates, equity=5000)
         self.assertEqual(alloc, {"VTBR": 100.0})
 
-    def test_desk_choose_falls_back_without_signals(self):
+    def test_desk_choose_empty_without_signals(self):
         candidates = [{"ticker": "VTBR", "name": "ВТБ", "price": 50.0, "pct": 0.0, "lot": 1}]
         with patch.object(self.skill, "_fetch_buy_signals", return_value=[]):
             alloc = self.skill._desk_choose(candidates, equity=5000)
-        self.assertEqual(alloc, {"VTBR": 100.0})
+        self.assertEqual(alloc, {})
 
     def test_desk_choose_telegrams_blocked_signal(self):
         candidates = [

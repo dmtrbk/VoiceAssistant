@@ -335,23 +335,14 @@ class StocksDeskMixin:
                 continue
             if val > 0:
                 cleaned[ticker_u] = val
-        if not cleaned:
-            return self._fallback_allocation(candidates)
         total = sum(cleaned.values())
         if total <= 0:
-            return self._fallback_allocation(candidates)
+            return {}
         scale = min(wanted, 100.0) / total
         return {key: round(val * scale, 1) for key, val in cleaned.items()}
 
-    def _fallback_allocation(self, candidates: list[dict[str, Any]]) -> dict[str, float]:
-        """Фолбек: первая бумага из списка, которую API позволяет купить."""
-        for row in candidates:
-            ticker = str(row.get("ticker") or "").upper()
-            if ticker and not self._is_buy_blocked(ticker):
-                return {ticker: 100.0}
-        return {}
-
-    def _fetch_buy_signals(self) -> list[dict[str, Any]]:
+    def _fetch_buy_signals(self) -> list[dict[str, Any]] | None:
+        """Активные сигналы на покупку. None — запрос не прошёл (это не «сигналов нет»)."""
         if not self._token:
             return []
         try:
@@ -366,7 +357,7 @@ class StocksDeskMixin:
             )
         except Exception as exc:
             logger.warning("[Биржа] сигналы Т-Инвест: %s", exc)
-            return []
+            return None
         out: list[dict[str, Any]] = []
         for raw in data.get("signals") or []:
             if isinstance(raw, dict) and _signal_is_buy(raw.get("direction")):
@@ -428,7 +419,11 @@ class StocksDeskMixin:
         candidates: list[dict[str, Any]],
         equity: float | None = None,
         cooldown: set[str] | None = None,
-    ) -> dict[str, float]:
+    ) -> dict[str, float] | None:
+        """Цель по сигналам. None — сигналы не получены, цель решать не из чего."""
+        signals = self._fetch_buy_signals()
+        if signals is None:
+            return None
         if equity is None:
             equity = self._equity_estimate(candidates)
         small = equity < _SMALL_EQUITY_RUB
@@ -442,7 +437,7 @@ class StocksDeskMixin:
         }
         scores: dict[str, float] = {}
         blocked_scores: dict[str, float] = {}
-        for sig in self._fetch_buy_signals():
+        for sig in signals:
             uid = str(sig.get("instrumentUid") or sig.get("instrument_uid") or "").strip()
             if not uid:
                 continue
@@ -478,14 +473,14 @@ class StocksDeskMixin:
             self._recommend_manual_buys(tips)
 
         if not scores:
-            logger.info("[Биржа] активных сигналов Т-Инвест нет, фоллбек")
-            return self._fallback_allocation(candidates)
+            logger.info("[Биржа] активных сигналов Т-Инвест нет")
+            return {}
 
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         picked = ranked[:limit]
         total = sum(value for _ticker, value in picked)
         if total <= 0:
-            return self._fallback_allocation(candidates)
+            return {}
         alloc = {ticker: round((value / total) * 100.0, 1) for ticker, value in picked}
         logger.info("[Биржа] сигналы Т-Инвест: %s", alloc)
         return alloc
@@ -770,10 +765,16 @@ class StocksDeskMixin:
             cooldown = stocks_journal.cooldown_tickers(COOLDOWN_HOURS)
         except Exception:
             cooldown = set()
-        alloc = self._filter_buy_alloc(
-            self._desk_choose(candidates, equity=self._equity_estimate(candidates), cooldown=cooldown),
-            candidates,
-        )
+        chosen = self._desk_choose(candidates, equity=self._equity_estimate(candidates), cooldown=cooldown)
+        if chosen is None:
+            why = "Сигналы Т-Инвест недоступны — оставляю прежнюю цель."
+            logger.warning("[Биржа] %s", why)
+            return why
+        if not chosen:
+            why = "активных сигналов нет — ничего не делаю"
+            write_alloc_state({}, why=why, watch_trades=watch_trades, desk_ts=time.time())
+            return "Активных сигналов Т-Инвест нет — ничего не делаю."
+        alloc = self._filter_buy_alloc(chosen, candidates)
         if not alloc:
             write_alloc_state(
                 {}, why="нечего покупать через API", watch_trades=watch_trades, desk_ts=time.time()
