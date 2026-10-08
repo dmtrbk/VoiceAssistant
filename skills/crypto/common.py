@@ -52,6 +52,7 @@ _ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_alloc.json")
 _TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trail.json")
 _EARN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_earn.json")
 _BTC_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_btc_dip.json")
+_ENTRY_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_entry_arm.json")
 
 _ENCYCLOPEDIA = (
     "что такое", "что значит", "кто такой", "кто такая",
@@ -455,6 +456,76 @@ def read_btc_dip(path: str | None = None) -> dict[str, float]:
     if qty <= 0 or entry <= 0:
         return {"qty": 0.0, "entry": 0.0}
     return {"qty": qty, "entry": entry}
+
+
+def read_entry_arms(path: str | None = None) -> dict[str, Any]:
+    """Ожидание отскока: дно альта или кармана, пока заявку не ставим."""
+    path = path or _ENTRY_ARM_PATH
+    empty: dict[str, Any] = {"alts": {}, "pocket": None}
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    alts: dict[str, dict[str, float]] = {}
+    for key, value in (raw.get("alts") or {}).items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            low = float(value.get("low") or 0)
+            ts = float(value.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if low <= 0:
+            continue
+        alts[ticker] = {"low": low, "ts": ts}
+    pocket = None
+    raw_pocket = raw.get("pocket")
+    if isinstance(raw_pocket, dict):
+        try:
+            low = float(raw_pocket.get("low") or 0)
+            ts = float(raw_pocket.get("ts") or 0)
+        except (TypeError, ValueError):
+            low = 0.0
+            ts = 0.0
+        if low > 0:
+            pocket = {"low": low, "ts": ts}
+    return {"alts": alts, "pocket": pocket}
+
+
+def write_entry_arms(
+    alts: dict[str, dict[str, Any]],
+    pocket: dict[str, Any] | None,
+    path: str | None = None,
+) -> None:
+    path = path or _ENTRY_ARM_PATH
+    clean: dict[str, dict[str, float]] = {}
+    for key, value in (alts or {}).items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            low = float(value.get("low") or 0)
+        except (TypeError, ValueError):
+            continue
+        if low <= 0:
+            continue
+        clean[ticker] = {"low": low, "ts": float(value.get("ts") or 0)}
+    payload: dict[str, Any] = {"alts": clean}
+    if pocket and float(pocket.get("low") or 0) > 0:
+        payload["pocket"] = {"low": float(pocket["low"]), "ts": float(pocket.get("ts") or 0)}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал ожидание входа: %s", exc)
 
 
 def write_btc_dip(qty: float, entry: float, path: str | None = None) -> None:

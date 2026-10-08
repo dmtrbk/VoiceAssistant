@@ -360,6 +360,21 @@ class TestDeskPolicy(unittest.TestCase):
             {"BNB", "SOL"},
         )
 
+    def test_entry_arm_waits_for_bounce_then_cancels(self):
+        armed = policy.update_alt_arm(None, price=100.0, z=-2.8, now=1.0)
+        self.assertAlmostEqual(armed["low"], 100.0)
+        self.assertFalse(policy.alt_bounce_ready(armed, price=100.0, z=-2.8))
+        deeper = policy.update_alt_arm(armed, price=98.0, z=-3.1, now=2.0)
+        self.assertAlmostEqual(deeper["low"], 98.0)
+        self.assertFalse(policy.alt_bounce_ready(deeper, price=98.2, z=-3.0))
+        self.assertTrue(policy.alt_bounce_ready(deeper, price=98.4, z=-2.4))
+        self.assertFalse(policy.alt_bounce_ready(deeper, price=99.0, z=-1.8))
+        self.assertIsNone(policy.update_alt_arm(deeper, price=99.0, z=-1.4, now=3.0))
+        pocket = policy.update_pocket_arm(None, price=100.0, day_chg=-4.0, now=1.0)
+        self.assertFalse(policy.pocket_bounce_ready(pocket, price=100.2))
+        self.assertTrue(policy.pocket_bounce_ready(pocket, price=100.3))
+        self.assertIsNone(policy.update_pocket_arm(pocket, price=101.0, day_chg=-2.0, now=2.0))
+
     def test_watch_rate_limit(self):
         now = time.time()
         self.assertTrue(policy.watch_rate_ok([], now=now))
@@ -496,6 +511,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ("alloc.json", "_ALLOC_PATH"),
             ("trail.json", "_TRAIL_PATH"),
             ("btc_dip.json", "_BTC_DIP_PATH"),
+            ("entry_arm.json", "_ENTRY_ARM_PATH"),
             ("excluded.json", "_EXCLUDED_PATH"),
         ):
             path = os.path.join(self.tmp.name, name)
@@ -689,6 +705,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_ticker", return_value={"price": 1.0, "chg": 0.0, "turnover": 1}),
             patch.object(self.skill, "_place_order", side_effect=place),
             patch("skills.crypto.desk.should_rebalance_leg", return_value=True),
+            patch.object(self.skill, "_alt_entry_ready", return_value=True),
             patch("skills.crypto.desk.time.sleep"),
         ):
             # цели: LINK 60, AVAX 40 при equity≈100 → need 60 и 40, budget≈99.8
@@ -776,6 +793,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_ticker", return_value={"price": 0.1, "chg": 1.0, "turnover": 1}),
             patch.object(self.skill, "_place_order", side_effect=place),
             patch("skills.crypto.journal.recently_bought", return_value={"DOGE"}),
+            patch.object(self.skill, "_alt_entry_ready", return_value=True),
             patch("skills.crypto.desk.time.sleep"),
         ):
             self.skill._desk_bought_ready = True
@@ -924,9 +942,17 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertFalse(any(t == "XRP" for t, *_ in placed))
 
     def test_watch_enters_alt_at_lower_band(self):
+        from skills.crypto.common import read_entry_arms
+
         self.bands = {"LINK": {"z": -2.9, "ma": 20.0}, "NEAR": {"z": -1.0, "ma": 3.0}}
-        placed, result, state = self._watch_alt(
+        placed, _result, state = self._watch_alt(
             price=18.0, entry=0.0, alloc={"BTC": 40.0}, positions=[], cash=100.0
+        )
+        self.assertFalse([t for t, side, *_ in placed if side == "Buy"])
+        self.assertNotIn("LINK", state["alloc"])
+        self.assertAlmostEqual(read_entry_arms()["alts"]["LINK"]["low"], 18.0)
+        placed, result, state = self._watch_alt(
+            price=18.1, entry=0.0, alloc={"BTC": 40.0}, positions=[], cash=100.0
         )
         buys = [(t, q) for t, side, _b, q in placed if side == "Buy"]
         self.assertEqual([t for t, _q in buys], ["LINK"], result)
@@ -1283,6 +1309,19 @@ class TestBybitTape(unittest.TestCase):
                 "data": {"symbol": "SOLUSDT", "lastPrice": "100.85"},
             }
         )
+        self.assertEqual(tape.consume_signals(), "")
+
+    def test_entry_arm_wakes_on_bounce(self):
+        from skills.crypto.stream import BybitPublicTape
+
+        tape = BybitPublicTape()
+        tape.set_entry_arms({"SOL": {"low": 100.0, "bounce": 0.4}})
+        tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "99.5"}})
+        self.assertEqual(tape.consume_signals(), "")
+        self.assertAlmostEqual(tape.entry_lows()["SOL"], 99.5)
+        tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "99.9"}})
+        self.assertEqual(tape.consume_signals(), "отскок")
+        tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "100.2"}})
         self.assertEqual(tape.consume_signals(), "")
 
     def test_kline_confirm_wakes(self):

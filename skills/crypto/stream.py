@@ -44,7 +44,9 @@ class BybitPublicTape:
         self._wanted: set[str] = set()
         self._legs: list[dict[str, Any]] = []
         self._hot_tickers: set[str] = set()
+        self._entry: dict[str, dict[str, Any]] = {}
         self._wake = threading.Event()
+        self._entry_wake = threading.Event()
         self._kline = threading.Event()
         self._signal = threading.Event()
         self._stop = threading.Event()
@@ -82,6 +84,9 @@ class BybitPublicTape:
         if self._wake.is_set():
             self._wake.clear()
             bits.append("зона")
+        if self._entry_wake.is_set():
+            self._entry_wake.clear()
+            bits.append("отскок")
         if self._kline.is_set():
             self._kline.clear()
             bits.append("свеча")
@@ -105,6 +110,39 @@ class BybitPublicTape:
             self._send(ws, "subscribe", stream_topics(added))
         if dropped:
             self._send(ws, "unsubscribe", stream_topics(dropped))
+
+    def set_entry_arms(self, arms: dict[str, dict[str, float]]) -> None:
+        """ticker → {low, bounce}. Более низкое дно с ленты не поднимаем."""
+        with self._lock:
+            fresh: dict[str, dict[str, Any]] = {}
+            for ticker, spec in (arms or {}).items():
+                name = str(ticker or "").upper()
+                if not name or not isinstance(spec, dict):
+                    continue
+                try:
+                    low = float(spec.get("low") or 0)
+                    bounce = float(spec.get("bounce") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if low <= 0 or bounce <= 0:
+                    continue
+                prev = self._entry.get(name) or {}
+                prev_low = float(prev.get("low") or 0)
+                fired = bool(prev.get("fired"))
+                if prev_low > 0 and prev_low < low:
+                    low = prev_low
+                if prev_low > 0 and low < prev_low - 1e-12:
+                    fired = False
+                fresh[name] = {"low": low, "bounce": bounce, "fired": fired}
+            self._entry = fresh
+
+    def entry_lows(self) -> dict[str, float]:
+        with self._lock:
+            return {
+                ticker: float(row["low"])
+                for ticker, row in self._entry.items()
+                if float(row.get("low") or 0) > 0
+            }
 
     def set_legs(self, legs: list[dict[str, Any]]) -> None:
         clean = [dict(leg) for leg in legs if str(leg.get("ticker") or "").strip()]
@@ -183,9 +221,14 @@ class BybitPublicTape:
             }
             self._last_msg = time.time()
             entered = self._mark_hot_locked(ticker, price)
+            crossed = self._mark_entry_locked(ticker, price)
         if entered:
             logger.info("[Крипта] лента: зона %s", ",".join(sorted(entered)))
             self._wake.set()
+            self._signal.set()
+        if crossed:
+            logger.info("[Крипта] лента: отскок %s", ",".join(sorted(crossed)))
+            self._entry_wake.set()
             self._signal.set()
 
     def _hot_now_locked(self) -> set[str]:
@@ -197,6 +240,25 @@ class BybitPublicTape:
             if self._leg_hot(leg, price):
                 hot.add(ticker)
         return hot
+
+    def _mark_entry_locked(self, ticker: str, price: float) -> set[str]:
+        arm = self._entry.get(ticker)
+        if not arm or price <= 0:
+            return set()
+        low = float(arm.get("low") or 0)
+        if low <= 0:
+            return set()
+        if price < low:
+            arm["low"] = price
+            arm["fired"] = False
+            return set()
+        bounce = float(arm.get("bounce") or 0)
+        if arm.get("fired") or bounce <= 0:
+            return set()
+        if price >= low * (1.0 + bounce / 100.0) - 1e-12:
+            arm["fired"] = True
+            return {ticker}
+        return set()
 
     def _mark_hot_locked(self, ticker: str, price: float) -> set[str]:
         now_hot: set[str] = set()
