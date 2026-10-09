@@ -10,3 +10,4 @@ requests==2.34.2
 websocket-client==1.8.0
 yeelight==0.7.16
 python-miio==0.5.12
+cursor-sdk==1.0.37

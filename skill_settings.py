@@ -79,6 +79,7 @@ CRYPTO_VOICE_TRADE_KEY = "crypto_voice_trade"
 GROQ_MODEL_KEY = "groq_model"
 STT_MODE_KEY = "stt_mode"
 PERSONA_PRESET_KEY = "persona_preset"
+CURSOR_TELEGRAM_KEY = "cursor_telegram"
 _CURSOR_COMM = frozenset({"cursor", "cursor-bin"})
 
 # GUI-поток читает очередь и открывает окно. Голос только кладёт «open».
@@ -93,6 +94,7 @@ _crypto_voice_trade = False
 _groq_model = ""
 _stt_mode = ""
 _persona_preset = ""
+_cursor_telegram = False
 _loaded = False
 _SKILL_MAP: dict[str, Any] | None = None
 
@@ -258,6 +260,7 @@ def _persist() -> None:
         snapshot[GROQ_MODEL_KEY] = _groq_model
         snapshot[STT_MODE_KEY] = _stt_mode
         snapshot[PERSONA_PRESET_KEY] = _persona_preset
+        snapshot[CURSOR_TELEGRAM_KEY] = bool(_cursor_telegram)
     try:
         _write_json_atomic(CONFIG_PATH, snapshot)
     except Exception as exc:
@@ -266,7 +269,7 @@ def _persist() -> None:
 
 def reload_from_disk() -> dict[str, bool]:
     """Читает skills_enabled.json. Нет ключа — навык включён."""
-    global _enabled, _auto_trade, _voice_trade, _crypto_auto_trade, _crypto_voice_trade, _groq_model, _stt_mode, _persona_preset
+    global _enabled, _auto_trade, _voice_trade, _crypto_auto_trade, _crypto_voice_trade, _groq_model, _stt_mode, _persona_preset, _cursor_telegram
     flags = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
     auto_trade = _env_auto_trade_default()
     voice_trade = _env_voice_trade_default()
@@ -275,6 +278,7 @@ def reload_from_disk() -> dict[str, bool]:
     groq_model = _env_groq_model_default()
     stt_mode = _env_stt_mode_default()
     persona_preset = _env_persona_preset_default()
+    cursor_telegram = False
     # Ключи в JSON важнее пустых TINKOFF_* / GROQ_MODEL.
     if os.path.exists(CONFIG_PATH):
         try:
@@ -302,6 +306,8 @@ def reload_from_disk() -> dict[str, bool]:
                     from skills.persona import normalize_persona_preset
 
                     persona_preset = normalize_persona_preset(str(raw[PERSONA_PRESET_KEY] or ""))
+                if CURSOR_TELEGRAM_KEY in raw:
+                    cursor_telegram = bool(raw[CURSOR_TELEGRAM_KEY])
         except Exception as exc:
             logging.error("[Настройки] Не удалось прочитать %s: %s", CONFIG_PATH, exc)
     with _lock:
@@ -313,6 +319,7 @@ def reload_from_disk() -> dict[str, bool]:
         _groq_model = groq_model
         _stt_mode = stt_mode
         _persona_preset = persona_preset
+        _cursor_telegram = cursor_telegram
     return dict(flags)
 
 
@@ -363,6 +370,22 @@ def set_auto_trade(enabled: bool) -> None:
         except Exception as exc:
             logging.debug("[Настройки] Старт автоторговли: %s", exc)
     logging.info("[Настройки] Автоторговля: %s", "вкл" if enabled else "выкл")
+
+
+def is_cursor_telegram_enabled() -> bool:
+    """Telegram пишет в один локальный агент Cursor, а не в навыки Джарвиса."""
+    _ensure_loaded()
+    with _lock:
+        return bool(_cursor_telegram)
+
+
+def set_cursor_telegram(enabled: bool) -> None:
+    global _cursor_telegram
+    _ensure_loaded()
+    with _lock:
+        _cursor_telegram = bool(enabled)
+    _persist()
+    logging.info("[Настройки] Telegram → Cursor: %s", "вкл" if enabled else "выкл")
 
 
 def is_voice_trade_enabled() -> bool:

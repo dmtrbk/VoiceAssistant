@@ -29,12 +29,14 @@ from skill_settings import (
     is_crypto_auto_trade_enabled,
     is_crypto_voice_trade_enabled,
     is_cursor_running,
+    is_cursor_telegram_enabled,
     is_voice_trade_enabled,
     ordered_skill_ids,
     persona_preset_choices,
     set_auto_trade,
     set_crypto_auto_trade,
     set_crypto_voice_trade,
+    set_cursor_telegram,
     set_flag,
     set_groq_model,
     set_persona_preset,
@@ -104,6 +106,7 @@ class SettingsWindow(QWidget):
         self._stt_hint: QLabel | None = None
         self._persona_combo: QComboBox | None = None
         self._persona_hint: QLabel | None = None
+        self._cursor_telegram_box: QCheckBox | None = None
         self._boxes: dict[str, QCheckBox] = {}
         self._voice_trade_box: QCheckBox | None = None
         self._auto_trade_box: QCheckBox | None = None
@@ -165,6 +168,7 @@ class SettingsWindow(QWidget):
         col.addWidget(self._build_stt_card())
         col.addWidget(self._build_model_card())
         col.addWidget(self._build_persona_card())
+        col.addWidget(self._build_cursor_telegram_card())
         col.addStretch(1)
         return page
 
@@ -277,6 +281,26 @@ class SettingsWindow(QWidget):
         self._sync_persona_row()
         return card
 
+    def _build_cursor_telegram_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        col = QVBoxLayout(card)
+        col.setContentsMargins(16, 12, 16, 12)
+        col.setSpacing(8)
+        box = self._make_toggle(is_cursor_telegram_enabled())
+        box.toggled.connect(set_cursor_telegram)
+        self._cursor_telegram_box = box
+        self._add_text_toggle(
+            col,
+            "Telegram → Cursor",
+            "Сообщения из Telegram идут в один локальный агент Cursor, "
+            "а не в навыки Джарвиса. Нужен CURSOR_API_KEY. Голос не меняется. "
+            "Агент может править файлы проекта.",
+            box,
+        )
+        return card
+
     def _apply_theme(self) -> None:
         self.setStyleSheet(load_palette().stylesheet())
 
@@ -286,6 +310,7 @@ class SettingsWindow(QWidget):
         self._sync_stt_row()
         self._sync_model_row()
         self._sync_persona_row()
+        self._sync_cursor_telegram_row()
         super().showEvent(event)
 
     def _sync_persona_row(self) -> None:
@@ -298,6 +323,13 @@ class SettingsWindow(QWidget):
             self._persona_combo.setCurrentIndex(index)
         self._persona_combo.blockSignals(False)
         self._persona_hint.setText(get_persona_hint(current))
+
+    def _sync_cursor_telegram_row(self) -> None:
+        if self._cursor_telegram_box is None:
+            return
+        self._cursor_telegram_box.blockSignals(True)
+        self._cursor_telegram_box.setChecked(is_cursor_telegram_enabled())
+        self._cursor_telegram_box.blockSignals(False)
 
     def _on_persona_changed(self, index: int) -> None:
         if self._persona_combo is None or index < 0:

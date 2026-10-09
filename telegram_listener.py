@@ -69,6 +69,28 @@ def send_reply(chat_id: str, text: str):
         logging.error(f"[Telegram] Ошибка отправки сообщения: {e}")
 
 
+def dispatch_telegram_text(text: str, chat_id: str) -> None:
+    """Навык Джарвиса или один локальный чат Cursor — решает тумблер в настройках."""
+
+    def telegram_speak(reply_text: str, _chat_id=chat_id) -> None:
+        logging.info("[Telegram] Ответ отправлен (%s симв.).", len(reply_text or ""))
+        send_reply(_chat_id, reply_text)
+
+    try:
+        from skill_settings import is_cursor_telegram_enabled
+
+        if is_cursor_telegram_enabled():
+            send_reply(chat_id, "Думаю.")
+            from cursor_bridge import ask_cursor, telegram_chunks
+
+            for part in telegram_chunks(ask_cursor(text)):
+                send_reply(chat_id, part)
+            return
+        execute_command(text, speak_callback=telegram_speak, channel="telegram")
+    except Exception as exc:
+        logging.error("[Telegram] Ошибка выполнения: %s", exc)
+
+
 def _command_worker() -> None:
     """Один поток на все входящие: не плодим Thread на каждое сообщение."""
     while True:
@@ -76,15 +98,7 @@ def _command_worker() -> None:
         if item is None:
             return
         text, chat_id = item
-
-        def telegram_speak(reply_text: str, _chat_id=chat_id) -> None:
-            logging.info("[Telegram] Ответ отправлен (%s симв.).", len(reply_text or ""))
-            send_reply(_chat_id, reply_text)
-
-        try:
-            execute_command(text, speak_callback=telegram_speak, channel="telegram")
-        except Exception as exc:
-            logging.error("[Telegram] Ошибка выполнения: %s", exc)
+        dispatch_telegram_text(text, chat_id)
 
 
 def _ensure_command_worker() -> None:
