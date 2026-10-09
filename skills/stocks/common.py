@@ -188,7 +188,7 @@ _SPOKEN = {
     "TCSG": "Т-Технологии",
     "SIBN": "Газпром нефть",
     "NVTK": "Новатэк",
-    "CNRU": "Китай",
+    "CNRU": "Циан",
 }
 
 def _http_error(response: requests.Response) -> RuntimeError:
