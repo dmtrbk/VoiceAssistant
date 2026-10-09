@@ -1179,8 +1179,8 @@ class TestEarn(unittest.TestCase):
         with self._patched():
             self.skill._earn_free_cash(26.0)
         self.assertEqual(self.orders[0][0], "Redeem")
-        self.assertAlmostEqual(self.orders[0][1], 21.0)  # дыра 16$ + буфер 5$
-        self.assertAlmostEqual(self.spot, 31.0)
+        self.assertAlmostEqual(self.orders[0][1], 26.0)  # дыра 16$ + буфер 10$
+        self.assertAlmostEqual(self.spot, 36.0)
 
     def test_no_redeem_when_spot_enough(self):
         self.spot = 40.0
@@ -1193,11 +1193,19 @@ class TestEarn(unittest.TestCase):
         with self._patched():
             self.skill._earn_park_idle()
         self.assertEqual(self.orders[0][0], "Stake")
-        self.assertAlmostEqual(self.orders[0][1], 75.0)
-        self.assertAlmostEqual(self.spot, 5.0)
+        self.assertAlmostEqual(self.orders[0][1], 70.0)
+        self.assertAlmostEqual(self.spot, 10.0)
+
+    def test_park_tops_up_spot_buffer(self):
+        self.spot = 0.2
+        with self._patched():
+            self.skill._earn_park_idle()
+        self.assertEqual(self.orders[0][0], "Redeem")
+        self.assertAlmostEqual(self.orders[0][1], 9.8)
+        self.assertAlmostEqual(self.spot, 10.0)
 
     def test_park_skips_small_leftover(self):
-        self.spot = 6.0
+        self.spot = 11.0
         with self._patched():
             self.skill._earn_park_idle()
         self.assertEqual(self.orders, [])
