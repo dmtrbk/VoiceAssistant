@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from skills.stocks import StocksSkill
 from skills.stocks import journal as sj
+from skills.stocks import signals_grpc
 from skills.stocks.common import read_alloc_state, read_trail_state, write_alloc_state, write_trail_state
 from skills.stocks.desk_policy import (
     CASH_FLOOR_PCT,
@@ -322,9 +323,56 @@ class TestStocksDeskRules(unittest.TestCase):
         self.assertEqual(reb.call_args[0][0], {"SBER": 90.0})
 
     def test_signals_error_is_not_empty_signals(self):
-        with patch.object(self.skill, "_post", side_effect=RuntimeError("http 500")):
+        with (
+            patch.object(self.skill, "_post", side_effect=RuntimeError("http 500")),
+            patch.object(signals_grpc, "fetch_buy_signals", side_effect=RuntimeError("grpc down")),
+        ):
             self.assertIsNone(self.skill._fetch_buy_signals())
             self.assertIsNone(self.skill._desk_choose([{"ticker": "SBER", "price": 300.0}], equity=20_000))
+
+    def test_signals_fall_back_to_grpc(self):
+        sigs = [
+            {"instrumentUid": "u-sber", "direction": "SIGNAL_DIRECTION_BUY", "probability": 60},
+            {"instrumentUid": "u-gazp", "direction": "SIGNAL_DIRECTION_SELL", "probability": 50},
+        ]
+        with (
+            patch.object(self.skill, "_post", side_effect=RuntimeError("http 500")),
+            patch.object(signals_grpc, "fetch_buy_signals", return_value=sigs) as grpc_fetch,
+        ):
+            out = self.skill._fetch_buy_signals()
+        grpc_fetch.assert_called_once()
+        self.assertEqual([s["instrumentUid"] for s in out], ["u-sber"])
+
+    def test_grpc_signal_codec(self):
+        self.assertEqual(signals_grpc.encode_request(10), bytes([0x38, 1, 0x40, 1, 0x4A, 4, 0x08, 10, 0x10, 0]))
+
+        def field(num: int, payload: bytes) -> bytes:
+            return signals_grpc._key(num, 2) + signals_grpc._varint(len(payload)) + payload
+
+        def varint_field(num: int, value: int) -> bytes:
+            return signals_grpc._key(num, 0) + signals_grpc._varint(value)
+
+        price = varint_field(1, 657) + varint_field(2, 200_000_000)
+        signal = (
+            field(3, "Аналитики".encode())
+            + field(4, b"b125d6c0")
+            + varint_field(6, 1)
+            + field(7, price)
+            + field(9, "Циан".encode())
+            + varint_field(12, 58)
+        )
+        decoded = signals_grpc.decode_signals(field(1, signal) + field(2, varint_field(1, 1)))
+        self.assertEqual(
+            decoded,
+            [{
+                "strategyName": "Аналитики",
+                "instrumentUid": "b125d6c0",
+                "direction": "SIGNAL_DIRECTION_BUY",
+                "initialPrice": {"units": "657", "nano": 200_000_000},
+                "name": "Циан",
+                "probability": 58,
+            }],
+        )
 
     def test_full_desk_does_nothing_without_signals(self):
         write_alloc_state({"SBER": 90.0}, why="SBER 90%")

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from . import common
 from . import journal as stocks_journal
+from . import signals_grpc
 from .common import (
     _API_BUY_BLOCKED,
     _DESK_PERIOD_SEC,
@@ -357,7 +358,12 @@ class StocksDeskMixin:
             )
         except Exception as exc:
             logger.warning("[Биржа] сигналы Т-Инвест: %s", exc)
-            return None
+            try:
+                data = {"signals": signals_grpc.fetch_buy_signals(self._token, _SIGNAL_PAGE)}
+            except Exception as grpc_exc:
+                logger.warning("[Биржа] сигналы Т-Инвест через gRPC: %s", grpc_exc)
+                return None
+            logger.info("[Биржа] сигналы Т-Инвест через gRPC: %d", len(data["signals"]))
         out: list[dict[str, Any]] = []
         for raw in data.get("signals") or []:
             if isinstance(raw, dict) and _signal_is_buy(raw.get("direction")):
