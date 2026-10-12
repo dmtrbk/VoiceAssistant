@@ -57,6 +57,19 @@ class TestConkyMarkets(unittest.TestCase):
         self.assertEqual(conky_markets.color_for(None), "c0c0c0")
         self.assertEqual(conky_markets.color_for(0), "c0c0c0")
 
+    def test_caption_rows(self):
+        stocks, crypto = conky_markets.caption_rows(-5, -2, 178, 1)
+        self.assertEqual(stocks[0], ("-5 ₽", "888888"))
+        self.assertEqual(stocks[1], (" / ", "c0c0c0"))
+        self.assertEqual(stocks[2], ("+178 ₽", "c0c0c0"))
+        self.assertEqual(crypto[0], ("-2 $", "888888"))
+        self.assertEqual(crypto[2], ("+1 $", "c0c0c0"))
+        empty, _crypto = conky_markets.caption_rows(None, None, None, None)
+        self.assertEqual(empty[0][0], "—")
+        self.assertEqual(empty[2][0], "—")
+        zero, _crypto = conky_markets.caption_rows(0, None, None, None)
+        self.assertEqual(zero[0], ("0 ₽", "c0c0c0"))
+
     def test_select_line(self):
         text = conky_markets.render_lines(1, -2)
         self.assertEqual(conky_markets.select_line(text, "stocks"), "${color c0c0c0}+1 ₽")

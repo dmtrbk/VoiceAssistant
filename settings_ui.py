@@ -42,7 +42,10 @@ from skill_settings import (
     set_persona_preset,
     set_stt_mode,
     set_voice_trade,
+    set_widget_form,
     stt_mode_choices,
+    get_widget_form,
+    widget_form_choices,
 )
 from skills.groq_client import FAST_MODEL, groq_model_choices
 from theme_colors import current_palette, load_palette
@@ -106,6 +109,8 @@ class SettingsWindow(QWidget):
         self._stt_hint: QLabel | None = None
         self._persona_combo: QComboBox | None = None
         self._persona_hint: QLabel | None = None
+        self._widget_combo: QComboBox | None = None
+        self._widget_hint: QLabel | None = None
         self._cursor_telegram_box: QCheckBox | None = None
         self._boxes: dict[str, QCheckBox] = {}
         self._voice_trade_box: QCheckBox | None = None
@@ -165,6 +170,7 @@ class SettingsWindow(QWidget):
         col = QVBoxLayout(page)
         col.setContentsMargins(0, 4, 0, 0)
         col.setSpacing(10)
+        col.addWidget(self._build_widget_card())
         col.addWidget(self._build_stt_card())
         col.addWidget(self._build_model_card())
         col.addWidget(self._build_persona_card())
@@ -208,6 +214,30 @@ class SettingsWindow(QWidget):
         heading = QLabel(text)
         heading.setObjectName("section")
         return heading
+
+    def _build_widget_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        col = QVBoxLayout(card)
+        col.setContentsMargins(16, 12, 16, 12)
+        col.setSpacing(8)
+        col.addWidget(self._card_title("Угол экрана"))
+
+        combo = QComboBox()
+        for form_id, title in widget_form_choices():
+            combo.addItem(title, form_id)
+        combo.currentIndexChanged.connect(self._on_widget_changed)
+        self._widget_combo = combo
+        col.addWidget(combo)
+
+        hint = QLabel()
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        self._widget_hint = hint
+        col.addWidget(hint)
+        self._sync_widget_row()
+        return card
 
     def _build_stt_card(self) -> QFrame:
         card = QFrame()
@@ -307,6 +337,7 @@ class SettingsWindow(QWidget):
     def showEvent(self, event):
         self._apply_theme()
         self._rebuild()
+        self._sync_widget_row()
         self._sync_stt_row()
         self._sync_model_row()
         self._sync_persona_row()
@@ -339,6 +370,34 @@ class SettingsWindow(QWidget):
             return
         set_persona_preset(str(preset_id))
         self._sync_persona_row()
+
+    def _sync_widget_row(self) -> None:
+        if self._widget_combo is None or self._widget_hint is None:
+            return
+        current = get_widget_form()
+        index = self._widget_combo.findData(current)
+        self._widget_combo.blockSignals(True)
+        if index >= 0:
+            self._widget_combo.setCurrentIndex(index)
+        self._widget_combo.blockSignals(False)
+        if current == "plate":
+            self._widget_hint.setText(
+                "Слева черта состояния: серая, зелёная или оранжевая. "
+                "Справа день и заработанное."
+            )
+        else:
+            self._widget_hint.setText(
+                "Шар в углу. Под ним день и заработанное."
+            )
+
+    def _on_widget_changed(self, index: int) -> None:
+        if self._widget_combo is None or index < 0:
+            return
+        form_id = self._widget_combo.itemData(index)
+        if not form_id:
+            return
+        set_widget_form(str(form_id))
+        self._sync_widget_row()
 
     def _sync_stt_row(self) -> None:
         if self._stt_combo is None or self._stt_hint is None:

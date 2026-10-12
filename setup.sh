@@ -220,39 +220,15 @@ EOF
     chmod +x "$HOME/.scripts/player_off.sh"
 fi
 
-# Виджет Conky: дневной +/- биржи и крипты (правый нижний угол)
-echo "[+] Ставлю виджет Conky рынков..."
-CONKY_SRC="$PROJECT_DIR/conky"
-CONKY_DST="$HOME/.conky"
-if [ -f "$CONKY_SRC/conky_markets.conf" ]; then
-    mkdir -p "$CONKY_DST/icons"
-    sed -e "s|__HOME__|$HOME|g" -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
-        "$CONKY_SRC/conky_markets.conf" > "$CONKY_DST/conky_markets.conf"
-    for icon in tinkoff bitcoin; do
-        if [ -f "$CONKY_SRC/icons/${icon}.svg" ]; then
-            cp "$CONKY_SRC/icons/${icon}.svg" "$CONKY_DST/icons/${icon}.svg"
-            if command -v rsvg-convert >/dev/null 2>&1; then
-                rsvg-convert -w 64 -h 64 "$CONKY_DST/icons/${icon}.svg" \
-                    -o "$CONKY_DST/icons/${icon}.png"
-            fi
-        fi
-    done
-    STARTUP="$CONKY_DST/conky-startup.sh"
-    if [ -f "$STARTUP" ] && ! grep -q 'conky_markets.conf' "$STARTUP"; then
-        tmp_startup="$(mktemp)"
-        awk '
-            { print }
-            /muzinfo_n.conf/ {
-                print "   cd \"$HOME/.conky\""
-                print "   conky -c \"$HOME/.conky/conky_markets.conf\" &"
-            }
-        ' "$STARTUP" > "$tmp_startup"
-        mv "$tmp_startup" "$STARTUP"
-        chmod +x "$STARTUP"
-    fi
-    echo "    Конфиг: $CONKY_DST/conky_markets.conf"
-else
-    echo "[!] Шаблона conky/conky_markets.conf нет, виджет пропущен."
+# Цифры рынков рисует сфера. Из автозапуска Conky их убираем, остальные виджеты живы.
+echo "[+] Цифры рынков — на сфере, не в Conky..."
+STARTUP="$HOME/.conky/conky-startup.sh"
+if [ -f "$STARTUP" ] && grep -q 'conky_markets.conf' "$STARTUP"; then
+    tmp_startup="$(mktemp)"
+    grep -v 'conky_markets.conf' "$STARTUP" > "$tmp_startup"
+    mv "$tmp_startup" "$STARTUP"
+    chmod +x "$STARTUP"
+    echo "    Строка conky_markets убрана из $STARTUP"
 fi
 
 # 7. Настройка службы systemd и расширения GNOME

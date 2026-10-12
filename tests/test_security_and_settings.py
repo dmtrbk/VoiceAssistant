@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -126,6 +127,22 @@ class TestSecurityAndSettings(unittest.TestCase):
         self.assertTrue(any("Брутальный" in title for _pid, title in choices))
         self.assertTrue(any("Бро" in title for _pid, title in choices))
         self.assertIn(get_persona_preset(), {"jarvis", "sarcastic", "brutal", "buddy", "custom"})
+
+    def test_widget_form_persists(self):
+        import skill_settings as settings
+
+        self.assertEqual(settings.normalize_widget_form("плашка"), "plate")
+        self.assertEqual(settings.normalize_widget_form("orb"), "orb")
+        self.assertEqual(settings.normalize_widget_form("что-то"), "orb")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "skills_enabled.json")
+            with patch.object(settings, "CONFIG_PATH", path), patch.object(settings, "_loaded", False):
+                settings.set_widget_form("plate")
+                settings._loaded = False
+                self.assertEqual(settings.get_widget_form(), "plate")
+                settings.set_widget_form("сфера")
+                settings._loaded = False
+                self.assertEqual(settings.get_widget_form(), "orb")
 
 
 if __name__ == "__main__":

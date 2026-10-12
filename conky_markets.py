@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # conky_markets.py
-# Две строки для Conky: дневной +/- биржи (Т-Инвест) и крипты (Bybit).
-# Обе: день / заработано (ASCII `/`), только цифры. Без ∑ — Candara.
+# Две строки рынков: дневной +/- биржи (Т-Инвест) и крипты (Bybit).
+# Обе: день / заработано (ASCII `/`), только цифры. Рисует сфера; Conky — тот же текст.
 # Вторая цифра крипты — реальные деньги: закрытые сделки + проценты Earn, без бумажной переоценки.
 # Цвета из ~/.conky: плюс c0c0c0 (system), минус 888888 (comands default).
 # Кэш 5 мин, сразу после сделки (дневник новее кэша). Стол заявок не запускает.
@@ -96,6 +96,34 @@ def color_for(value: float | None) -> str:
     if value is not None and value < 0:
         return COLOR_MINUS
     return COLOR_PLUS
+
+
+def caption_amount(value: float | None, suffix: str) -> tuple[str, str]:
+    """Одна цифра под сферой: текст и цвет. Пусто — тусклое тире."""
+    if value is None:
+        return "—", COLOR_MINUS
+    return signed_amount(value, suffix), color_for(value)
+
+
+def caption_rows(
+    stocks: float | None,
+    crypto: float | None,
+    stocks_life: float | None = None,
+    crypto_life: float | None = None,
+) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
+    """Биржа сверху, крипта снизу. Слева день, справа заработанное, слэш по центру."""
+    slash = (" / ", COLOR_PLUS)
+    stocks_row = (
+        caption_amount(stocks, "₽"),
+        slash,
+        caption_amount(stocks_life, "₽"),
+    )
+    crypto_row = (
+        caption_amount(crypto, "$"),
+        slash,
+        caption_amount(crypto_life, "$"),
+    )
+    return stocks_row, crypto_row
 
 
 def render_lines(

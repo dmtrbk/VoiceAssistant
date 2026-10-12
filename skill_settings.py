@@ -78,6 +78,7 @@ CRYPTO_AUTO_TRADE_KEY = "crypto_auto_trade"
 CRYPTO_VOICE_TRADE_KEY = "crypto_voice_trade"
 GROQ_MODEL_KEY = "groq_model"
 STT_MODE_KEY = "stt_mode"
+WIDGET_FORM_KEY = "widget_form"
 PERSONA_PRESET_KEY = "persona_preset"
 CURSOR_TELEGRAM_KEY = "cursor_telegram"
 _CURSOR_COMM = frozenset({"cursor", "cursor-bin"})
@@ -93,6 +94,7 @@ _crypto_auto_trade = False
 _crypto_voice_trade = False
 _groq_model = ""
 _stt_mode = ""
+_widget_form = ""
 _persona_preset = ""
 _cursor_telegram = False
 _loaded = False
@@ -156,6 +158,23 @@ def _env_stt_mode_default() -> str:
 
 def stt_mode_choices() -> list[tuple[str, str]]:
     return list(STT_MODE_CHOICES)
+
+
+WIDGET_FORM_CHOICES = (
+    ("orb", "Сфера"),
+    ("plate", "Плашка"),
+)
+
+
+def normalize_widget_form(raw: str | None) -> str:
+    clean = (raw or "").strip().lower()
+    if clean in {"plate", "плашка"}:
+        return "plate"
+    return "orb"
+
+
+def widget_form_choices() -> list[tuple[str, str]]:
+    return list(WIDGET_FORM_CHOICES)
 
 
 def _env_persona_preset_default() -> str:
@@ -259,6 +278,7 @@ def _persist() -> None:
         snapshot[CRYPTO_VOICE_TRADE_KEY] = bool(_crypto_voice_trade)
         snapshot[GROQ_MODEL_KEY] = _groq_model
         snapshot[STT_MODE_KEY] = _stt_mode
+        snapshot[WIDGET_FORM_KEY] = _widget_form or "orb"
         snapshot[PERSONA_PRESET_KEY] = _persona_preset
         snapshot[CURSOR_TELEGRAM_KEY] = bool(_cursor_telegram)
     try:
@@ -269,7 +289,7 @@ def _persist() -> None:
 
 def reload_from_disk() -> dict[str, bool]:
     """Читает skills_enabled.json. Нет ключа — навык включён."""
-    global _enabled, _auto_trade, _voice_trade, _crypto_auto_trade, _crypto_voice_trade, _groq_model, _stt_mode, _persona_preset, _cursor_telegram
+    global _enabled, _auto_trade, _voice_trade, _crypto_auto_trade, _crypto_voice_trade, _groq_model, _stt_mode, _widget_form, _persona_preset, _cursor_telegram
     flags = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
     auto_trade = _env_auto_trade_default()
     voice_trade = _env_voice_trade_default()
@@ -277,6 +297,7 @@ def reload_from_disk() -> dict[str, bool]:
     crypto_voice_trade = _env_crypto_voice_trade_default()
     groq_model = _env_groq_model_default()
     stt_mode = _env_stt_mode_default()
+    widget_form = "orb"
     persona_preset = _env_persona_preset_default()
     cursor_telegram = False
     # Ключи в JSON важнее пустых TINKOFF_* / GROQ_MODEL.
@@ -302,6 +323,8 @@ def reload_from_disk() -> dict[str, bool]:
                     groq_model = normalize_groq_model(str(raw[GROQ_MODEL_KEY] or ""))
                 if STT_MODE_KEY in raw:
                     stt_mode = normalize_stt_mode(str(raw[STT_MODE_KEY] or ""))
+                if WIDGET_FORM_KEY in raw:
+                    widget_form = normalize_widget_form(str(raw[WIDGET_FORM_KEY] or ""))
                 if PERSONA_PRESET_KEY in raw:
                     from skills.persona import normalize_persona_preset
 
@@ -318,6 +341,7 @@ def reload_from_disk() -> dict[str, bool]:
         _crypto_voice_trade = crypto_voice_trade
         _groq_model = groq_model
         _stt_mode = stt_mode
+        _widget_form = widget_form
         _persona_preset = persona_preset
         _cursor_telegram = cursor_telegram
     return dict(flags)
@@ -484,6 +508,23 @@ def set_stt_mode(mode: str) -> None:
     os.environ["STT_MODE"] = chosen
     _persist()
     logging.info("[Настройки] Распознавание речи: %s", chosen)
+
+
+def get_widget_form() -> str:
+    """Угол экрана: «orb» — сфера, «plate» — плашка с чертой."""
+    _ensure_loaded()
+    with _lock:
+        return normalize_widget_form(_widget_form)
+
+
+def set_widget_form(form: str) -> None:
+    global _widget_form
+    chosen = normalize_widget_form(form)
+    _ensure_loaded()
+    with _lock:
+        _widget_form = chosen
+    _persist()
+    logging.info("[Настройки] Виджет: %s", chosen)
 
 
 def get_persona_preset() -> str:
