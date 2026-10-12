@@ -44,6 +44,7 @@ from .desk_policy import (
     pocket_cash_reserve,
     alt_bounce_ready,
     alt_exit_reason,
+    alt_sleeve_qty_for_exit,
     btc_dip_exit_reason,
     btc_dip_should_buy,
     alt_slot_pct,
@@ -783,11 +784,15 @@ class CryptoDeskMixin:
             }
             if not updated["hit"]:
                 continue
-            qty = float(pos.get("qty") or 0)
-            if ticker == BTC_DIP_TICKER:
-                qty = max(0.0, qty - float(read_btc_dip().get("qty") or 0))
-            value = qty * price
-            if qty <= 0 or value < min_trade:
+            pocket_qty = float(read_btc_dip().get("qty") or 0) if ticker == BTC_DIP_TICKER else 0.0
+            qty = alt_sleeve_qty_for_exit(
+                ticker=ticker,
+                held_qty=float(pos.get("qty") or 0),
+                pocket_qty=pocket_qty,
+                price=price,
+                min_trade_usd=min_trade,
+            )
+            if qty <= 0:
                 continue
             try:
                 parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price, maker=True))
@@ -821,11 +826,15 @@ class CryptoDeskMixin:
             if self._is_owner_position(ticker):
                 continue
             price = float(prices.get(ticker) or pos.get("price") or 0)
-            qty = float(pos.get("qty") or 0)
-            if ticker == BTC_DIP_TICKER:
-                qty = max(0.0, qty - float(read_btc_dip().get("qty") or 0))
-            value = float(pos.get("value") or 0) or qty * price
-            if price <= 0 or qty <= 0 or value < min_trade:
+            pocket_qty = float(read_btc_dip().get("qty") or 0) if ticker == BTC_DIP_TICKER else 0.0
+            qty = alt_sleeve_qty_for_exit(
+                ticker=ticker,
+                held_qty=float(pos.get("qty") or 0),
+                pocket_qty=pocket_qty,
+                price=price,
+                min_trade_usd=min_trade,
+            )
+            if qty <= 0:
                 continue
             entry = float(avg_costs.get(ticker) or 0) or float(
                 (new_trail.get(ticker) or {}).get("entry") or 0
@@ -838,7 +847,10 @@ class CryptoDeskMixin:
                 parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price, maker=True))
                 time.sleep(0.4)
             except Exception as exc:
-                logger.warning("[Крипта] выход альта %s: %s", ticker, exc)
+                if "no lots" in str(exc):
+                    logger.info("[Крипта] выход альта %s: %s", ticker, exc)
+                else:
+                    logger.warning("[Крипта] выход альта %s: %s", ticker, exc)
                 continue
             logger.info(
                 "[Крипта] альт %s: выход (%s) вход %.4g цена %.4g %+.1f%%",

@@ -229,6 +229,26 @@ def alt_exit_reason(*, price: float, entry: float, ma: float | None) -> str | No
     return None
 
 
+def alt_sleeve_qty_for_exit(
+    *,
+    ticker: str,
+    held_qty: float,
+    pocket_qty: float,
+    price: float,
+    min_trade_usd: float,
+) -> float:
+    """Объём для альтового выхода: без кармана SOL и без пыли ниже min_trade."""
+    qty = max(0.0, float(held_qty or 0))
+    if ticker == BTC_DIP_TICKER:
+        qty = max(0.0, qty - max(0.0, float(pocket_qty or 0)))
+    px = float(price or 0)
+    if px <= 0 or qty <= 0:
+        return 0.0
+    if qty * px + 1e-9 < float(min_trade_usd):
+        return 0.0
+    return qty
+
+
 def _held_value(row: dict[str, Any]) -> float:
     if row.get("held_value") is not None:
         return float(row.get("held_value") or 0)

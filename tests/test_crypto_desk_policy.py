@@ -183,6 +183,40 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.alt_exit_reason(price=105.0, entry=100.0, ma=110.0))
         self.assertIsNone(policy.alt_exit_reason(price=90.0, entry=100.0, ma=None))
 
+    def test_alt_sleeve_qty_for_exit_reserves_pocket(self):
+        sol = policy.BTC_DIP_TICKER
+        self.assertAlmostEqual(
+            policy.alt_sleeve_qty_for_exit(
+                ticker=sol,
+                held_qty=1.834,
+                pocket_qty=0.872,
+                price=111.0,
+                min_trade_usd=5.0,
+            ),
+            0.962,
+            places=3,
+        )
+        self.assertEqual(
+            policy.alt_sleeve_qty_for_exit(
+                ticker=sol,
+                held_qty=0.872,
+                pocket_qty=0.872,
+                price=111.0,
+                min_trade_usd=5.0,
+            ),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            policy.alt_sleeve_qty_for_exit(
+                ticker="BNB",
+                held_qty=0.5,
+                pocket_qty=0.872,
+                price=750.0,
+                min_trade_usd=5.0,
+            ),
+            0.5,
+        )
+
     def test_pick_watch_alt_entries_respects_room_and_blocks(self):
         bands = {
             "LINK": {"z": -3.0, "ma": 1.0},
