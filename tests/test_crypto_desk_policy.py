@@ -397,16 +397,21 @@ class TestDeskPolicy(unittest.TestCase):
     def test_entry_arm_waits_for_bounce_then_cancels(self):
         armed = policy.update_alt_arm(None, price=100.0, z=-2.8, now=1.0)
         self.assertAlmostEqual(armed["low"], 100.0)
-        self.assertFalse(policy.alt_bounce_ready(armed, price=100.0, z=-2.8))
-        deeper = policy.update_alt_arm(armed, price=98.0, z=-3.1, now=2.0)
+        later = 1.0 + policy.ALT_ENTRY_HOLD_SEC
+        self.assertFalse(policy.alt_bounce_ready(armed, price=101.6, z=-2.2, now=1.0 + 60))
+        self.assertTrue(policy.alt_bounce_ready(armed, price=101.6, z=-1.8, now=later))
+        deeper = policy.update_alt_arm(armed, price=98.0, z=-3.1, now=later)
         self.assertAlmostEqual(deeper["low"], 98.0)
-        self.assertFalse(policy.alt_bounce_ready(deeper, price=98.2, z=-3.0))
-        self.assertTrue(policy.alt_bounce_ready(deeper, price=98.4, z=-2.4))
-        self.assertFalse(policy.alt_bounce_ready(deeper, price=99.0, z=-1.8))
-        self.assertIsNone(policy.update_alt_arm(deeper, price=99.0, z=-1.4, now=3.0))
+        self.assertEqual(deeper["ts"], later)
+        held = later + policy.ALT_ENTRY_HOLD_SEC
+        self.assertFalse(policy.alt_bounce_ready(deeper, price=98.5, z=-2.4, now=held))
+        self.assertTrue(policy.alt_bounce_ready(deeper, price=99.5, z=-1.6, now=held))
+        self.assertIsNone(policy.update_alt_arm(deeper, price=102.0, z=-0.4, now=held))
         pocket = policy.update_pocket_arm(None, price=100.0, day_chg=-4.0, now=1.0)
-        self.assertFalse(policy.pocket_bounce_ready(pocket, price=100.2))
-        self.assertTrue(policy.pocket_bounce_ready(pocket, price=100.3))
+        self.assertFalse(policy.pocket_bounce_ready(pocket, price=101.2, now=1.0 + 60))
+        self.assertTrue(
+            policy.pocket_bounce_ready(pocket, price=101.2, now=1.0 + policy.POCKET_ENTRY_HOLD_SEC)
+        )
         self.assertIsNone(policy.update_pocket_arm(pocket, price=101.0, day_chg=-2.0, now=2.0))
 
     def test_watch_rate_limit(self):
@@ -1016,8 +1021,13 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertFalse([t for t, side, *_ in placed if side == "Buy"])
         self.assertNotIn("LINK", state["alloc"])
         self.assertAlmostEqual(read_entry_arms()["alts"]["LINK"]["low"], 18.0)
+        from skills.crypto.common import write_entry_arms
+
+        aged = read_entry_arms()
+        aged["alts"]["LINK"]["ts"] = time.time() - policy.ALT_ENTRY_HOLD_SEC - 5
+        write_entry_arms(aged["alts"], aged.get("pocket"))
         placed, result, state = self._watch_alt(
-            price=18.1, entry=0.0, alloc={"BTC": 40.0}, positions=[], cash=100.0
+            price=18.3, entry=0.0, alloc={"BTC": 40.0}, positions=[], cash=100.0
         )
         buys = [(t, q) for t, side, _b, q in placed if side == "Buy"]
         self.assertEqual([t for t, _q in buys], ["LINK"], result)
@@ -1388,14 +1398,16 @@ class TestBybitTape(unittest.TestCase):
         from skills.crypto.stream import BybitPublicTape
 
         tape = BybitPublicTape()
-        tape.set_entry_arms({"SOL": {"low": 100.0, "bounce": 0.4}})
+        old = time.time() - 21 * 60
+        tape.set_entry_arms({"SOL": {"low": 100.0, "bounce": 1.5, "hold": 20 * 60, "ts": old}})
         tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "99.5"}})
         self.assertEqual(tape.consume_signals(), "")
         self.assertAlmostEqual(tape.entry_lows()["SOL"], 99.5)
-        tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "99.9"}})
-        self.assertEqual(tape.consume_signals(), "отскок")
-        tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "100.2"}})
+        tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "101.2"}})
         self.assertEqual(tape.consume_signals(), "")
+        tape._entry["SOL"]["low_ts"] = time.time() - 21 * 60
+        tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "101.2"}})
+        self.assertEqual(tape.consume_signals(), "отскок")
 
     def test_kline_confirm_wakes(self):
         from skills.crypto.stream import BybitPublicTape

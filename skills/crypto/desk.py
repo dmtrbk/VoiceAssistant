@@ -34,6 +34,7 @@ from .common import (
 from .desk_policy import (
     ALT_BB_INTERVAL,
     ALT_ENTRY_BOUNCE_PCT,
+    ALT_ENTRY_HOLD_SEC,
     ALT_HELD_MIN_USD,
     ALT_MAX_NAMES,
     ALT_MIN_HOLD_HOURS,
@@ -53,6 +54,7 @@ from .desk_policy import (
     filter_auto_candidates,
     is_risk_off,
     POCKET_ENTRY_BOUNCE_PCT,
+    POCKET_ENTRY_HOLD_SEC,
     score_alloc,
     should_rebalance_leg,
     should_watch_dip_buy,
@@ -467,7 +469,12 @@ class CryptoDeskMixin:
         symbols = watch_stream_tickers(held_values=held_values, pocket_open=pocket_open)
         symbols |= set(arms["alts"])
         triggers: dict[str, dict[str, float]] = {
-            ticker: {"low": float(row["low"]), "bounce": ALT_ENTRY_BOUNCE_PCT}
+            ticker: {
+                "low": float(row["low"]),
+                "bounce": ALT_ENTRY_BOUNCE_PCT,
+                "hold": ALT_ENTRY_HOLD_SEC,
+                "ts": float(row.get("ts") or 0),
+            }
             for ticker, row in arms["alts"].items()
         }
         pocket_arm = arms.get("pocket")
@@ -476,10 +483,15 @@ class CryptoDeskMixin:
             prev = triggers.get(BTC_DIP_TICKER)
             low = float(pocket_arm["low"])
             bounce = POCKET_ENTRY_BOUNCE_PCT
+            hold = float(POCKET_ENTRY_HOLD_SEC)
+            ts = float(pocket_arm.get("ts") or 0)
             if prev:
-                low = min(low, float(prev["low"]))
+                if float(prev["low"]) < low:
+                    low = float(prev["low"])
+                    ts = float(prev.get("ts") or ts)
                 bounce = min(bounce, float(prev["bounce"]))
-            triggers[BTC_DIP_TICKER] = {"low": low, "bounce": bounce}
+                hold = max(hold, float(prev.get("hold") or 0))
+            triggers[BTC_DIP_TICKER] = {"low": low, "bounce": bounce, "hold": hold, "ts": ts}
         tape.set_symbols(symbols)
         tape.set_entry_arms(triggers)
         tape.set_legs([leg for leg in legs if str(leg.get("ticker") or "").upper() in symbols])
@@ -550,7 +562,9 @@ class CryptoDeskMixin:
                     ALT_ENTRY_BOUNCE_PCT,
                     updated["low"],
                 )
-            elif px > 0 and not alt_bounce_ready(updated, price=px, z=None if z is None else float(z)):
+            elif px > 0 and not alt_bounce_ready(
+                updated, price=px, z=None if z is None else float(z), now=now
+            ):
                 need = updated["low"] * (1.0 + ALT_ENTRY_BOUNCE_PCT / 100.0)
                 logger.info(
                     "[Крипта] альт %s жду отскок: дно %.4g сейчас %.4g нужно %.4g z %.2f",
@@ -580,7 +594,7 @@ class CryptoDeskMixin:
                 POCKET_ENTRY_BOUNCE_PCT,
                 pocket["low"],
             )
-        elif pocket and sol_px > 0 and not pocket_bounce_ready(pocket, price=sol_px):
+        elif pocket and sol_px > 0 and not pocket_bounce_ready(pocket, price=sol_px, now=now):
             need = pocket["low"] * (1.0 + POCKET_ENTRY_BOUNCE_PCT / 100.0)
             logger.info(
                 "[Крипта] карман %s жду отскок: дно %.4g сейчас %.4g нужно %.4g",
@@ -609,7 +623,12 @@ class CryptoDeskMixin:
         else:
             alts[ticker] = updated
         write_entry_arms(alts, arms.get("pocket"))
-        return alt_bounce_ready(updated, price=float(price or 0), z=None if z is None else float(z))
+        return alt_bounce_ready(
+            updated,
+            price=float(price or 0),
+            z=None if z is None else float(z),
+            now=time.time(),
+        )
 
     def _gather_map(self, fn: Callable[[str], Any], keys: set[str] | list[str], *, label: str) -> dict[str, Any]:
         items = [str(key) for key in keys]
@@ -908,6 +927,7 @@ class CryptoDeskMixin:
                     state,
                     price=float(prices.get(t) or 0),
                     z=(bands_for(t) or {}).get("z"),
+                    now=time.time(),
                 )
             ]
             ready.sort(key=lambda t: float((bands_for(t) or {}).get("z") or 0))
@@ -935,6 +955,7 @@ class CryptoDeskMixin:
                     alt_arms.get(ticker),
                     price=float(prices.get(ticker) or 0),
                     z=(bands_for(ticker) or {}).get("z"),
+                    now=time.time(),
                 )
                 if not should_watch_dip_buy(
                     ticker=ticker,
@@ -1062,7 +1083,7 @@ class CryptoDeskMixin:
         if blocked or not allow_entry or not btc_dip_should_buy(day_chg=day_chg, qty=0):
             return None
         pocket_arm = read_entry_arms().get("pocket")
-        if not pocket_bounce_ready(pocket_arm, price=price):
+        if not pocket_bounce_ready(pocket_arm, price=price, now=time.time()):
             return None
         budget = btc_dip_quote(equity)
         free_cash, _held_now = self._cash_and_held()

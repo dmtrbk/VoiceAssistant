@@ -129,11 +129,22 @@ class BybitPublicTape:
                 prev = self._entry.get(name) or {}
                 prev_low = float(prev.get("low") or 0)
                 fired = bool(prev.get("fired"))
+                low_ts = float(spec.get("ts") or time.time())
+                hold = float(spec.get("hold") or 0)
                 if prev_low > 0 and prev_low < low:
                     low = prev_low
-                if prev_low > 0 and low < prev_low - 1e-12:
+                    low_ts = float(prev.get("low_ts") or low_ts)
+                elif prev_low > 0 and low < prev_low - 1e-12:
                     fired = False
-                fresh[name] = {"low": low, "bounce": bounce, "fired": fired}
+                elif prev.get("low_ts"):
+                    low_ts = float(prev["low_ts"])
+                fresh[name] = {
+                    "low": low,
+                    "bounce": bounce,
+                    "fired": fired,
+                    "low_ts": low_ts,
+                    "hold": hold,
+                }
             self._entry = fresh
 
     def entry_lows(self) -> dict[str, float]:
@@ -250,10 +261,14 @@ class BybitPublicTape:
             return set()
         if price < low:
             arm["low"] = price
+            arm["low_ts"] = time.time()
             arm["fired"] = False
             return set()
         bounce = float(arm.get("bounce") or 0)
+        hold = float(arm.get("hold") or 0)
         if arm.get("fired") or bounce <= 0:
+            return set()
+        if hold > 0 and time.time() - float(arm.get("low_ts") or 0) < hold:
             return set()
         if price >= low * (1.0 + bounce / 100.0) - 1e-12:
             arm["fired"] = True

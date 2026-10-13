@@ -28,10 +28,13 @@ BTC_BULL_7D = 5.0
 # (333 дня часовых свечей Bybit; рыночные заявки — taker 0.18% за сторону, проверено и на 0.1%).
 ALT_BB_INTERVAL = "240"
 ALT_BB_ENTRY_Z = -2.5
-ALT_ENTRY_BOUNCE_PCT = 0.4
-ALT_ENTRY_STILL_Z = -2.0
-ALT_ENTRY_CANCEL_Z = -1.5
-POCKET_ENTRY_BOUNCE_PCT = 0.3
+# 0,4% ловил шум в начале падения. Нужен заметный отскок, и дно не должно обновляться.
+ALT_ENTRY_BOUNCE_PCT = 1.5
+ALT_ENTRY_HOLD_SEC = 20 * 60
+ALT_ENTRY_STILL_Z = -1.2
+ALT_ENTRY_CANCEL_Z = -0.5
+POCKET_ENTRY_BOUNCE_PCT = 1.0
+POCKET_ENTRY_HOLD_SEC = 20 * 60
 ALT_EXIT_MIN_GAIN_PCT = 1.0  # выход у средней, только если прибыль перекрывает 2×комиссию с запасом
 ALT_STOP_LOSS_PCT = 15.0
 ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
@@ -145,6 +148,20 @@ def alt_entry_ok(bb_z: Any) -> bool:
     return float(bb_z) <= ALT_BB_ENTRY_Z
 
 
+def _arm_low(state: dict[str, Any] | None, price: float, now: float) -> dict[str, float]:
+    """Новое дно сбрасывает таймер: отскок считается только после паузы."""
+    px = float(price)
+    if state is None or px < float(state.get("low") or 0) - 1e-12:
+        return {"low": px, "ts": float(now)}
+    return {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+
+
+def _bounce_held(state: dict[str, Any], now: float | None, hold_sec: float) -> bool:
+    if now is None:
+        return True
+    return float(now) - float(state.get("ts") or 0) >= float(hold_sec)
+
+
 def update_alt_arm(
     state: dict[str, Any] | None,
     *,
@@ -152,7 +169,7 @@ def update_alt_arm(
     z: float | None,
     now: float,
 ) -> dict[str, float] | None:
-    """Сигнал z ≤ −2,5 запоминает дно. Выше −1,5 сигнал снимается."""
+    """Сигнал z ≤ −2,5 запоминает дно. Близко к средней сигнал снимается."""
     if z is None:
         return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
     zf = float(z)
@@ -165,7 +182,7 @@ def update_alt_arm(
         if zf <= ALT_BB_ENTRY_Z:
             return {"low": px, "ts": float(now)}
         return None
-    return {"low": min(float(state["low"]), px), "ts": float(state.get("ts") or now)}
+    return _arm_low(state, px, now)
 
 
 def alt_bounce_ready(
@@ -173,9 +190,12 @@ def alt_bounce_ready(
     *,
     price: float,
     z: float | None,
+    now: float | None = None,
 ) -> bool:
-    """Покупка рукава: +0,4% от дна и z всё ещё не выше −2."""
+    """Покупка рукава: +1,5% от дна, дно держится 20 минут, z ещё не у средней."""
     if not state or z is None or float(z) > ALT_ENTRY_STILL_Z:
+        return False
+    if not _bounce_held(state, now, ALT_ENTRY_HOLD_SEC):
         return False
     low = float(state.get("low") or 0)
     px = float(price or 0)
@@ -201,12 +221,17 @@ def update_pocket_arm(
         return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
     if state is None:
         return {"low": px, "ts": float(now)}
-    return {"low": min(float(state["low"]), px), "ts": float(state.get("ts") or now)}
+    return _arm_low(state, px, now)
 
 
-def pocket_bounce_ready(state: dict[str, Any] | None, *, price: float) -> bool:
-    """Покупка кармана: +0,3% от дна после сигнала суток."""
-    if not state:
+def pocket_bounce_ready(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    now: float | None = None,
+) -> bool:
+    """Покупка кармана: +1% от дна, и это дно уже 20 минут не обновлялось."""
+    if not state or not _bounce_held(state, now, POCKET_ENTRY_HOLD_SEC):
         return False
     low = float(state.get("low") or 0)
     px = float(price or 0)
