@@ -8,7 +8,7 @@ import os
 import threading
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from . import common
@@ -22,6 +22,7 @@ from .common import (
     _MOEX,
     _MOEX_BOARDS,
     _SIGNAL_MAX_NAMES,
+    _SIGNAL_MAX_PAGES,
     _SIGNAL_MAX_SMALL,
     _SIGNAL_PAGE,
     _SIGNALS,
@@ -94,6 +95,17 @@ def _cycle_error_kind(exc: BaseException) -> str:
     if "transient" in text:
         return "сеть"
     return "ошибка"
+
+
+def _all_signal_pages(fetch_page: Callable[[int], list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Все страницы активных сигналов: порядок у Т-Инвест произвольный, одна страница — случайная выборка."""
+    out: list[dict[str, Any]] = []
+    for page in range(_SIGNAL_MAX_PAGES):
+        chunk = fetch_page(page)
+        out.extend(chunk)
+        if len(chunk) < _SIGNAL_PAGE:
+            break
+    return out
 
 
 class StocksDeskMixin:
@@ -352,29 +364,33 @@ class StocksDeskMixin:
         """Активные сигналы на покупку. None — запрос не прошёл (это не «сигналов нет»)."""
         if not self._token:
             return []
-        try:
+
+        def rest_page(page: int) -> list[dict[str, Any]]:
             data = self._post(
                 self._url(_SIGNALS),
                 {
                     "direction": "SIGNAL_DIRECTION_BUY",
                     "active": "SIGNAL_STATE_ACTIVE",
-                    "paging": {"limit": _SIGNAL_PAGE, "pageNumber": 0},
+                    "paging": {"limit": _SIGNAL_PAGE, "pageNumber": page},
                 },
-                cache_key="signals:buy:active",
+                cache_key=f"signals:buy:active:{page}",
             )
+            return list(data.get("signals") or [])
+
+        def grpc_page(page: int) -> list[dict[str, Any]]:
+            return signals_grpc.fetch_buy_signals(self._token, _SIGNAL_PAGE, page)
+
+        try:
+            raw_signals = _all_signal_pages(rest_page)
         except Exception as exc:
             logger.warning("[Биржа] сигналы Т-Инвест: %s", exc)
             try:
-                data = {"signals": signals_grpc.fetch_buy_signals(self._token, _SIGNAL_PAGE)}
+                raw_signals = _all_signal_pages(grpc_page)
             except Exception as grpc_exc:
                 logger.warning("[Биржа] сигналы Т-Инвест через gRPC: %s", grpc_exc)
                 return None
-            logger.info("[Биржа] сигналы Т-Инвест через gRPC: %d", len(data["signals"]))
-        out: list[dict[str, Any]] = []
-        for raw in data.get("signals") or []:
-            if isinstance(raw, dict) and _signal_is_buy(raw.get("direction")):
-                out.append(raw)
-        return out
+            logger.info("[Биржа] сигналы Т-Инвест через gRPC: %d", len(raw_signals))
+        return [raw for raw in raw_signals if isinstance(raw, dict) and _signal_is_buy(raw.get("direction"))]
 
     def _signal_lot_cost(
         self,
@@ -489,7 +505,15 @@ class StocksDeskMixin:
             return {}
 
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-        picked = ranked[:limit]
+        desk_held = {
+            t for t in held_now
+            if t in self._desk_bought and t not in self._manual_holds and t != _park_ticker()
+        }
+        kept = [item for item in ranked if item[0] in desk_held]
+        fresh = [item for item in ranked if item[0] not in desk_held]
+        picked = kept + fresh[: max(0, limit - len(kept))]
+        if kept:
+            logger.info("[Биржа] держу, сигнал ещё активен: %s", ", ".join(t for t, _ in kept))
         total = sum(value for _ticker, value in picked)
         if total <= 0:
             return {}

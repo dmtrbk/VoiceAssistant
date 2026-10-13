@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from skills.stocks import StocksSkill
 from skills.stocks import journal as sj
+from skills.stocks import desk as desk_mod
 from skills.stocks import signals_grpc
 from skills.stocks.common import (
     read_alloc_state,
@@ -452,6 +453,52 @@ class TestStocksDeskRules(unittest.TestCase):
             out = self.skill._fetch_buy_signals()
         grpc_fetch.assert_called_once()
         self.assertEqual([s["instrumentUid"] for s in out], ["u-sber"])
+
+    def test_signals_read_all_pages(self):
+        page_size = desk_mod._SIGNAL_PAGE
+        pages = {
+            0: [{"instrumentUid": f"a{i}", "direction": "SIGNAL_DIRECTION_BUY"} for i in range(page_size)],
+            1: [{"instrumentUid": "b0", "direction": "SIGNAL_DIRECTION_BUY"}],
+        }
+        seen: list[int] = []
+
+        def fake_post(_url, body, cache_key=None):
+            page = body["paging"]["pageNumber"]
+            seen.append(page)
+            return {"signals": pages.get(page, [])}
+
+        with patch.object(self.skill, "_post", side_effect=fake_post):
+            out = self.skill._fetch_buy_signals()
+        self.assertEqual(seen, [0, 1])
+        self.assertEqual(len(out), page_size + 1)
+
+    def test_desk_choose_keeps_held_desk_name_with_signal(self):
+        candidates = [
+            {"ticker": "TATN", "price": 660.0, "lot": 1, "held": 2},
+            {"ticker": "SIBN", "price": 600.0, "lot": 1, "held": 3},
+            {"ticker": "GAZP", "price": 100.0, "lot": 10},
+            {"ticker": "HYDR", "price": 0.43, "lot": 1000},
+        ]
+        signals = [
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-gazp", "probability": 90},
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-hydr", "probability": 80},
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-tatn", "probability": 20},
+            {"direction": "SIGNAL_DIRECTION_BUY", "instrumentUid": "u-sibn", "probability": 99},
+        ]
+        insts = {
+            uid: {"ticker": uid[2:].upper(), "classCode": "TQBR", "instrumentKind": "INSTRUMENT_TYPE_SHARE", "lot": 1}
+            for uid in ("u-gazp", "u-hydr", "u-tatn", "u-sibn")
+        }
+        self.skill._desk_bought = {"TATN"}
+        self.skill._desk_bought_ready = True
+        with (
+            patch.object(self.skill, "_fetch_buy_signals", return_value=signals),
+            patch.object(self.skill, "_instrument", side_effect=lambda _f, _t, uid=None: insts.get(uid or "", {})),
+            patch.object(self.skill, "_recommend_manual_buys"),
+            patch.object(desk_mod, "_SIGNAL_MAX_NAMES", 2),
+        ):
+            alloc = self.skill._desk_choose(candidates, equity=20_000)
+        self.assertEqual(set(alloc), {"TATN", "GAZP"})
 
     def test_grpc_signal_codec(self):
         self.assertEqual(signals_grpc.encode_request(10), bytes([0x38, 1, 0x40, 1, 0x4A, 4, 0x08, 10, 0x10, 0]))

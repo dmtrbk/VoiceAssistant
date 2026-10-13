@@ -60,6 +60,7 @@ _MIN_TRADE_HARD_RUB = 1000.0
 _MIN_TRADE_HARD_CAP_PCT = 0.25
 _SMALL_EQUITY_RUB = 5000.0
 _SIGNAL_PAGE = 50
+_SIGNAL_MAX_PAGES = 10
 _SIGNAL_MAX_NAMES = 4
 _SIGNAL_MAX_SMALL = 2
 # TMOS: API 30052 Instrument forbidden. SIBN: нужен тест неквала, хозяин берёт в приложении.

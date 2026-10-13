@@ -37,9 +37,9 @@ def _key(field: int, wire: int) -> bytes:
     return _varint((field << 3) | wire)
 
 
-def encode_request(limit: int) -> bytes:
+def encode_request(limit: int, page: int = 0) -> bytes:
     """GetSignalsRequest: direction=7, active=8, paging=9 {limit=1, page_number=2}."""
-    paging = _key(1, 0) + _varint(limit) + _key(2, 0) + _varint(0)
+    paging = _key(1, 0) + _varint(limit) + _key(2, 0) + _varint(page)
     return (
         _key(7, 0) + _varint(_DIRECTION_BUY)
         + _key(8, 0) + _varint(_STATE_ACTIVE)
@@ -133,7 +133,7 @@ def _root_certificates() -> bytes:
     return roots
 
 
-def fetch_buy_signals(token: str, limit: int, timeout: float = 15.0) -> list[dict[str, Any]]:
+def fetch_buy_signals(token: str, limit: int, page: int = 0, timeout: float = 15.0) -> list[dict[str, Any]]:
     import grpc
 
     host = _HOST_SANDBOX if _sandbox() else _HOST_PROD
@@ -141,7 +141,7 @@ def fetch_buy_signals(token: str, limit: int, timeout: float = 15.0) -> list[dic
     try:
         call = channel.unary_unary(_METHOD)
         response = call(
-            encode_request(limit),
+            encode_request(limit, page),
             metadata=[("authorization", f"Bearer {token}")],
             timeout=timeout,
         )
