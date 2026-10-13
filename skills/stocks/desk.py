@@ -36,22 +36,28 @@ from .common import (
     _signal_weight,
     _write_ticker_set,
     read_alloc_state,
+    read_entry_arms,
     read_trail_state,
     write_alloc_state,
+    write_entry_arms,
     write_trail_state,
 )
 from .desk_policy import (
     COOLDOWN_HOURS,
     MIN_HOLD_HOURS,
     WATCH_PERIOD_CALM,
+    WATCH_PERIOD_NEAR,
     apply_cash_floor,
     cash_floor_pct,
+    entry_bounce_ready,
+    entry_wait_line,
     exit_reason,
     index_changes,
     is_risk_off,
     park_amount_rub,
     park_release_lots,
     should_rebalance_leg,
+    update_entry_arm,
     update_trail_leg,
     watch_period_sec,
     watch_rate_ok,
@@ -625,8 +631,17 @@ class StocksDeskMixin:
                 for ticker in relevant_tickers
             }
 
-        # 2. Цикл ПОКУПКИ: принцип «Сначала считаем — потом покупаем»
+        # 2. Цикл ПОКУПКИ: уже открытую ногу добираем по коридору.
+        # Новую бумагу не берём в начале движения: сначала дно, пауза и отскок.
+        now = time.time()
+        held = {
+            ticker
+            for ticker, pos in positions.items()
+            if float(pos.get("qty") or 0) > 0
+        }
+        arms = self._sync_entry_arms(target_alloc, prices, held, now=now)
         buy_candidates: list[tuple[str, float]] = []
+        waited: list[str] = []
         for ticker, target_pct in target_alloc.items():
             if self._is_buy_blocked(ticker):
                 continue
@@ -640,6 +655,15 @@ class StocksDeskMixin:
                 min_trade_rub=min_trade_rub,
             ):
                 continue
+            if ticker not in held:
+                price = prices.get(ticker, 0.0)
+                arm = arms.get(ticker)
+                if not entry_bounce_ready(arm, price=price, now=now):
+                    if arm:
+                        line = entry_wait_line(ticker, arm, price, now)
+                        waited.append(line)
+                        logger.info("[Биржа] %s", line)
+                    continue
             buy_candidates.append((ticker, diff))
 
         buy_candidates.sort(key=lambda item: item[1], reverse=True)
@@ -682,13 +706,24 @@ class StocksDeskMixin:
                 res = self._place_order(ticker, "ORDER_DIRECTION_BUY", lots_to_buy)
                 parts.append(res)
                 acted = True
+                arms.pop(ticker, None)
                 time.sleep(0.6)
                 self._bust_broker_cache()
             except Exception as exc:
                 logger.warning("[Биржа] Ошибка при покупке %s: %s", ticker, exc)
 
+        write_entry_arms(arms)
+        self._pending_entry_arms = arms
+        if arms:
+            self._watch_period_sec = min(
+                int(getattr(self, "_watch_period_sec", WATCH_PERIOD_CALM) or WATCH_PERIOD_CALM),
+                WATCH_PERIOD_NEAR,
+            )
+
         if not acted or not parts:
-            if buy_candidates:
+            if waited and not buy_candidates:
+                result = "Жду отскок: " + "; ".join(waited)
+            elif buy_candidates:
                 result = "Цель есть, но свободных лотов пока не набралось."
             else:
                 result = "Портфель уже сбалансирован в целевых долях."
@@ -699,6 +734,65 @@ class StocksDeskMixin:
             logger.info("[Биржа] авто-ребалансировка: %s", result)
             return result
         return result
+
+    def _sync_entry_arms(
+        self,
+        target_alloc: dict[str, float],
+        prices: dict[str, float],
+        held: set[str],
+        *,
+        now: float,
+    ) -> dict[str, dict[str, float]]:
+        """Дно только по бумагам из цели, которых ещё нет в портфеле."""
+        prev = read_entry_arms()
+        kept: dict[str, dict[str, float]] = {}
+        for ticker in target_alloc:
+            if ticker in held or self._is_buy_blocked(ticker):
+                continue
+            updated = update_entry_arm(
+                prev.get(ticker),
+                price=float(prices.get(ticker) or 0),
+                now=now,
+            )
+            if updated:
+                kept[ticker] = updated
+        return kept
+
+    def _touch_entry_arms(self, target_alloc: dict[str, float]) -> dict[str, dict[str, float]]:
+        """Обновить дно без заявок: лимит сделок глушит покупку, но не саму паузу."""
+        if not target_alloc:
+            write_entry_arms({})
+            self._pending_entry_arms = {}
+            return {}
+        positions: dict[str, dict[str, Any]] = {}
+        try:
+            rows, _day, _total = self._positions()
+            positions = {row["ticker"]: row for row in rows}
+        except Exception as exc:
+            logger.info("[Биржа] ожидание входа: портфель недоступен: %s", exc)
+        held = {ticker for ticker, pos in positions.items() if float(pos.get("qty") or 0) > 0}
+        prices: dict[str, float] = {}
+        for ticker in target_alloc:
+            if ticker in held:
+                continue
+            quoted = float((positions.get(ticker) or {}).get("price") or 0)
+            if quoted > 0:
+                prices[ticker] = quoted
+                continue
+            try:
+                _name, px, _pct = self._quote(ticker)
+                prices[ticker] = float(px or 0)
+            except Exception as exc:
+                logger.info("[Биржа] ожидание входа %s: %s", ticker, exc)
+                prices[ticker] = 0.0
+        now = time.time()
+        arms = self._sync_entry_arms(target_alloc, prices, held, now=now)
+        write_entry_arms(arms)
+        self._pending_entry_arms = arms
+        for ticker, arm in arms.items():
+            if not entry_bounce_ready(arm, price=prices.get(ticker, 0.0), now=now):
+                logger.info("[Биржа] %s", entry_wait_line(ticker, arm, prices.get(ticker, 0.0), now))
+        return arms
 
     def _trade_auto(self, silent: bool = False) -> str:
         """Сам формирует сбалансированный портфель и ребалансирует фонд."""
@@ -836,14 +930,28 @@ class StocksDeskMixin:
                 risk_off = True
                 alloc = {}
                 logger.info("[Биржа] дозор: %s", why)
-        if alloc:
+        pending: dict[str, dict[str, float]] = {}
+        if alloc and not risk_off:
             if watch_rate_ok(watch_trades):
                 result = self._rebalance_portfolio(alloc, silent=False)
+                pending = getattr(self, "_pending_entry_arms", {}) or {}
                 if result.startswith("Ребалансировал"):
                     watch_trades.append(time.time())
                     parts.append(result)
+                elif result.startswith("Жду отскок"):
+                    parts.append(result)
             else:
-                logger.info("[Биржа] дозор: лимит сделок за час")
+                logger.info("[Биржа] дозор: лимит сделок за час, дно для новых бумаг обновляю")
+                pending = self._touch_entry_arms(alloc)
+        else:
+            pending = self._touch_entry_arms({})
+        period = watch_period_sec(
+            legs=getattr(self, "_watch_legs", []),
+            waiting_entry=bool(pending),
+        )
+        if pending and period < WATCH_PERIOD_CALM:
+            logger.info("[Биржа] дозор: жду отскок, интервал %dс", period)
+        self._watch_period_sec = period
         if sold or risk_off != bool(state.get("risk_off")) or len(watch_trades) != len(state.get("watch_trades") or []):
             write_alloc_state(alloc, why=why, risk_off=risk_off, watch_trades=watch_trades)
         result = "дозор: " + (" ".join(parts) if parts else "без сделок")
@@ -855,6 +963,7 @@ class StocksDeskMixin:
         """Стоп от средней цены и трейл от пика — по бумагам стола, без коридора и удержания."""
         positions, _day, _total = self._safe_positions()
         if not positions:
+            self._watch_legs = []
             self._watch_period_sec = WATCH_PERIOD_CALM
             return [], set()
         park = _park_ticker()
@@ -923,6 +1032,7 @@ class StocksDeskMixin:
             else:
                 snaps.pop()
         write_trail_state(new_legs)
+        self._watch_legs = snaps
         period = watch_period_sec(legs=snaps)
         self._watch_period_sec = period
         for row in snaps:

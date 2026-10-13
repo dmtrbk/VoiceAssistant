@@ -31,6 +31,10 @@ WATCH_PERIOD_CALM = 15 * 60
 WATCH_PERIOD_NEAR = 3 * 60
 NEAR_STOP_GAP = 2.0
 NEAR_TRAIL_GAP = 1.0
+# Новая бумага: сигнал только запоминает дно. Покупка — после паузы и отскока,
+# иначе заявка встаёт в начале падения.
+ENTRY_BOUNCE_PCT = 1.5
+ENTRY_HOLD_SEC = 20 * 60
 # Паркинг: в фонд уходит кэш сверх буфера, и только если сумма заметная —
 # каждая сделка с фондом стоит комиссию и спред.
 PARK_BUFFER_PCT = 2.0
@@ -119,10 +123,11 @@ def should_rebalance_leg(
 def watch_period_sec(
     *,
     legs: list[dict[str, Any]],
+    waiting_entry: bool = False,
     calm: int = WATCH_PERIOD_CALM,
     near: int = WATCH_PERIOD_NEAR,
 ) -> int:
-    """15 мин спокойно; 3 мин, если цена близко к стопу −10% или к трейлу."""
+    """15 мин спокойно; 3 мин у стопа, у трейла или пока новая бумага ждёт отскок."""
     for leg in legs:
         px = float(leg.get("price") or 0)
         ent = float(leg.get("entry") or 0)
@@ -134,7 +139,72 @@ def watch_period_sec(
         stop = float(leg.get("stop") or 0)
         if leg.get("armed") and stop > 0 and px <= stop * (1.0 + NEAR_TRAIL_GAP / 100.0):
             return int(near)
+    if waiting_entry:
+        return int(near)
     return int(calm)
+
+
+def _arm_ts(state: dict[str, Any], now: float) -> float:
+    raw = state.get("ts")
+    if raw is None or raw == "":
+        return float(now)
+    return float(raw)
+
+
+def _arm_low(state: dict[str, Any] | None, price: float, now: float) -> dict[str, float]:
+    """Новое дно сбрасывает таймер: отскок считается только после паузы."""
+    px = float(price)
+    if state is None or px < float(state.get("low") or 0) - 1e-12:
+        return {"low": px, "ts": float(now)}
+    return {"low": float(state["low"]), "ts": _arm_ts(state, now)}
+
+
+def _bounce_held(state: dict[str, Any], now: float | None, hold_sec: float) -> bool:
+    if now is None:
+        return True
+    return float(now) - _arm_ts(state, 0.0) >= float(hold_sec)
+
+
+def update_entry_arm(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    now: float,
+) -> dict[str, float] | None:
+    """Сигнал на новую бумагу запоминает дно. Пока дно обновляется, таймер с нуля."""
+    px = float(price or 0)
+    if px <= 0:
+        if state is None:
+            return None
+        return {"low": float(state["low"]), "ts": _arm_ts(state, now)}
+    return _arm_low(state, px, now)
+
+
+def entry_bounce_ready(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    now: float | None = None,
+) -> bool:
+    """Покупка новой бумаги: +1,5% от дна, и это дно уже 20 минут не обновлялось."""
+    if not state or not _bounce_held(state, now, ENTRY_HOLD_SEC):
+        return False
+    low = float(state.get("low") or 0)
+    px = float(price or 0)
+    if low <= 0 or px <= 0:
+        return False
+    return px >= low * (1.0 + ENTRY_BOUNCE_PCT / 100.0) - 1e-12
+
+
+def entry_wait_line(ticker: str, state: dict[str, Any], price: float, now: float) -> str:
+    """Строка дозора: дно, цена отскока и сколько ещё держать паузу."""
+    low = float(state.get("low") or 0)
+    need = low * (1.0 + ENTRY_BOUNCE_PCT / 100.0)
+    left = max(0.0, float(ENTRY_HOLD_SEC) - (float(now) - _arm_ts(state, now)))
+    return (
+        f"{str(ticker or '?').upper()} жду отскок: дно {low:.4g}, "
+        f"нужно {need:.4g} (+{ENTRY_BOUNCE_PCT:.1f}%), пауза ещё {int(left // 60)} мин"
+    )
 
 
 def watch_snapshot_line(

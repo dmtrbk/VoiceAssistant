@@ -33,15 +33,19 @@ class TestStocks(unittest.TestCase):
         patcher_bought = patch("skills.stocks.common._BOUGHT_PATH", bought_path)
         patcher_trade = patch("skills.stocks.common._TRADE_PATH", trade_path)
         alloc_path = os.path.join(self.tmp.name, "alloc.json")
+        arm_path = os.path.join(self.tmp.name, "entry_arm.json")
         patcher_alloc = patch("skills.stocks.common._ALLOC_PATH", alloc_path)
+        patcher_arm = patch("skills.stocks.common._ENTRY_ARM_PATH", arm_path)
         patcher_hold.start()
         patcher_bought.start()
         patcher_trade.start()
         patcher_alloc.start()
+        patcher_arm.start()
         self.addCleanup(patcher_hold.stop)
         self.addCleanup(patcher_bought.stop)
         self.addCleanup(patcher_trade.stop)
         self.addCleanup(patcher_alloc.stop)
+        self.addCleanup(patcher_arm.stop)
         self.skill = StocksSkill()
 
     def test_extract_lots(self):
@@ -247,6 +251,9 @@ class TestStocks(unittest.TestCase):
 
     def test_rebalance_small_account_buys_target(self):
         self.skill._token = "test-token"
+        from skills.stocks.common import write_entry_arms
+
+        write_entry_arms({"VTBR": {"low": 78.0, "ts": 0}})
         with (
             patch.object(self.skill, "_positions", return_value=([], 0.0, 0.0)),
             patch.object(self.skill, "_broker_cash", return_value=300.0),
@@ -262,6 +269,9 @@ class TestStocks(unittest.TestCase):
 
     def test_rebalance_drops_tmos_and_buys_the_rest(self):
         self.skill._token = "test-token"
+        from skills.stocks.common import write_entry_arms
+
+        write_entry_arms({"VTBR": {"low": 78.0, "ts": 0}})
         with (
             patch.object(self.skill, "_positions", return_value=([], 0.0, 0.0)),
             patch.object(self.skill, "_broker_cash", return_value=300.0),

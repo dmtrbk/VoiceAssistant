@@ -9,17 +9,28 @@ from zoneinfo import ZoneInfo
 from skills.stocks import StocksSkill
 from skills.stocks import journal as sj
 from skills.stocks import signals_grpc
-from skills.stocks.common import read_alloc_state, read_trail_state, write_alloc_state, write_trail_state
+from skills.stocks.common import (
+    read_alloc_state,
+    read_entry_arms,
+    read_trail_state,
+    write_alloc_state,
+    write_entry_arms,
+    write_trail_state,
+)
 from skills.stocks.desk_policy import (
     CASH_FLOOR_PCT,
+    ENTRY_BOUNCE_PCT,
+    ENTRY_HOLD_SEC,
     apply_cash_floor,
     cash_floor_pct,
+    entry_bounce_ready,
     exit_reason,
     index_changes,
     is_risk_off,
     park_amount_rub,
     park_release_lots,
     should_rebalance_leg,
+    update_entry_arm,
     update_trail_leg,
     watch_period_sec,
     watch_rate_ok,
@@ -91,9 +102,26 @@ class TestStocksPolicy(unittest.TestCase):
             }]),
             WATCH_PERIOD_NEAR,
         )
+        self.assertEqual(watch_period_sec(legs=[], waiting_entry=True), WATCH_PERIOD_NEAR)
         line = watch_snapshot_line("SBER", price=95.0, entry=100.0, high=100.0, armed=False, stop=0.0)
         self.assertIn("avg=100", line)
         self.assertIn("до стопа", line)
+
+    def test_entry_arm_waits_for_bounce_and_hold(self):
+        armed = update_entry_arm(None, price=100.0, now=1_000.0)
+        self.assertEqual(armed, {"low": 100.0, "ts": 1_000.0})
+        self.assertFalse(entry_bounce_ready(armed, price=101.0, now=1_000.0 + ENTRY_HOLD_SEC))
+        slipped = update_entry_arm(armed, price=98.0, now=1_500.0)
+        self.assertEqual(slipped["low"], 98.0)
+        self.assertEqual(slipped["ts"], 1_500.0)
+        held = update_entry_arm(slipped, price=99.0, now=1_500.0 + ENTRY_HOLD_SEC)
+        self.assertEqual(held["low"], 98.0)
+        self.assertEqual(held["ts"], 1_500.0)
+        need = 98.0 * (1.0 + ENTRY_BOUNCE_PCT / 100.0)
+        self.assertFalse(entry_bounce_ready(held, price=need - 0.01, now=1_500.0 + ENTRY_HOLD_SEC))
+        self.assertFalse(entry_bounce_ready(held, price=need, now=1_500.0 + ENTRY_HOLD_SEC - 1))
+        self.assertTrue(entry_bounce_ready(held, price=need, now=1_500.0 + ENTRY_HOLD_SEC))
+        self.assertEqual(update_entry_arm(held, price=0, now=9_000.0), held)
 
     def test_watch_rate(self):
         now = 10_000.0
@@ -187,6 +215,7 @@ class TestStocksDeskRules(unittest.TestCase):
             ("bought.json", "_BOUGHT_PATH"),
             ("trades.json", "_TRADE_PATH"),
             ("alloc.json", "_ALLOC_PATH"),
+            ("entry_arm.json", "_ENTRY_ARM_PATH"),
             ("trail.json", "_TRAIL_PATH"),
             ("daily.json", "_DAILY_PATH"),
         ):
@@ -231,6 +260,87 @@ class TestStocksDeskRules(unittest.TestCase):
         ):
             self.skill._rebalance_portfolio({"VTBR": 100.0})
         place.assert_not_called()
+
+    def test_new_entry_waits_for_bounce_then_buys(self):
+        self.skill._token = "tok"
+        t0 = 1_000_000.0
+        with (
+            patch.object(self.skill, "_positions", return_value=([], 0.0, 0.0)),
+            patch.object(self.skill, "_broker_cash", return_value=10_000.0),
+            patch.object(self.skill, "_quote", return_value=("ВТБ", 100.0, 0.0)),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=(100, 0)),
+            patch.object(self.skill, "_day_changes", return_value={}),
+            patch.object(self.skill, "_place_order", return_value="Купил 100 лотов: ВТБ.") as place,
+            patch("skills.stocks.desk.time.time", return_value=t0),
+        ):
+            result = self.skill._rebalance_portfolio({"VTBR": 100.0})
+        place.assert_not_called()
+        self.assertIn("Жду отскок", result)
+        self.assertEqual(read_entry_arms()["VTBR"]["low"], 100.0)
+
+        with (
+            patch.object(self.skill, "_positions", return_value=([], 0.0, 0.0)),
+            patch.object(self.skill, "_broker_cash", return_value=10_000.0),
+            patch.object(self.skill, "_quote", return_value=("ВТБ", 99.0, -1.0)),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=(100, 0)),
+            patch.object(self.skill, "_day_changes", return_value={}),
+            patch.object(self.skill, "_place_order") as place,
+            patch("skills.stocks.desk.time.time", return_value=t0 + 10 * 60),
+        ):
+            self.skill._rebalance_portfolio({"VTBR": 100.0})
+        place.assert_not_called()
+        self.assertEqual(read_entry_arms()["VTBR"]["low"], 99.0)
+
+        bounced = 99.0 * (1.0 + ENTRY_BOUNCE_PCT / 100.0)
+        with (
+            patch.object(self.skill, "_positions", return_value=([], 0.0, 0.0)),
+            patch.object(self.skill, "_broker_cash", return_value=10_000.0),
+            patch.object(self.skill, "_quote", return_value=("ВТБ", bounced, 1.0)),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=(100, 0)),
+            patch.object(self.skill, "_day_changes", return_value={}),
+            patch.object(self.skill, "_place_order", return_value="Купил 99 лотов: ВТБ.") as place,
+            patch("skills.stocks.desk.time.time", return_value=t0 + 10 * 60 + ENTRY_HOLD_SEC),
+        ):
+            result = self.skill._rebalance_portfolio({"VTBR": 100.0})
+        place.assert_called_once()
+        self.assertEqual(place.call_args.args[0], "VTBR")
+        self.assertNotIn("VTBR", read_entry_arms())
+        self.assertIn("Ребалансировал", result)
+
+        write_entry_arms({"SBER": {"low": 300.0, "ts": t0}})
+        with (
+            patch.object(self.skill, "_positions", return_value=([], 0.0, 0.0)),
+            patch.object(self.skill, "_broker_cash", return_value=10_000.0),
+            patch.object(self.skill, "_quote", return_value=("ВТБ", 100.0, 0.0)),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=(0, 0)),
+            patch.object(self.skill, "_day_changes", return_value={}),
+            patch.object(self.skill, "_place_order") as place,
+            patch("skills.stocks.desk.time.time", return_value=t0),
+        ):
+            self.skill._rebalance_portfolio({"VTBR": 100.0})
+        self.assertNotIn("SBER", read_entry_arms())
+
+    def test_open_leg_still_buys_without_bounce(self):
+        self.skill._token = "tok"
+        self.skill._desk_bought = {"SBER"}
+        self.skill._desk_bought_ready = True
+        positions = ([{"ticker": "SBER", "qty": 100.0, "price": 200.0}], 0.0, 0.0)
+        with (
+            patch.object(self.skill, "_positions", return_value=positions),
+            patch.object(self.skill, "_broker_cash", return_value=50_000.0),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=(250, 100)),
+            patch.object(self.skill, "_day_changes", return_value={}),
+            patch.object(self.skill, "_place_order", return_value="Купил 250 лотов: Сбер.") as place,
+        ):
+            result = self.skill._rebalance_portfolio({"SBER": 100.0})
+        place.assert_called_once_with("SBER", "ORDER_DIRECTION_BUY", 250)
+        self.assertIn("Ребалансировал", result)
+        self.assertEqual(read_entry_arms(), {})
 
     def test_rebalance_band_skips_small_drift(self):
         self.skill._desk_bought = {"SBER"}
@@ -463,9 +573,11 @@ class TestStocksDeskRules(unittest.TestCase):
             patch.object(self.skill, "_desk_exits", return_value=(["Продал SBER."], {"SBER"})),
             patch.object(self.skill, "_imoex_regime", return_value=(None, None)),
             patch.object(self.skill, "_rebalance_portfolio") as reb,
+            patch.object(self.skill, "_touch_entry_arms", return_value={}) as touch,
         ):
             out = self.skill._desk_watch_locked(silent=True)
         reb.assert_not_called()
+        touch.assert_called_once_with({"NVTK": 40.0})
         self.assertIn("Продал SBER.", out)
         self.assertEqual(read_alloc_state()["alloc"], {"NVTK": 40.0})
 
