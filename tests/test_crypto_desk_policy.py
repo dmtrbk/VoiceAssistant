@@ -870,6 +870,37 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             self.skill._rebalance({"BTC": 20.0, "ETH": 20.0})
         self.assertNotIn(("SOL", "Sell"), placed)
 
+    def test_risk_off_rebalance_sells_sleeve_keeps_pocket(self):
+        from skills.crypto.common import read_btc_dip, write_btc_dip
+
+        write_btc_dip(0.9, 100.0)
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, base_qty))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(
+                self.skill,
+                "_wallet",
+                return_value=(
+                    100.0,
+                    [{"ticker": "SOL", "qty": 1.8, "value": 180.0, "price": 100.0, "name": "Солана"}],
+                ),
+            ),
+            patch.object(self.skill, "_cash_and_held", return_value=(100.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_ticker", return_value={"price": 100.0, "chg": -4.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"SOL"}
+            self.skill._rebalance({}, respect_hold=False)
+        self.assertEqual(placed, [("SOL", "Sell", 0.9)])
+        self.assertAlmostEqual(read_btc_dip()["qty"], 0.9)
+
     def test_btc_dip_sells_only_pocket_on_bounce(self):
         from skills.crypto.common import read_btc_dip, write_btc_dip
 

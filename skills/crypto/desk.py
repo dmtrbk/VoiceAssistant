@@ -1111,8 +1111,8 @@ class CryptoDeskMixin:
         }
         dip_qty = float(read_btc_dip().get("qty") or 0)
         dip_px = float(prices.get(BTC_DIP_TICKER) or 0)
-        if dip_qty > 0 and dip_px > 0 and respect_hold and BTC_DIP_TICKER in current_values:
-            # Карман не продаём как лишний альт и не занимаем им слот ядра.
+        if dip_qty > 0 and dip_px > 0 and BTC_DIP_TICKER in current_values:
+            # Карман не продаём как лишний альт, в том числе в риск-офф.
             current_values[BTC_DIP_TICKER] = max(
                 0.0, current_values[BTC_DIP_TICKER] - dip_qty * dip_px
             )
@@ -1154,7 +1154,7 @@ class CryptoDeskMixin:
                 continue
             price = prices.get(ticker) or 0.0
             qty = float(positions.get(ticker, {}).get("qty") or 0)
-            if ticker == BTC_DIP_TICKER and dip_qty > 0 and respect_hold:
+            if ticker == BTC_DIP_TICKER and dip_qty > 0:
                 qty = max(0.0, qty - dip_qty)
             if target_alloc.get(ticker, 0.0) <= 0:
                 sell_qty = qty
@@ -1165,8 +1165,6 @@ class CryptoDeskMixin:
                 continue
             try:
                 parts.append(self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True))
-                if ticker == BTC_DIP_TICKER and not respect_hold:
-                    write_btc_dip(0, 0)
                 time.sleep(0.4)
             except Exception as exc:
                 logger.warning("[Крипта] продажа %s: %s", ticker, exc)
