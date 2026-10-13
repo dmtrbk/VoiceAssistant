@@ -34,7 +34,7 @@ ALT_ENTRY_HOLD_SEC = 20 * 60
 ALT_ENTRY_STILL_Z = -1.2
 ALT_ENTRY_CANCEL_Z = -0.5
 POCKET_ENTRY_BOUNCE_PCT = 1.0
-POCKET_ENTRY_HOLD_SEC = 20 * 60
+POCKET_ENTRY_HOLD_SEC = 10 * 60
 ALT_EXIT_MIN_GAIN_PCT = 1.0  # выход у средней, только если прибыль перекрывает 2×комиссию с запасом
 ALT_STOP_LOSS_PCT = 15.0
 ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
@@ -52,6 +52,9 @@ BTC_DIP_TICKER = "SOL"
 BTC_DIP_PCT = 25.0
 BTC_DIP_DAY_PCT = -3.0
 BTC_DIP_EXIT_PCT = 1.1
+# Плюс +1,1% только взводит вершину. Продажа — откат от неё, пауза короче входа.
+POCKET_EXIT_PULLBACK_PCT = 1.0
+POCKET_EXIT_HOLD_SEC = 5 * 60
 BTC_DIP_STOP_PCT = 15.0
 WATCH_MAX_TRADES_PER_HOUR = 2
 WATCH_PERIOD_CALM = 12 * 60
@@ -98,18 +101,23 @@ def btc_dip_should_buy(*, day_chg: float | None, qty: float) -> bool:
     return float(day_chg) <= BTC_DIP_DAY_PCT
 
 
-def btc_dip_exit_reason(*, price: float, entry: float) -> str | None:
-    """Выход кармана: +1.1% от своей цены или стоп −15%."""
+def btc_dip_exit_reason(
+    *,
+    price: float,
+    entry: float,
+    exit_arm: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> str | None:
+    """Стоп −15% сразу. Плюс не закрываем на пороге — только откат от вершины."""
     px = float(price or 0)
     ent = float(entry or 0)
     if px <= 0 or ent <= 0:
         return None
     gain = (px / ent - 1.0) * 100.0
-    # Ровно +1.1% в float чуть меньше порога — иначе отскок молчит.
-    if gain >= BTC_DIP_EXIT_PCT - 1e-6:
-        return "отскок"
     if gain <= -BTC_DIP_STOP_PCT:
         return "стоп"
+    if pocket_exit_ready(exit_arm, price=px, now=now):
+        return "вершина"
     return None
 
 
@@ -230,7 +238,7 @@ def pocket_bounce_ready(
     price: float,
     now: float | None = None,
 ) -> bool:
-    """Покупка кармана: +1% от дна, и это дно уже 20 минут не обновлялось."""
+    """Покупка кармана: +1% от дна, и это дно уже 10 минут не обновлялось."""
     if not state or not _bounce_held(state, now, POCKET_ENTRY_HOLD_SEC):
         return False
     low = float(state.get("low") or 0)
@@ -238,6 +246,51 @@ def pocket_bounce_ready(
     if low <= 0 or px <= 0:
         return False
     return px >= low * (1.0 + POCKET_ENTRY_BOUNCE_PCT / 100.0) - 1e-12
+
+
+def update_pocket_exit_arm(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    entry: float,
+    now: float,
+) -> dict[str, float] | None:
+    """Плюс ≥ +1,1% запоминает вершину. Новая вершина сбрасывает таймер.
+
+    Ниже порога ловушка ещё не взведена. Уже взведенная не снимается:
+    откат как раз и есть сигнал продажи.
+    """
+    px = float(price or 0)
+    ent = float(entry or 0)
+    if px <= 0 or ent <= 0:
+        if state is None:
+            return None
+        return {"high": float(state["high"]), "ts": float(state.get("ts") or now)}
+    gain = (px / ent - 1.0) * 100.0
+    if state is None:
+        if gain < BTC_DIP_EXIT_PCT - 1e-6:
+            return None
+        return {"high": px, "ts": float(now)}
+    high = float(state.get("high") or 0)
+    if px > high + 1e-12:
+        return {"high": px, "ts": float(now)}
+    return {"high": high, "ts": float(state.get("ts") or now)}
+
+
+def pocket_exit_ready(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    now: float | None = None,
+) -> bool:
+    """Продажа кармана: −1% от вершины, и эта вершина уже 5 минут не обновлялась."""
+    if not state or not _bounce_held(state, now, POCKET_EXIT_HOLD_SEC):
+        return False
+    high = float(state.get("high") or 0)
+    px = float(price or 0)
+    if high <= 0 or px <= 0:
+        return False
+    return px <= high * (1.0 - POCKET_EXIT_PULLBACK_PCT / 100.0) + 1e-12
 
 
 def alt_exit_reason(*, price: float, entry: float, ma: float | None) -> str | None:
@@ -476,7 +529,7 @@ def watch_period_sec(
     near: int = WATCH_PERIOD_NEAR,
     hot: int = WATCH_PERIOD_HOT,
 ) -> int:
-    """12 мин спокойно; 2 мин у средней; 60 с у стопа или тейка кармана."""
+    """12 мин спокойно; 2 мин у средней; 60 с у стопа или ловушки кармана."""
     period = int(calm)
     for leg in legs:
         px = float(leg.get("price") or 0)
@@ -486,6 +539,8 @@ def watch_period_sec(
         gain = (px / ent - 1.0) * 100.0
         kind = str(leg.get("kind") or "alt")
         if kind == "pocket":
+            if float(leg.get("exit_high") or 0) > 0:
+                return int(hot)
             if gain >= BTC_DIP_EXIT_PCT - NEAR_TP_PCT:
                 return int(hot)
             if gain <= -BTC_DIP_STOP_PCT + NEAR_SL_PCT:
@@ -511,6 +566,7 @@ def watch_snapshot_line(
     entry: float,
     ma: float | None = None,
     kind: str = "alt",
+    exit_high: float = 0.0,
 ) -> str:
     """Одна нога дозора: avg, цена, дистанция до стопа/тейка."""
     name = str(ticker or "?").upper()
@@ -521,7 +577,14 @@ def watch_snapshot_line(
     gain = (px / ent - 1.0) * 100.0
     bits = [f"{name} px={px:.4g} avg={ent:.4g} {gain:+.2f}%"]
     if kind == "pocket":
-        bits.append(f"до тейка {BTC_DIP_EXIT_PCT - gain:+.2f}пп до стопа {gain + BTC_DIP_STOP_PCT:.1f}пп")
+        hi = float(exit_high or 0)
+        if hi > 0:
+            need = hi * (1.0 - POCKET_EXIT_PULLBACK_PCT / 100.0)
+            bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + BTC_DIP_STOP_PCT:.1f}пп")
+        else:
+            bits.append(
+                f"до ловушки {BTC_DIP_EXIT_PCT - gain:+.2f}пп до стопа {gain + BTC_DIP_STOP_PCT:.1f}пп"
+            )
     elif ma and float(ma) > 0:
         bits.append(f"MA {px / float(ma) - 1.0:+.2%} к выходу={gain >= ALT_EXIT_MIN_GAIN_PCT}")
     else:

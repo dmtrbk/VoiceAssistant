@@ -55,6 +55,8 @@ from .desk_policy import (
     is_risk_off,
     POCKET_ENTRY_BOUNCE_PCT,
     POCKET_ENTRY_HOLD_SEC,
+    POCKET_EXIT_HOLD_SEC,
+    POCKET_EXIT_PULLBACK_PCT,
     score_alloc,
     should_rebalance_leg,
     should_watch_dip_buy,
@@ -64,6 +66,7 @@ from .desk_policy import (
     update_alt_arm,
     update_exclusions,
     update_pocket_arm,
+    update_pocket_exit_arm,
     pocket_bounce_ready,
     watch_period_sec,
     watch_rate_ok,
@@ -494,6 +497,17 @@ class CryptoDeskMixin:
             triggers[BTC_DIP_TICKER] = {"low": low, "bounce": bounce, "hold": hold, "ts": ts}
         tape.set_symbols(symbols)
         tape.set_entry_arms(triggers)
+        dip = read_btc_dip()
+        exit_high = float(dip.get("exit_high") or 0)
+        exits: dict[str, dict[str, float]] = {}
+        if float(dip.get("qty") or 0) > 0 and exit_high > 0:
+            exits[BTC_DIP_TICKER] = {
+                "high": exit_high,
+                "pullback": POCKET_EXIT_PULLBACK_PCT,
+                "hold": float(POCKET_EXIT_HOLD_SEC),
+                "ts": float(dip.get("exit_ts") or 0),
+            }
+        tape.set_exit_arms(exits)
         tape.set_legs([leg for leg in legs if str(leg.get("ticker") or "").upper() in symbols])
 
     def _refresh_entry_arms(
@@ -1023,15 +1037,21 @@ class CryptoDeskMixin:
         dip_entry = float(dip.get("entry") or 0)
         dip_px = float(prices.get(BTC_DIP_TICKER) or 0)
         if float(dip.get("qty") or 0) > 0 and dip_px > 0 and dip_entry > 0:
+            exit_high = float(dip.get("exit_high") or 0)
             legs.append({
                 "ticker": BTC_DIP_TICKER,
                 "price": dip_px,
                 "entry": dip_entry,
                 "kind": "pocket",
+                "exit_high": exit_high,
             })
             snap.append(
                 watch_snapshot_line(
-                    BTC_DIP_TICKER, price=dip_px, entry=dip_entry, kind="pocket"
+                    BTC_DIP_TICKER,
+                    price=dip_px,
+                    entry=dip_entry,
+                    kind="pocket",
+                    exit_high=exit_high,
                 )
             )
         self._sync_tape(positions, legs)
@@ -1062,8 +1082,37 @@ class CryptoDeskMixin:
         dip = read_btc_dip()
         qty = float(dip.get("qty") or 0)
         if qty > 0:
-            reason = btc_dip_exit_reason(price=price, entry=float(dip.get("entry") or 0))
+            entry = float(dip.get("entry") or 0)
+            live = self._tape_quote(ticker)
+            if live and float(live.get("price") or 0) > 0:
+                price = float(live["price"])
+            now = time.time()
+            exit_state = None
+            if float(dip.get("exit_high") or 0) > 0:
+                exit_state = {"high": float(dip["exit_high"]), "ts": float(dip.get("exit_ts") or 0)}
+            tape = getattr(self, "_bybit_tape", None)
+            taped_high = float((tape.exit_highs() if tape is not None else {}).get(ticker) or 0)
+            if exit_state and taped_high > float(exit_state["high"]) + 1e-12:
+                exit_state = {"high": taped_high, "ts": now}
+            exit_state = update_pocket_exit_arm(exit_state, price=price, entry=entry, now=now)
+            if exit_state:
+                write_btc_dip(
+                    qty,
+                    entry,
+                    exit_high=float(exit_state["high"]),
+                    exit_ts=float(exit_state["ts"]),
+                )
+            reason = btc_dip_exit_reason(price=price, entry=entry, exit_arm=exit_state, now=now)
             if not reason or price <= 0:
+                if exit_state and price > 0:
+                    need = float(exit_state["high"]) * (1.0 - POCKET_EXIT_PULLBACK_PCT / 100.0)
+                    logger.info(
+                        "[Крипта] карман %s жду откат: верх %.4g сейчас %.4g нужно %.4g",
+                        ticker,
+                        float(exit_state["high"]),
+                        price,
+                        need,
+                    )
                 return None
             held = float((positions.get(ticker) or {}).get("qty") or 0)
             sell_qty = min(qty, held)

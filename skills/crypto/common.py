@@ -455,7 +455,13 @@ def read_btc_dip(path: str | None = None) -> dict[str, float]:
         return {"qty": 0.0, "entry": 0.0}
     if qty <= 0 or entry <= 0:
         return {"qty": 0.0, "entry": 0.0}
-    return {"qty": qty, "entry": entry}
+    try:
+        exit_high = float(raw.get("exit_high") or 0)
+        exit_ts = float(raw.get("exit_ts") or 0)
+    except (TypeError, ValueError):
+        exit_high = 0.0
+        exit_ts = 0.0
+    return {"qty": qty, "entry": entry, "exit_high": max(exit_high, 0.0), "exit_ts": exit_ts}
 
 
 def read_entry_arms(path: str | None = None) -> dict[str, Any]:
@@ -528,7 +534,14 @@ def write_entry_arms(
         logger.warning("[Крипта] не записал ожидание входа: %s", exc)
 
 
-def write_btc_dip(qty: float, entry: float, path: str | None = None) -> None:
+def write_btc_dip(
+    qty: float,
+    entry: float,
+    path: str | None = None,
+    *,
+    exit_high: float = 0.0,
+    exit_ts: float = 0.0,
+) -> None:
     path = path or _BTC_DIP_PATH
     if qty <= 0 or entry <= 0:
         try:
@@ -537,7 +550,10 @@ def write_btc_dip(qty: float, entry: float, path: str | None = None) -> None:
         except Exception as exc:
             logger.warning("[Крипта] не стёр карман BTC: %s", exc)
         return
-    payload = {"qty": float(qty), "entry": float(entry), "ts": time.time()}
+    payload: dict[str, Any] = {"qty": float(qty), "entry": float(entry), "ts": time.time()}
+    if float(exit_high or 0) > 0:
+        payload["exit_high"] = float(exit_high)
+        payload["exit_ts"] = float(exit_ts or 0)
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:

@@ -376,10 +376,27 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertAlmostEqual(policy.btc_dip_quote(1000.0), 250.0)
         self.assertEqual(policy.pocket_cash_reserve(1000.0, pocket_open=False), 250.0)
         self.assertEqual(policy.pocket_cash_reserve(1000.0, pocket_open=True), 0.0)
-        self.assertEqual(policy.btc_dip_exit_reason(price=101.1, entry=100.0), "отскок")
+        self.assertIsNone(policy.btc_dip_exit_reason(price=101.1, entry=100.0))
         self.assertIsNone(policy.btc_dip_exit_reason(price=101.0, entry=100.0))
         self.assertEqual(policy.btc_dip_exit_reason(price=85.0, entry=100.0), "стоп")
         self.assertIsNone(policy.btc_dip_exit_reason(price=100.4, entry=100.0))
+        armed = policy.update_pocket_exit_arm(None, price=101.1, entry=100.0, now=10.0)
+        self.assertAlmostEqual(armed["high"], 101.1)
+        self.assertFalse(policy.pocket_exit_ready(armed, price=100.5, now=10.0 + policy.POCKET_EXIT_HOLD_SEC))
+        higher = policy.update_pocket_exit_arm(armed, price=104.0, entry=100.0, now=20.0)
+        self.assertEqual(higher["ts"], 20.0)
+        held = policy.update_pocket_exit_arm(higher, price=103.5, entry=100.0, now=20.0 + policy.POCKET_EXIT_HOLD_SEC)
+        self.assertEqual(held["high"], 104.0)
+        self.assertEqual(held["ts"], 20.0)
+        need = 104.0 * (1.0 - policy.POCKET_EXIT_PULLBACK_PCT / 100.0)
+        self.assertFalse(policy.pocket_exit_ready(held, price=need + 0.05, now=20.0 + policy.POCKET_EXIT_HOLD_SEC))
+        self.assertTrue(policy.pocket_exit_ready(held, price=need, now=20.0 + policy.POCKET_EXIT_HOLD_SEC))
+        self.assertEqual(
+            policy.btc_dip_exit_reason(price=need, entry=100.0, exit_arm=held, now=20.0 + policy.POCKET_EXIT_HOLD_SEC),
+            "вершина",
+        )
+        kept = policy.update_pocket_exit_arm(held, price=100.2, entry=100.0, now=80.0)
+        self.assertEqual(kept["high"], 104.0)
 
     def test_watch_stream_tickers_skips_dust(self):
         self.assertEqual(
@@ -436,9 +453,19 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             policy.WATCH_PERIOD_NEAR,
         )
+        self.assertEqual(
+            policy.watch_period_sec(
+                legs=[{"price": 100.2, "entry": 100.0, "kind": "pocket", "exit_high": 102.0}]
+            ),
+            policy.WATCH_PERIOD_HOT,
+        )
         line = policy.watch_snapshot_line("SOL", price=101.0, entry=100.0, kind="pocket")
         self.assertIn("avg=100", line)
-        self.assertIn("до тейка", line)
+        self.assertIn("до ловушки", line)
+        armed_line = policy.watch_snapshot_line(
+            "SOL", price=103.0, entry=100.0, kind="pocket", exit_high=104.0
+        )
+        self.assertIn("верх 104", armed_line)
 
     def test_next_watch_at_aligns_to_wall(self):
         from skills.crypto.desk import next_watch_at
@@ -924,7 +951,21 @@ class TestDeskAutoUsesScore(unittest.TestCase):
                 price=101.5,
                 blocked=False,
             )
-        self.assertIn("ok", phrase or "")
+        self.assertIsNone(phrase)
+        self.assertEqual(placed, [])
+        self.assertAlmostEqual(read_btc_dip()["exit_high"], 101.5)
+        higher = None
+        with (
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.desk.time.time", return_value=time.time() + policy.POCKET_EXIT_HOLD_SEC + 5),
+        ):
+            higher = self.skill._trade_btc_dip(
+                day_chg=-1.0,
+                positions={"SOL": {"qty": 1.0, "value": 100.4, "price": 100.4}},
+                price=101.5 * (1.0 - policy.POCKET_EXIT_PULLBACK_PCT / 100.0),
+                blocked=False,
+            )
+        self.assertIn("ok", higher or "")
         self.assertEqual(placed[0][0], "SOL")
         self.assertEqual(placed[0][2], 0.01)
         self.assertEqual(read_btc_dip()["qty"], 0.0)
@@ -1408,6 +1449,21 @@ class TestBybitTape(unittest.TestCase):
         tape._entry["SOL"]["low_ts"] = time.time() - 21 * 60
         tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "101.2"}})
         self.assertEqual(tape.consume_signals(), "отскок")
+
+    def test_exit_arm_wakes_on_pullback(self):
+        from skills.crypto.stream import BybitPublicTape
+
+        tape = BybitPublicTape()
+        old = time.time() - 6 * 60
+        tape.set_exit_arms({"SOL": {"high": 110.0, "pullback": 1.0, "hold": 5 * 60, "ts": old}})
+        tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "111"}})
+        self.assertEqual(tape.consume_signals(), "")
+        self.assertAlmostEqual(tape.exit_highs()["SOL"], 111.0)
+        tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "109.5"}})
+        self.assertEqual(tape.consume_signals(), "")
+        tape._exit["SOL"]["high_ts"] = time.time() - 6 * 60
+        tape.apply_message({"topic": "tickers.SOLUSDT", "data": {"symbol": "SOLUSDT", "lastPrice": "109.5"}})
+        self.assertEqual(tape.consume_signals(), "откат")
 
     def test_kline_confirm_wakes(self):
         from skills.crypto.stream import BybitPublicTape

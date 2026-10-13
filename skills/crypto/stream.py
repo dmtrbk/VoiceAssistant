@@ -45,8 +45,10 @@ class BybitPublicTape:
         self._legs: list[dict[str, Any]] = []
         self._hot_tickers: set[str] = set()
         self._entry: dict[str, dict[str, Any]] = {}
+        self._exit: dict[str, dict[str, Any]] = {}
         self._wake = threading.Event()
         self._entry_wake = threading.Event()
+        self._exit_wake = threading.Event()
         self._kline = threading.Event()
         self._signal = threading.Event()
         self._stop = threading.Event()
@@ -87,6 +89,9 @@ class BybitPublicTape:
         if self._entry_wake.is_set():
             self._entry_wake.clear()
             bits.append("отскок")
+        if self._exit_wake.is_set():
+            self._exit_wake.clear()
+            bits.append("откат")
         if self._kline.is_set():
             self._kline.clear()
             bits.append("свеча")
@@ -146,6 +151,50 @@ class BybitPublicTape:
                     "hold": hold,
                 }
             self._entry = fresh
+
+    def set_exit_arms(self, arms: dict[str, dict[str, float]]) -> None:
+        """ticker → {high, pullback, hold, ts}. Более высокую вершину с ленты не опускаем."""
+        with self._lock:
+            fresh: dict[str, dict[str, Any]] = {}
+            for ticker, spec in (arms or {}).items():
+                name = str(ticker or "").upper()
+                if not name or not isinstance(spec, dict):
+                    continue
+                try:
+                    high = float(spec.get("high") or 0)
+                    pullback = float(spec.get("pullback") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if high <= 0 or pullback <= 0:
+                    continue
+                prev = self._exit.get(name) or {}
+                prev_high = float(prev.get("high") or 0)
+                fired = bool(prev.get("fired"))
+                high_ts = float(spec.get("ts") or time.time())
+                hold = float(spec.get("hold") or 0)
+                if prev_high > high:
+                    high = prev_high
+                    high_ts = float(prev.get("high_ts") or high_ts)
+                elif prev_high > 0 and high > prev_high + 1e-12:
+                    fired = False
+                elif prev.get("high_ts"):
+                    high_ts = float(prev["high_ts"])
+                fresh[name] = {
+                    "high": high,
+                    "pullback": pullback,
+                    "fired": fired,
+                    "high_ts": high_ts,
+                    "hold": hold,
+                }
+            self._exit = fresh
+
+    def exit_highs(self) -> dict[str, float]:
+        with self._lock:
+            return {
+                ticker: float(row["high"])
+                for ticker, row in self._exit.items()
+                if float(row.get("high") or 0) > 0
+            }
 
     def entry_lows(self) -> dict[str, float]:
         with self._lock:
@@ -233,6 +282,7 @@ class BybitPublicTape:
             self._last_msg = time.time()
             entered = self._mark_hot_locked(ticker, price)
             crossed = self._mark_entry_locked(ticker, price)
+            faded = self._mark_exit_locked(ticker, price)
         if entered:
             logger.info("[Крипта] лента: зона %s", ",".join(sorted(entered)))
             self._wake.set()
@@ -240,6 +290,10 @@ class BybitPublicTape:
         if crossed:
             logger.info("[Крипта] лента: отскок %s", ",".join(sorted(crossed)))
             self._entry_wake.set()
+            self._signal.set()
+        if faded:
+            logger.info("[Крипта] лента: откат %s", ",".join(sorted(faded)))
+            self._exit_wake.set()
             self._signal.set()
 
     def _hot_now_locked(self) -> set[str]:
@@ -271,6 +325,29 @@ class BybitPublicTape:
         if hold > 0 and time.time() - float(arm.get("low_ts") or 0) < hold:
             return set()
         if price >= low * (1.0 + bounce / 100.0) - 1e-12:
+            arm["fired"] = True
+            return {ticker}
+        return set()
+
+    def _mark_exit_locked(self, ticker: str, price: float) -> set[str]:
+        arm = self._exit.get(ticker)
+        if not arm or price <= 0:
+            return set()
+        high = float(arm.get("high") or 0)
+        if high <= 0:
+            return set()
+        if price > high:
+            arm["high"] = price
+            arm["high_ts"] = time.time()
+            arm["fired"] = False
+            return set()
+        pullback = float(arm.get("pullback") or 0)
+        hold = float(arm.get("hold") or 0)
+        if arm.get("fired") or pullback <= 0:
+            return set()
+        if hold > 0 and time.time() - float(arm.get("high_ts") or 0) < hold:
+            return set()
+        if price <= high * (1.0 - pullback / 100.0) + 1e-12:
             arm["fired"] = True
             return {ticker}
         return set()
