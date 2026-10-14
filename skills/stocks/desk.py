@@ -35,6 +35,7 @@ from .common import (
     _read_ticker_set,
     _signal_is_buy,
     _signal_weight,
+    _signals_enabled,
     _write_ticker_set,
     read_alloc_state,
     read_entry_arms,
@@ -872,6 +873,16 @@ class StocksDeskMixin:
             return {}
 
     def _trade_auto_locked(self, silent: bool = False) -> str:
+        if not _signals_enabled():
+            state = read_alloc_state() or {}
+            why = "сигналы выключены — новых бумаг не беру, купленные держу до стопа"
+            logger.info("[Биржа] %s", why)
+            write_alloc_state(
+                {}, why=why, watch_trades=list(state.get("watch_trades") or []), desk_ts=time.time()
+            )
+            if self._token and self._market_open():
+                self._park_idle()
+            return "Сигналы выключены: новых бумаг не беру, купленные держу до стопа, свободные деньги в фонде."
         candidates = self._desk_candidates()
         if not candidates:
             return "Нечего решать: лента пуста."
@@ -944,6 +955,10 @@ class StocksDeskMixin:
             return "рынок закрыт"
         parts, sold = self._desk_exits()
         alloc = {t: p for t, p in (state.get("alloc") or {}).items() if t not in sold}
+        if not _signals_enabled():
+            alloc = {}
+            if sold:
+                self._park_idle()
         why = str(state.get("why") or "")
         risk_off = bool(state.get("risk_off"))
         watch_trades = list(state.get("watch_trades") or [])

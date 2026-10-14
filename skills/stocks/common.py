@@ -528,6 +528,12 @@ def _park_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _signals_enabled() -> bool:
+    """Покупки стола по сигналам Т-Инвест. Выключены — купленное держится до стопа или трейла."""
+    raw = (os.getenv("STOCKS_SIGNALS") or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _park_ticker() -> str:
     return (os.getenv("STOCKS_PARK_TICKER") or "LQDT").strip().upper() or "LQDT"
 

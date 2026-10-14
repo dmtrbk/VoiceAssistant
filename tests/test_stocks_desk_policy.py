@@ -550,6 +550,39 @@ class TestStocksDeskRules(unittest.TestCase):
         self.assertEqual(read_alloc_state()["alloc"], {})
         self.assertIn("без сделок", watch)
 
+    def test_full_desk_signals_off_holds_and_parks(self):
+        write_alloc_state({"SBER": 90.0}, why="SBER 90%")
+        self.skill._token = "t"
+        with (
+            patch.dict(os.environ, {"STOCKS_SIGNALS": "false"}),
+            patch.object(self.skill, "_fetch_buy_signals") as fetch,
+            patch.object(self.skill, "_market_open", return_value=True),
+            patch.object(self.skill, "_rebalance_portfolio") as reb,
+            patch.object(self.skill, "_park_idle") as park,
+        ):
+            out = self.skill._trade_auto_locked(silent=True)
+        fetch.assert_not_called()
+        reb.assert_not_called()
+        park.assert_called_once_with()
+        self.assertIn("Сигналы выключены", out)
+        self.assertEqual(read_alloc_state()["alloc"], {})
+
+    def test_watch_parks_exit_cash_when_signals_off(self):
+        write_alloc_state({"NVTK": 40.0}, why="старая цель")
+        self.skill._token = "t"
+        with (
+            patch.dict(os.environ, {"STOCKS_SIGNALS": "off"}),
+            patch.object(self.skill, "_market_open", return_value=True),
+            patch.object(self.skill, "_desk_exits", return_value=(["Продал SBER."], {"SBER"})),
+            patch.object(self.skill, "_touch_entry_arms", return_value={}),
+            patch.object(self.skill, "_rebalance_portfolio") as reb,
+            patch.object(self.skill, "_park_idle") as park,
+        ):
+            self.skill._desk_watch_locked(silent=True)
+        reb.assert_not_called()
+        park.assert_called_once_with()
+        self.assertEqual(read_alloc_state()["alloc"], {})
+
     def test_full_desk_keeps_target_when_signals_fail(self):
         write_alloc_state({"NVTK": 40.0, "SBER": 50.0}, why="NVTK 40%, SBER 50%")
         with (
