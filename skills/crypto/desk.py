@@ -25,16 +25,21 @@ from .common import (
     read_alloc_state,
     read_btc_dip,
     read_entry_arms,
+    read_sleeve_exits,
     read_trail_state,
     write_alloc_state,
     write_btc_dip,
     write_entry_arms,
+    write_sleeve_exits,
     write_trail_state,
 )
 from .desk_policy import (
     ALT_BB_INTERVAL,
     ALT_ENTRY_BOUNCE_PCT,
     ALT_ENTRY_HOLD_SEC,
+    ALT_EXIT_ARM_PCT,
+    ALT_EXIT_HOLD_SEC,
+    ALT_EXIT_PULLBACK_PCT,
     ALT_HELD_MIN_USD,
     ALT_MAX_NAMES,
     ALT_MIN_HOLD_HOURS,
@@ -45,6 +50,7 @@ from .desk_policy import (
     pocket_cash_reserve,
     alt_bounce_ready,
     alt_exit_reason,
+    update_alt_exit_arm,
     alt_sleeve_qty_for_exit,
     btc_dip_exit_reason,
     btc_dip_should_buy,
@@ -98,6 +104,13 @@ def next_watch_at(period: float, now: float) -> float:
     """Следующий тик по сетке стены, работа цикла период не сдвигает."""
     period = max(1.0, float(period))
     return now - (now % period) + period
+
+
+def _exit_trigger(arm: dict[str, float]) -> float:
+    """Цена, с которой откат уже считается сработавшим. Выше — ближе к продаже."""
+    high = float(arm.get("high") or 0)
+    pullback = float(arm.get("pullback") or 0)
+    return high * (1.0 - pullback / 100.0)
 
 
 def _cycle_error_kind(exc: BaseException) -> str:
@@ -500,13 +513,23 @@ class CryptoDeskMixin:
         dip = read_btc_dip()
         exit_high = float(dip.get("exit_high") or 0)
         exits: dict[str, dict[str, float]] = {}
+        for ticker, arm in read_sleeve_exits().items():
+            exits[ticker] = {
+                "high": float(arm["high"]),
+                "pullback": ALT_EXIT_PULLBACK_PCT,
+                "hold": float(ALT_EXIT_HOLD_SEC),
+                "ts": float(arm.get("ts") or 0),
+            }
         if float(dip.get("qty") or 0) > 0 and exit_high > 0:
-            exits[BTC_DIP_TICKER] = {
+            pocket_exit = {
                 "high": exit_high,
                 "pullback": POCKET_EXIT_PULLBACK_PCT,
                 "hold": float(POCKET_EXIT_HOLD_SEC),
                 "ts": float(dip.get("exit_ts") or 0),
             }
+            prev = exits.get(BTC_DIP_TICKER)
+            if prev is None or _exit_trigger(pocket_exit) >= _exit_trigger(prev):
+                exits[BTC_DIP_TICKER] = pocket_exit
         tape.set_exit_arms(exits)
         tape.set_legs([leg for leg in legs if str(leg.get("ticker") or "").upper() in symbols])
 
@@ -853,12 +876,18 @@ class CryptoDeskMixin:
                 alt_bands[ticker] = self._alt_bands(ticker)
             return alt_bands[ticker]
 
+        sleeve_exits = read_sleeve_exits()
+        kept_exits: dict[str, dict[str, float]] = {}
+        exit_now = time.time()
         for ticker, pos in positions.items():
             if ticker not in DESK_ALT_SLEEVE or ticker in trail_sold:
                 continue
             if self._is_owner_position(ticker):
                 continue
             price = float(prices.get(ticker) or pos.get("price") or 0)
+            live = self._tape_quote(ticker)
+            if live and float(live.get("price") or 0) > 0:
+                price = float(live["price"])
             pocket_qty = float(read_btc_dip().get("qty") or 0) if ticker == BTC_DIP_TICKER else 0.0
             qty = alt_sleeve_qty_for_exit(
                 ticker=ticker,
@@ -872,9 +901,35 @@ class CryptoDeskMixin:
             entry = float(avg_costs.get(ticker) or 0) or float(
                 (new_trail.get(ticker) or {}).get("entry") or 0
             )
-            bands = bands_for(ticker)
-            reason = alt_exit_reason(price=price, entry=entry, ma=bands["ma"] if bands else None)
+            exit_state = update_alt_exit_arm(
+                sleeve_exits.get(ticker), price=price, entry=entry, now=exit_now
+            )
+            if exit_state:
+                kept_exits[ticker] = exit_state
+            reason = alt_exit_reason(
+                price=price, entry=entry, exit_arm=exit_state, now=exit_now
+            )
             if not reason:
+                if exit_state and price > 0 and entry > 0:
+                    high = float(exit_state["high"])
+                    pull = high * (1.0 - ALT_EXIT_PULLBACK_PCT / 100.0)
+                    floor = entry * (1.0 + ALT_EXIT_ARM_PCT / 100.0)
+                    if pull < floor:
+                        logger.info(
+                            "[Крипта] альт %s вершина %.4g, откат %.4g ниже плюса +%.0f%%",
+                            ticker,
+                            high,
+                            pull,
+                            ALT_EXIT_ARM_PCT,
+                        )
+                    else:
+                        logger.info(
+                            "[Крипта] альт %s жду откат: верх %.4g сейчас %.4g нужно %.4g",
+                            ticker,
+                            high,
+                            price,
+                            pull,
+                        )
                 continue
             try:
                 parts.append(self._place_order(ticker, "Sell", base_qty=qty, price=price, maker=True))
@@ -895,9 +950,11 @@ class CryptoDeskMixin:
             )
             trail_sold.add(ticker)
             new_trail.pop(ticker, None)
+            kept_exits.pop(ticker, None)
             target_alloc.pop(ticker, None)
             target_values[ticker] = 0.0
         write_trail_state(new_trail)
+        write_sleeve_exits(kept_exits)
 
         time.sleep(0.3)
         self._bust_private_cache()
@@ -1024,6 +1081,7 @@ class CryptoDeskMixin:
             )
             bands = bands_for(ticker)
             ma = float(bands["ma"]) if bands and bands.get("ma") else None
+            exit_high = float((read_sleeve_exits().get(ticker) or {}).get("high") or 0)
             if price > 0 and entry > 0:
                 legs.append({
                     "ticker": ticker,
@@ -1031,8 +1089,18 @@ class CryptoDeskMixin:
                     "entry": entry,
                     "ma": ma,
                     "kind": "alt",
+                    "exit_high": exit_high,
                 })
-                snap.append(watch_snapshot_line(ticker, price=price, entry=entry, ma=ma, kind="alt"))
+                snap.append(
+                    watch_snapshot_line(
+                        ticker,
+                        price=price,
+                        entry=entry,
+                        ma=ma,
+                        kind="alt",
+                        exit_high=exit_high,
+                    )
+                )
         dip = read_btc_dip()
         dip_entry = float(dip.get("entry") or 0)
         dip_px = float(prices.get(BTC_DIP_TICKER) or 0)

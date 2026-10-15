@@ -176,12 +176,28 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(set(alts), {"XRP", "DOGE", "ADA"})
 
     def test_alt_exit_reason(self):
-        self.assertEqual(policy.alt_exit_reason(price=85.0, entry=100.0, ma=120.0), "стоп")
-        self.assertEqual(policy.alt_exit_reason(price=102.0, entry=100.0, ma=101.0), "средняя")
-        # У средней, но прибыль не перекрывает комиссии с запасом.
-        self.assertIsNone(policy.alt_exit_reason(price=100.5, entry=100.0, ma=100.2))
-        self.assertIsNone(policy.alt_exit_reason(price=105.0, entry=100.0, ma=110.0))
-        self.assertIsNone(policy.alt_exit_reason(price=90.0, entry=100.0, ma=None))
+        self.assertEqual(policy.alt_exit_reason(price=93.0, entry=100.0), "стоп")
+        self.assertIsNone(policy.alt_exit_reason(price=95.0, entry=100.0))
+        self.assertIsNone(policy.alt_exit_reason(price=102.0, entry=100.0, ma=101.0))
+        armed = policy.update_alt_exit_arm(None, price=103.0, entry=100.0, now=10.0)
+        self.assertAlmostEqual(armed["high"], 103.0)
+        self.assertFalse(
+            policy.alt_exit_ready(armed, price=101.9, entry=100.0, now=10.0 + policy.ALT_EXIT_HOLD_SEC)
+        )
+        higher = policy.update_alt_exit_arm(armed, price=108.0, entry=100.0, now=20.0)
+        self.assertEqual(higher["ts"], 20.0)
+        need = 108.0 * (1.0 - policy.ALT_EXIT_PULLBACK_PCT / 100.0)
+        self.assertGreaterEqual((need / 100.0 - 1.0) * 100.0, policy.ALT_EXIT_ARM_PCT)
+        self.assertFalse(policy.alt_exit_ready(higher, price=need, entry=100.0, now=20.0 + 10))
+        self.assertTrue(
+            policy.alt_exit_ready(higher, price=need, entry=100.0, now=20.0 + policy.ALT_EXIT_HOLD_SEC)
+        )
+        self.assertEqual(
+            policy.alt_exit_reason(
+                price=need, entry=100.0, exit_arm=higher, now=20.0 + policy.ALT_EXIT_HOLD_SEC
+            ),
+            "вершина",
+        )
 
     def test_alt_sleeve_qty_for_exit_reserves_pocket(self):
         sol = policy.BTC_DIP_TICKER
@@ -451,7 +467,17 @@ class TestDeskPolicy(unittest.TestCase):
             policy.watch_period_sec(
                 legs=[{"price": 101.2, "entry": 100.0, "ma": 101.3, "kind": "alt"}]
             ),
-            policy.WATCH_PERIOD_NEAR,
+            policy.WATCH_PERIOD_CALM,
+        )
+        self.assertEqual(
+            policy.watch_period_sec(legs=[{"price": 102.7, "entry": 100.0, "kind": "alt"}]),
+            policy.WATCH_PERIOD_HOT,
+        )
+        self.assertEqual(
+            policy.watch_period_sec(
+                legs=[{"price": 106.0, "entry": 100.0, "kind": "alt", "exit_high": 108.0}]
+            ),
+            policy.WATCH_PERIOD_HOT,
         )
         self.assertEqual(
             policy.watch_period_sec(
@@ -1033,8 +1059,29 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         placed, result, state = self._watch_alt(
             price=2.05, entry=2.0, alloc={"BTC": 40.0, "XRP": 11.7}, positions=pos
         )
+        self.assertFalse(any(t == "XRP" and side == "Sell" for t, side, *_ in placed), result)
+        self.assertIn("XRP", state["alloc"])
+
+    def test_watch_sells_alt_on_pullback_from_high(self):
+        from skills.crypto.common import read_sleeve_exits
+
+        self.bands = {"XRP": {"z": 0.4, "ma": 2.0}}
+        pos = [{"ticker": "XRP", "qty": 20.0, "value": 42.0, "price": 2.10, "name": "XRP"}]
+        placed, _result, state = self._watch_alt(
+            price=2.10, entry=2.0, alloc={"BTC": 40.0, "XRP": 11.7}, positions=pos
+        )
+        self.assertFalse(any(side == "Sell" for _t, side, *_ in placed))
+        self.assertIn("XRP", state["alloc"])
+        self.assertAlmostEqual(read_sleeve_exits()["XRP"]["high"], 2.10)
+        pull = 2.10 * (1.0 - policy.ALT_EXIT_PULLBACK_PCT / 100.0)
+        pos[0]["price"] = pull
+        with patch("skills.crypto.desk.time.time", return_value=time.time() + policy.ALT_EXIT_HOLD_SEC + 5):
+            placed, result, state = self._watch_alt(
+                price=pull, entry=2.0, alloc={"BTC": 40.0, "XRP": 11.7}, positions=pos
+            )
         self.assertIn(("XRP", "Sell", 20.0, None), placed, result)
         self.assertNotIn("XRP", state["alloc"])
+        self.assertNotIn("XRP", read_sleeve_exits())
 
     def test_watch_stop_loss_alt(self):
         self.bands = {"XRP": {"z": -3.0, "ma": 2.4}}
@@ -1138,11 +1185,11 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertNotIn("LINK", crypto_common.read_alloc_state()["alloc"])
 
     def test_watch_sets_hot_period_near_stop(self):
-        # −13% ещё не стоп (−15%), но уже горячая зона.
+        # −5% ещё не стоп (−7%), но уже горячая зона.
         self.bands = {"XRP": {"z": -2.0, "ma": 2.2}}
-        pos = [{"ticker": "XRP", "qty": 20.0, "value": 34.8, "price": 1.74, "name": "XRP"}]
+        pos = [{"ticker": "XRP", "qty": 20.0, "value": 38.0, "price": 1.90, "name": "XRP"}]
         placed, _result, _state = self._watch_alt(
-            price=1.74, entry=2.0, alloc={"XRP": 11.7}, positions=pos
+            price=1.90, entry=2.0, alloc={"XRP": 11.7}, positions=pos
         )
         self.assertFalse(any(t == "XRP" and side == "Sell" for t, side, *_ in placed))
         self.assertEqual(self.skill._watch_period_sec, policy.WATCH_PERIOD_HOT)

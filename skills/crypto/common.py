@@ -403,9 +403,7 @@ def write_alloc_state(
         logger.warning("[Крипта] не записал цель стола: %s", exc)
 
 
-def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
-    """high/entry/armed по тикерам стола."""
-    path = path or _TRAIL_PATH
+def _read_trail_payload(path: str) -> dict[str, Any]:
     if not os.path.isfile(path):
         return {}
     try:
@@ -413,7 +411,68 @@ def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
             raw = json.load(handle)
     except Exception:
         return {}
-    legs_raw = raw.get("legs") if isinstance(raw, dict) else None
+    return raw if isinstance(raw, dict) else {}
+
+
+def read_sleeve_exits(path: str | None = None) -> dict[str, dict[str, float]]:
+    """Вершины рукава: тикер → high и время этой вершины."""
+    path = path or _TRAIL_PATH
+    raw = _read_trail_payload(path).get("sleeve_exits")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for key, value in raw.items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            high = float(value.get("high") or 0)
+            ts = float(value.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if high > 0:
+            out[ticker] = {"high": high, "ts": ts}
+    return out
+
+
+def write_sleeve_exits(arms: dict[str, dict[str, float]], path: str | None = None) -> None:
+    path = path or _TRAIL_PATH
+    prev = _read_trail_payload(path)
+    clean: dict[str, dict[str, float]] = {}
+    for key, value in (arms or {}).items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            high = float(value.get("high") or 0)
+        except (TypeError, ValueError):
+            continue
+        if high <= 0:
+            continue
+        clean[ticker] = {"high": high, "ts": float(value.get("ts") or 0)}
+    payload = {
+        "legs": prev.get("legs") if isinstance(prev.get("legs"), dict) else {},
+        "sleeve_exits": clean,
+        "ts": time.time(),
+    }
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал вершины рукава: %s", exc)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
+    """high/entry/armed по тикерам стола."""
+    path = path or _TRAIL_PATH
+    raw = _read_trail_payload(path)
+    legs_raw = raw.get("legs")
     if not isinstance(legs_raw, dict):
         return {}
     out: dict[str, dict[str, Any]] = {}
@@ -585,7 +644,10 @@ def write_trail_state(
             "entry": max(entry, 0.0),
             "armed": bool(value.get("armed")),
         }
-    payload = {"legs": clean, "ts": time.time()}
+    prev = _read_trail_payload(path)
+    payload: dict[str, Any] = {"legs": clean, "ts": time.time()}
+    if isinstance(prev.get("sleeve_exits"), dict):
+        payload["sleeve_exits"] = prev["sleeve_exits"]
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:

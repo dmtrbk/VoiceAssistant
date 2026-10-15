@@ -35,8 +35,14 @@ ALT_ENTRY_STILL_Z = -1.2
 ALT_ENTRY_CANCEL_Z = -0.5
 POCKET_ENTRY_BOUNCE_PCT = 1.0
 POCKET_ENTRY_HOLD_SEC = 10 * 60
-ALT_EXIT_MIN_GAIN_PCT = 1.0  # выход у средней, только если прибыль перекрывает 2×комиссию с запасом
-ALT_STOP_LOSS_PCT = 15.0
+# Живой выход рукава — ловушка вершины, не касание средней.
+# +3% взводит верх. Продажа на откате −1% после 5 минут, и только если плюс ещё ≥ +3%.
+# Прогон выше +8% не режем: это верх рабочей зоны, не потолок.
+ALT_EXIT_ARM_PCT = 3.0
+ALT_EXIT_PULLBACK_PCT = 1.0
+ALT_EXIT_HOLD_SEC = 5 * 60
+ALT_EXIT_MIN_GAIN_PCT = 1.0  # старый порог у средней; его держит crypto_backtest.py
+ALT_STOP_LOSS_PCT = 7.0
 ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
 MAX_DAY_PUMP_PCT = 25.0
@@ -293,17 +299,75 @@ def pocket_exit_ready(
     return px <= high * (1.0 - POCKET_EXIT_PULLBACK_PCT / 100.0) + 1e-12
 
 
-def alt_exit_reason(*, price: float, entry: float, ma: float | None) -> str | None:
-    """Выход альта целиком: стоп от входа или возврат к средней 4h с прибылью."""
+def update_alt_exit_arm(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    entry: float,
+    now: float,
+) -> dict[str, float] | None:
+    """Плюс ≥ +3% запоминает вершину рукава. Новая вершина сбрасывает таймер.
+
+    Ниже порога ловушка ещё не взведена. Уже взведенная не снимается.
+    """
+    px = float(price or 0)
+    ent = float(entry or 0)
+    if px <= 0 or ent <= 0:
+        if state is None:
+            return None
+        return {"high": float(state["high"]), "ts": float(state.get("ts") or now)}
+    gain = (px / ent - 1.0) * 100.0
+    if state is None:
+        if gain < ALT_EXIT_ARM_PCT - 1e-6:
+            return None
+        return {"high": px, "ts": float(now)}
+    high = float(state.get("high") or 0)
+    if px > high + 1e-12:
+        return {"high": px, "ts": float(now)}
+    return {"high": high, "ts": float(state.get("ts") or now)}
+
+
+def alt_exit_ready(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    entry: float,
+    now: float | None = None,
+) -> bool:
+    """Продажа рукава: −1% от вершины, вершина 5 минут не обновлялась, плюс ещё ≥ +3%."""
+    if not state or not _bounce_held(state, now, ALT_EXIT_HOLD_SEC):
+        return False
+    high = float(state.get("high") or 0)
+    px = float(price or 0)
+    ent = float(entry or 0)
+    if high <= 0 or px <= 0 or ent <= 0:
+        return False
+    if px > high * (1.0 - ALT_EXIT_PULLBACK_PCT / 100.0) + 1e-12:
+        return False
+    gain = (px / ent - 1.0) * 100.0
+    return gain >= ALT_EXIT_ARM_PCT - 1e-6
+
+
+def alt_exit_reason(
+    *,
+    price: float,
+    entry: float,
+    exit_arm: dict[str, Any] | None = None,
+    now: float | None = None,
+    ma: float | None = None,
+) -> str | None:
+    """Выход альта целиком: стоп −7% сразу или откат от вершины. Средняя не продаёт."""
+    del ma
     px = float(price or 0)
     ent = float(entry or 0)
     if px <= 0 or ent <= 0:
         return None
     gain = (px / ent - 1.0) * 100.0
-    if gain <= -ALT_STOP_LOSS_PCT:
+    # Ровно −7% в float чуть больше порога — иначе стоп молчит.
+    if gain <= -ALT_STOP_LOSS_PCT + 1e-6:
         return "стоп"
-    if ma is not None and px >= float(ma) and gain >= ALT_EXIT_MIN_GAIN_PCT:
-        return "средняя"
+    if alt_exit_ready(exit_arm, price=px, entry=ent, now=now):
+        return "вершина"
     return None
 
 
@@ -529,7 +593,7 @@ def watch_period_sec(
     near: int = WATCH_PERIOD_NEAR,
     hot: int = WATCH_PERIOD_HOT,
 ) -> int:
-    """12 мин спокойно; 2 мин у средней; 60 с у стопа или ловушки кармана."""
+    """12 мин спокойно; 60 с у стопа или когда рукав/карман ведёт вершину."""
     period = int(calm)
     for leg in legs:
         px = float(leg.get("price") or 0)
@@ -546,16 +610,12 @@ def watch_period_sec(
             if gain <= -BTC_DIP_STOP_PCT + NEAR_SL_PCT:
                 return int(hot)
             continue
+        if float(leg.get("exit_high") or 0) > 0:
+            return int(hot)
+        if gain >= ALT_EXIT_ARM_PCT - NEAR_TP_PCT:
+            return int(hot)
         if gain <= -ALT_STOP_LOSS_PCT + NEAR_SL_PCT:
             return int(hot)
-        ma = leg.get("ma")
-        if (
-            ma
-            and float(ma) > 0
-            and abs(px / float(ma) - 1.0) * 100.0 <= NEAR_MA_PCT
-            and gain >= ALT_EXIT_MIN_GAIN_PCT - 0.4
-        ):
-            period = min(period, int(near))
     return period
 
 
@@ -585,10 +645,19 @@ def watch_snapshot_line(
             bits.append(
                 f"до ловушки {BTC_DIP_EXIT_PCT - gain:+.2f}пп до стопа {gain + BTC_DIP_STOP_PCT:.1f}пп"
             )
-    elif ma and float(ma) > 0:
-        bits.append(f"MA {px / float(ma) - 1.0:+.2%} к выходу={gain >= ALT_EXIT_MIN_GAIN_PCT}")
     else:
-        bits.append(f"до стопа {gain + ALT_STOP_LOSS_PCT:.1f}пп")
+        hi = float(exit_high or 0)
+        if hi > 0:
+            pull = hi * (1.0 - ALT_EXIT_PULLBACK_PCT / 100.0)
+            floor = ent * (1.0 + ALT_EXIT_ARM_PCT / 100.0)
+            need = pull if pull >= floor else floor
+            bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + ALT_STOP_LOSS_PCT:.1f}пп")
+        else:
+            bits.append(
+                f"до ловушки {ALT_EXIT_ARM_PCT - gain:+.2f}пп до стопа {gain + ALT_STOP_LOSS_PCT:.1f}пп"
+            )
+        if ma and float(ma) > 0:
+            bits.append(f"MA {px / float(ma) - 1.0:+.2%}")
     return " ".join(bits)
 
 
