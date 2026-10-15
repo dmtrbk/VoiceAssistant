@@ -34,6 +34,7 @@ jarvis_crypto_trail.json
 jarvis_crypto_earn.json
 jarvis_crypto_btc_dip.json
 jarvis_crypto_excluded.json
+jarvis_crypto_anchor.json
 jarvis_crypto_trades.*.bak-*.json
 .conky_markets.cache
 .conky_markets.cache.lock

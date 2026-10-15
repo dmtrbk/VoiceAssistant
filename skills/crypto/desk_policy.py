@@ -299,6 +299,14 @@ def pocket_exit_ready(
     return px <= high * (1.0 - POCKET_EXIT_PULLBACK_PCT / 100.0) + 1e-12
 
 
+def position_basis(entry: float, anchor: float | None) -> float:
+    """Стоп и ловушка считаются от якоря, если он задан. Иначе от цены покупки."""
+    anc = float(anchor or 0)
+    if anc > 0:
+        return anc
+    return float(entry or 0)
+
+
 def update_alt_exit_arm(
     state: dict[str, Any] | None,
     *,
@@ -627,15 +635,20 @@ def watch_snapshot_line(
     ma: float | None = None,
     kind: str = "alt",
     exit_high: float = 0.0,
+    basis: float = 0.0,
 ) -> str:
     """Одна нога дозора: avg, цена, дистанция до стопа/тейка."""
     name = str(ticker or "?").upper()
     px = float(price or 0)
     ent = float(entry or 0)
+    rule = position_basis(ent, basis)
     if px <= 0 or ent <= 0:
         return f"{name} px={px:.4g} avg=?"
-    gain = (px / ent - 1.0) * 100.0
-    bits = [f"{name} px={px:.4g} avg={ent:.4g} {gain:+.2f}%"]
+    book = (px / ent - 1.0) * 100.0
+    gain = (px / rule - 1.0) * 100.0 if rule > 0 else book
+    bits = [f"{name} px={px:.4g} avg={ent:.4g} {book:+.2f}%"]
+    if rule > 0 and abs(rule - ent) / ent > 1e-6:
+        bits.append(f"отсчёт {rule:.4g} {gain:+.2f}%")
     if kind == "pocket":
         hi = float(exit_high or 0)
         if hi > 0:
@@ -649,7 +662,7 @@ def watch_snapshot_line(
         hi = float(exit_high or 0)
         if hi > 0:
             pull = hi * (1.0 - ALT_EXIT_PULLBACK_PCT / 100.0)
-            floor = ent * (1.0 + ALT_EXIT_ARM_PCT / 100.0)
+            floor = rule * (1.0 + ALT_EXIT_ARM_PCT / 100.0)
             need = pull if pull >= floor else floor
             bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + ALT_STOP_LOSS_PCT:.1f}пп")
         else:

@@ -23,11 +23,13 @@ from .common import (
     _write_ticker_set,
     parse_ai_alloc,
     read_alloc_state,
+    read_anchors,
     read_btc_dip,
     read_entry_arms,
     read_sleeve_exits,
     read_trail_state,
     write_alloc_state,
+    write_anchors,
     write_btc_dip,
     write_entry_arms,
     write_sleeve_exits,
@@ -48,6 +50,7 @@ from .desk_policy import (
     BTC_DIP_TICKER,
     btc_dip_quote,
     pocket_cash_reserve,
+    position_basis,
     alt_bounce_ready,
     alt_exit_reason,
     update_alt_exit_arm,
@@ -460,6 +463,19 @@ class CryptoDeskMixin:
             seed.add(BTC_DIP_TICKER)
         tape.set_symbols(seed)
         tape.start()
+
+    def _drop_anchor(self, ticker: str) -> None:
+        anchors = read_anchors()
+        if ticker not in anchors:
+            return
+        anchors.pop(ticker, None)
+        write_anchors(anchors)
+
+    def _prune_anchors(self, held: set[str]) -> None:
+        anchors = read_anchors()
+        kept = {ticker: price for ticker, price in anchors.items() if ticker in held}
+        if len(kept) != len(anchors):
+            write_anchors(kept)
 
     def _tape_quote(self, ticker: str) -> dict[str, float] | None:
         tape = getattr(self, "_bybit_tape", None)
@@ -898,9 +914,10 @@ class CryptoDeskMixin:
             )
             if qty <= 0:
                 continue
-            entry = float(avg_costs.get(ticker) or 0) or float(
+            book = float(avg_costs.get(ticker) or 0) or float(
                 (new_trail.get(ticker) or {}).get("entry") or 0
             )
+            entry = position_basis(book, read_anchors().get(ticker))
             exit_state = update_alt_exit_arm(
                 sleeve_exits.get(ticker), price=price, entry=entry, now=exit_now
             )
@@ -941,16 +958,18 @@ class CryptoDeskMixin:
                     logger.warning("[Крипта] выход альта %s: %s", ticker, exc)
                 continue
             logger.info(
-                "[Крипта] альт %s: выход (%s) вход %.4g цена %.4g %+.1f%%",
+                "[Крипта] альт %s: выход (%s) вход %.4g отсчёт %.4g цена %.4g %+.1f%%",
                 ticker,
                 reason,
+                book,
                 entry,
                 price,
-                (price / entry - 1.0) * 100.0,
+                (price / entry - 1.0) * 100.0 if entry else 0.0,
             )
             trail_sold.add(ticker)
             new_trail.pop(ticker, None)
             kept_exits.pop(ticker, None)
+            self._drop_anchor(ticker)
             target_alloc.pop(ticker, None)
             target_values[ticker] = 0.0
         write_trail_state(new_trail)
@@ -1067,6 +1086,11 @@ class CryptoDeskMixin:
         )
         if dip_phrase:
             parts.append(dip_phrase)
+        self._prune_anchors({
+            ticker
+            for ticker, pos in positions.items()
+            if float(pos.get("qty") or 0) > 0
+        })
         legs: list[dict[str, Any]] = []
         snap: list[str] = []
         for ticker, pos in positions.items():
@@ -1076,13 +1100,15 @@ class CryptoDeskMixin:
             if sleeve_value < ALT_HELD_MIN_USD:
                 continue
             price = float(prices.get(ticker) or pos.get("price") or 0)
-            entry = float(avg_costs.get(ticker) or 0) or float(
+            book = float(avg_costs.get(ticker) or 0) or float(
                 (new_trail.get(ticker) or {}).get("entry") or 0
             )
+            basis = read_anchors().get(ticker) or 0.0
+            entry = position_basis(book, basis)
             bands = bands_for(ticker)
             ma = float(bands["ma"]) if bands and bands.get("ma") else None
             exit_high = float((read_sleeve_exits().get(ticker) or {}).get("high") or 0)
-            if price > 0 and entry > 0:
+            if price > 0 and book > 0:
                 legs.append({
                     "ticker": ticker,
                     "price": price,
@@ -1095,10 +1121,11 @@ class CryptoDeskMixin:
                     watch_snapshot_line(
                         ticker,
                         price=price,
-                        entry=entry,
+                        entry=book,
                         ma=ma,
                         kind="alt",
                         exit_high=exit_high,
+                        basis=basis,
                     )
                 )
         dip = read_btc_dip()
@@ -1106,10 +1133,11 @@ class CryptoDeskMixin:
         dip_px = float(prices.get(BTC_DIP_TICKER) or 0)
         if float(dip.get("qty") or 0) > 0 and dip_px > 0 and dip_entry > 0:
             exit_high = float(dip.get("exit_high") or 0)
+            basis = read_anchors().get(BTC_DIP_TICKER) or 0.0
             legs.append({
                 "ticker": BTC_DIP_TICKER,
                 "price": dip_px,
-                "entry": dip_entry,
+                "entry": position_basis(dip_entry, basis),
                 "kind": "pocket",
                 "exit_high": exit_high,
             })
@@ -1120,6 +1148,7 @@ class CryptoDeskMixin:
                     entry=dip_entry,
                     kind="pocket",
                     exit_high=exit_high,
+                    basis=basis,
                 )
             )
         self._sync_tape(positions, legs)
@@ -1150,7 +1179,8 @@ class CryptoDeskMixin:
         dip = read_btc_dip()
         qty = float(dip.get("qty") or 0)
         if qty > 0:
-            entry = float(dip.get("entry") or 0)
+            book_entry = float(dip.get("entry") or 0)
+            entry = position_basis(book_entry, read_anchors().get(ticker))
             live = self._tape_quote(ticker)
             if live and float(live.get("price") or 0) > 0:
                 price = float(live["price"])
@@ -1166,7 +1196,7 @@ class CryptoDeskMixin:
             if exit_state:
                 write_btc_dip(
                     qty,
-                    entry,
+                    book_entry,
                     exit_high=float(exit_state["high"]),
                     exit_ts=float(exit_state["ts"]),
                 )
@@ -1186,9 +1216,11 @@ class CryptoDeskMixin:
             sell_qty = min(qty, held)
             if sell_qty <= 0:
                 write_btc_dip(0, 0)
+                self._drop_anchor(ticker)
                 return None
             phrase = self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
             write_btc_dip(0, 0)
+            self._drop_anchor(ticker)
             logger.info(
                 "[Крипта] карман %s: выход (%s) %.6g по %.4g",
                 ticker,

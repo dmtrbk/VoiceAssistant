@@ -198,6 +198,12 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             "вершина",
         )
+        self.assertEqual(policy.position_basis(2.0, None), 2.0)
+        self.assertEqual(policy.position_basis(2.0, 1.9), 1.9)
+        line = policy.watch_snapshot_line("XRP", price=1.85, entry=2.0, kind="alt", basis=1.9)
+        self.assertIn("avg=2", line)
+        self.assertIn("отсчёт 1.9", line)
+        self.assertIn("до стопа 4.4пп", line)
 
     def test_alt_sleeve_qty_for_exit_reserves_pocket(self):
         sol = policy.BTC_DIP_TICKER
@@ -605,6 +611,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ("btc_dip.json", "_BTC_DIP_PATH"),
             ("entry_arm.json", "_ENTRY_ARM_PATH"),
             ("excluded.json", "_EXCLUDED_PATH"),
+            ("anchor.json", "_ANCHOR_PATH"),
         ):
             path = os.path.join(self.tmp.name, name)
             patcher = patch(f"skills.crypto.common.{attr}", path)
@@ -1082,6 +1089,17 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertIn(("XRP", "Sell", 20.0, None), placed, result)
         self.assertNotIn("XRP", state["alloc"])
         self.assertNotIn("XRP", read_sleeve_exits())
+
+    def test_anchor_measures_stop_from_current_price(self):
+        from skills.crypto.common import write_anchors
+
+        write_anchors({"XRP": 1.90})
+        self.bands = {"XRP": {"z": -2.0, "ma": 2.2}}
+        pos = [{"ticker": "XRP", "qty": 20.0, "value": 37.0, "price": 1.85, "name": "XRP"}]
+        placed, result, _state = self._watch_alt(
+            price=1.85, entry=2.0, alloc={"XRP": 11.7}, positions=pos
+        )
+        self.assertFalse(any(side == "Sell" for _t, side, *_ in placed), result)
 
     def test_watch_stop_loss_alt(self):
         self.bands = {"XRP": {"z": -3.0, "ma": 2.4}}

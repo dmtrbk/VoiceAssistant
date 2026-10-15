@@ -53,6 +53,7 @@ _TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trail.json")
 _EARN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_earn.json")
 _BTC_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_btc_dip.json")
 _ENTRY_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_entry_arm.json")
+_ANCHOR_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_anchor.json")
 
 _ENCYCLOPEDIA = (
     "что такое", "что значит", "кто такой", "кто такая",
@@ -412,6 +413,54 @@ def _read_trail_payload(path: str) -> dict[str, Any]:
     except Exception:
         return {}
     return raw if isinstance(raw, dict) else {}
+
+
+def read_anchors(path: str | None = None) -> dict[str, float]:
+    """Цены, от которых заново считаются стоп и ловушка. Журнал покупок не меняется."""
+    path = path or _ANCHOR_PATH
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    source = raw.get("anchors") if isinstance(raw.get("anchors"), dict) else raw
+    out: dict[str, float] = {}
+    for key, value in source.items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or ticker in {"ANCHORS", "TS"}:
+            continue
+        try:
+            price = float(value.get("price") if isinstance(value, dict) else value)
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            out[ticker] = price
+    return out
+
+
+def write_anchors(anchors: dict[str, float], path: str | None = None) -> None:
+    path = path or _ANCHOR_PATH
+    clean = {
+        _normalize_ticker(str(key)): float(price)
+        for key, price in (anchors or {}).items()
+        if _normalize_ticker(str(key)) and float(price or 0) > 0
+    }
+    payload = {"anchors": {ticker: {"price": price} for ticker, price in sorted(clean.items())}, "ts": time.time()}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал отсчёт: %s", exc)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def read_sleeve_exits(path: str | None = None) -> dict[str, dict[str, float]]:
