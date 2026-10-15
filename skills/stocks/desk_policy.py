@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import math
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 # Режим рынка по индексу Мосбиржи. Индекс спокойнее BTC — пороги мягче крипты.
@@ -22,7 +22,7 @@ TAKE_PROFIT_DAY_PCT = 7.0
 MIN_HOLD_HOURS = 24.0
 # Убыточная продажа или выход по стопу/трейлу — сутки не берём бумагу снова.
 COOLDOWN_HOURS = 24.0
-EXIT_REASONS = frozenset({"стоп", "трейл"})
+EXIT_REASONS = frozenset({"стоп", "трейл", "канал"})
 WATCH_MAX_TRADES_PER_HOUR = 2
 STOP_LOSS_PCT = 10.0
 TRAIL_ARM_PCT = 6.0
@@ -40,6 +40,19 @@ ENTRY_HOLD_SEC = 20 * 60
 PARK_BUFFER_PCT = 2.0
 PARK_MIN_PCT = 3.0
 PARK_MIN_RUB = 500.0
+# Тренд (STOCKS_STRATEGY=trend): покупка на пробое максимума 55 дней, продажа ниже
+# минимума 10 дней или по стопу от входа. Уровни — только по завершённым дням.
+TREND_ENTRY_DAYS = 55
+TREND_EXIT_DAYS = 10
+TREND_STOP_PCT = 8.0
+TREND_SLOTS = 3
+TREND_TICKERS = (
+    "SBER", "LKOH", "GAZP", "ROSN", "NVTK", "GMKN",
+    "YDEX", "T", "VTBR", "PLZL", "MOEX", "TATN",
+)
+# Вечерняя сессия тонкая — входим только в основную.
+TREND_ENTRY_HOUR_FROM = 10
+TREND_ENTRY_HOUR_TILL = 18
 
 
 def index_changes(
@@ -299,3 +312,53 @@ def park_release_lots(*, need_rub: float, cash: float, lot_cost: float, held_lot
     if gap <= 0 or lot_cost <= 0 or held_lots <= 0:
         return 0
     return min(int(held_lots), int(math.ceil(gap / float(lot_cost))))
+
+
+def trend_levels(
+    days: list[tuple[str, float, float]],
+    *,
+    today: str,
+) -> dict[str, float] | None:
+    """Канал по дням (дата ISO, high, low) строго до today. None — истории мало."""
+    done = sorted((d for d in days if d[0] < today and d[1] > 0 and d[2] > 0), key=lambda d: d[0])
+    if len(done) < TREND_ENTRY_DAYS:
+        return None
+    return {
+        "top": max(h for _d, h, _l in done[-TREND_ENTRY_DAYS:]),
+        "floor": min(lo for _d, _h, lo in done[-TREND_EXIT_DAYS:]),
+    }
+
+
+def trend_entry_window(now: datetime) -> bool:
+    return now.weekday() < 5 and TREND_ENTRY_HOUR_FROM <= now.hour < TREND_ENTRY_HOUR_TILL
+
+
+def trend_exit_reason(*, price: float, entry: float, floor: float | None) -> str | None:
+    px = float(price or 0)
+    if px <= 0:
+        return None
+    ent = float(entry or 0)
+    if ent > 0 and (px / ent - 1.0) * 100.0 <= -TREND_STOP_PCT:
+        return "стоп"
+    if floor and px < float(floor):
+        return "канал"
+    return None
+
+
+def pick_trend_entries(rows: list[dict[str, Any]], free_slots: int) -> list[dict[str, Any]]:
+    """Пробившие максимум, сильнейший пробой первым."""
+    hits = [
+        r for r in rows
+        if float(r.get("top") or 0) > 0 and float(r.get("price") or 0) > float(r["top"])
+    ]
+    hits.sort(key=lambda r: float(r["price"]) / float(r["top"]), reverse=True)
+    return hits[: max(0, int(free_slots))]
+
+
+def trend_slot_lots(*, equity: float, cash: float, price: float, lot: int) -> int:
+    """Лотов на слот: доля счёта, но не больше свободных денег."""
+    lot_cost = float(price or 0) * max(int(lot or 1), 1)
+    if lot_cost <= 0:
+        return 0
+    budget = min(float(equity or 0) / TREND_SLOTS, float(cash or 0))
+    return max(0, int(budget // lot_cost))

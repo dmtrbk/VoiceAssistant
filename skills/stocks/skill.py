@@ -25,6 +25,7 @@ from .desk import StocksDeskMixin
 from .journal import StocksJournalMixin, _wants_journal
 from .quotes import StocksQuotesMixin, _wants_market_report
 from .trades import StocksTradesMixin, _trade_kind, _wants_advice
+from .trend import StocksTrendMixin
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class StocksSkill(
     StocksQuotesMixin,
     StocksTradesMixin,
     StocksDeskMixin,
+    StocksTrendMixin,
     StocksJournalMixin,
     BaseSkill,
 ):
@@ -46,6 +48,7 @@ class StocksSkill(
         self._session = common.make_http_session()
         self._watch_period_sec = common._WATCH_PERIOD_SEC
         self._cache: dict[str, tuple[float, Any]] = {}
+        self._trend_levels_cache: dict[str, tuple[str, dict[str, float] | None]] = {}
         self._last_tickers: list[str] = []
         self._alias_extra: dict[str, str] = {}
         self._buy_blocked: set[str] = set()

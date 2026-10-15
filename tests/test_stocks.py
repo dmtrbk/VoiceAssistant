@@ -46,6 +46,11 @@ class TestStocks(unittest.TestCase):
         self.addCleanup(patcher_trade.stop)
         self.addCleanup(patcher_alloc.stop)
         self.addCleanup(patcher_arm.stop)
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for key in [k for k in os.environ if k.startswith("STOCKS_")]:
+            del os.environ[key]
         self.skill = StocksSkill()
 
     def test_extract_lots(self):

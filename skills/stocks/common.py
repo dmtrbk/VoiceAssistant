@@ -534,6 +534,11 @@ def _signals_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _trend_enabled() -> bool:
+    """STOCKS_STRATEGY=trend — стол торгует пробой канала вместо сигналов Т-Инвест."""
+    return (os.getenv("STOCKS_STRATEGY") or "").strip().lower() == "trend"
+
+
 def _park_ticker() -> str:
     return (os.getenv("STOCKS_PARK_TICKER") or "LQDT").strip().upper() or "LQDT"
 

@@ -873,6 +873,10 @@ class StocksDeskMixin:
             return {}
 
     def _trade_auto_locked(self, silent: bool = False) -> str:
+        if common._trend_enabled():
+            if self._token and not self._market_open():
+                raise RuntimeError("market closed")
+            return self._trend_cycle(silent)
         if not _signals_enabled():
             state = read_alloc_state() or {}
             why = "сигналы выключены — новых бумаг не беру, купленные держу до стопа"
@@ -944,6 +948,8 @@ class StocksDeskMixin:
 
     def _desk_watch_locked(self, silent: bool = True) -> str:
         """Дозор: стопы и трейл по бумагам стола, затем ребаланс к сохранённой цели."""
+        if common._trend_enabled():
+            return self._trend_cycle(silent)
         state = read_alloc_state()
         if state is None:
             if silent:

@@ -2,7 +2,7 @@ import os
 import tempfile
 import time
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -38,9 +38,26 @@ from skills.stocks.desk_policy import (
     watch_snapshot_line,
     WATCH_PERIOD_CALM,
     WATCH_PERIOD_NEAR,
+    EXIT_REASONS,
+    TREND_ENTRY_DAYS,
+    TREND_EXIT_DAYS,
+    pick_trend_entries,
+    trend_entry_window,
+    trend_exit_reason,
+    trend_levels,
+    trend_slot_lots,
 )
 
 _MSK = ZoneInfo("Europe/Moscow")
+
+
+def _clear_stocks_env(case: unittest.TestCase) -> None:
+    """skills.ai_chat при импорте грузит .env — боевые STOCKS_* не должны менять тесты."""
+    env = patch.dict(os.environ)
+    env.start()
+    case.addCleanup(env.stop)
+    for key in [k for k in os.environ if k.startswith("STOCKS_")]:
+        del os.environ[key]
 
 
 class TestStocksPolicy(unittest.TestCase):
@@ -226,6 +243,7 @@ class TestStocksDeskRules(unittest.TestCase):
         sleep = patch("skills.stocks.desk.time.sleep")
         sleep.start()
         self.addCleanup(sleep.stop)
+        _clear_stocks_env(self)
         self.skill = StocksSkill()
         self.skill._token = "tok"
 
@@ -735,6 +753,151 @@ class TestStocksDeskRules(unittest.TestCase):
         self.assertEqual(entry["commission"], 1.2)
         self.assertIn("ts_epoch", entry)
         self.assertIn("SBER", self.skill._desk_bought)
+
+
+def _days(n: int, *, high: float = 110.0, low: float = 90.0, last: str = "2026-10-14"):
+    end = date.fromisoformat(last)
+    return [((end - timedelta(days=n - 1 - i)).isoformat(), high, low) for i in range(n)]
+
+
+class TestStocksTrendPolicy(unittest.TestCase):
+    def test_levels_use_only_finished_days(self):
+        days = _days(TREND_ENTRY_DAYS) + [("2026-10-15", 500.0, 1.0)]
+        levels = trend_levels(days, today="2026-10-15")
+        self.assertEqual(levels, {"top": 110.0, "floor": 90.0})
+
+    def test_levels_need_full_channel(self):
+        self.assertIsNone(trend_levels(_days(TREND_ENTRY_DAYS - 1), today="2026-10-15"))
+
+    def test_levels_windows(self):
+        days = _days(TREND_ENTRY_DAYS)
+        days[0] = (days[0][0], 200.0, 50.0)
+        days[-TREND_EXIT_DAYS - 1] = (days[-TREND_EXIT_DAYS - 1][0], 110.0, 10.0)
+        days[-1] = (days[-1][0], 110.0, 95.0)
+        levels = trend_levels(days, today="2026-10-15")
+        self.assertEqual(levels["top"], 200.0)
+        self.assertEqual(levels["floor"], 90.0)
+
+    def test_exit_reason(self):
+        self.assertEqual(trend_exit_reason(price=91.0, entry=100.0, floor=80.0), "стоп")
+        self.assertEqual(trend_exit_reason(price=97.0, entry=100.0, floor=98.0), "канал")
+        self.assertIsNone(trend_exit_reason(price=99.0, entry=100.0, floor=98.0))
+        self.assertIsNone(trend_exit_reason(price=99.0, entry=100.0, floor=None))
+        self.assertIn("канал", EXIT_REASONS)
+
+    def test_pick_strongest_breakouts(self):
+        rows = [
+            {"ticker": "A", "price": 101.0, "top": 100.0},
+            {"ticker": "B", "price": 105.0, "top": 100.0},
+            {"ticker": "C", "price": 99.0, "top": 100.0},
+        ]
+        self.assertEqual([r["ticker"] for r in pick_trend_entries(rows, 3)], ["B", "A"])
+        self.assertEqual([r["ticker"] for r in pick_trend_entries(rows, 1)], ["B"])
+        self.assertEqual(pick_trend_entries(rows, 0), [])
+
+    def test_slot_lots(self):
+        self.assertEqual(trend_slot_lots(equity=30_000, cash=30_000, price=300.0, lot=10), 3)
+        self.assertEqual(trend_slot_lots(equity=30_000, cash=2_000, price=300.0, lot=1), 6)
+        self.assertEqual(trend_slot_lots(equity=30_000, cash=30_000, price=0.0, lot=1), 0)
+
+    def test_entry_window(self):
+        self.assertTrue(trend_entry_window(datetime(2026, 10, 15, 10, 0, tzinfo=_MSK)))
+        self.assertFalse(trend_entry_window(datetime(2026, 10, 15, 18, 0, tzinfo=_MSK)))
+        self.assertFalse(trend_entry_window(datetime(2026, 10, 17, 12, 0, tzinfo=_MSK)))
+
+
+class TestStocksTrendDesk(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for name, attr in (
+            ("holds.json", "_HOLD_PATH"),
+            ("bought.json", "_BOUGHT_PATH"),
+            ("trades.json", "_TRADE_PATH"),
+            ("alloc.json", "_ALLOC_PATH"),
+            ("entry_arm.json", "_ENTRY_ARM_PATH"),
+            ("trail.json", "_TRAIL_PATH"),
+            ("daily.json", "_DAILY_PATH"),
+        ):
+            patcher = patch(f"skills.stocks.common.{attr}", os.path.join(self.tmp.name, name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for target in ("skills.stocks.desk.time.sleep", "skills.stocks.trend.time.sleep"):
+            sleep = patch(target)
+            sleep.start()
+            self.addCleanup(sleep.stop)
+        _clear_stocks_env(self)
+        os.environ["STOCKS_STRATEGY"] = "trend"
+        self.skill = StocksSkill()
+        self.skill._token = "tok"
+        self.skill._desk_bought = {"SBER", "GAZP"}
+        self.skill._desk_bought_ready = True
+        self.skill._manual_holds = {"GMKN"}
+
+    def _run(self, *, positions, levels, prices=None, cash=30_000.0, window=True, max_lots=(100, 100)):
+        tape = [{"ticker": t, "price": p} for t, p in (prices or {}).items()]
+        with (
+            patch.object(self.skill, "_market_open", return_value=True),
+            patch.object(self.skill, "_positions", return_value=(positions, 0.0, 0.0)),
+            patch.object(self.skill, "_broker_cash", return_value=cash),
+            patch.object(self.skill, "_trend_levels", side_effect=lambda t: levels.get(t)),
+            patch.object(self.skill, "_tqbr_tape", return_value=tape),
+            patch.object(self.skill, "_imoex_regime", return_value=(0.0, 0.0)),
+            patch.object(self.skill, "_lot_size", return_value=1),
+            patch.object(self.skill, "_max_lots", return_value=max_lots),
+            patch.object(self.skill, "_place_order", return_value="ок") as place,
+            patch("skills.stocks.trend.trend_entry_window", return_value=window),
+        ):
+            result = self.skill._trade_auto_locked(silent=True)
+        return result, place
+
+    def test_exit_below_channel_skips_owner(self):
+        positions = [
+            {"ticker": "SBER", "qty": 10.0, "price": 280.0, "avg": 290.0},
+            {"ticker": "GMKN", "qty": 10.0, "price": 100.0, "avg": 200.0},
+        ]
+        levels = {"SBER": {"top": 320.0, "floor": 285.0}, "GMKN": {"top": 150.0, "floor": 120.0}}
+        _result, place = self._run(positions=positions, levels=levels, window=False)
+        place.assert_called_once()
+        self.assertEqual(place.call_args.args[:2], ("SBER", "ORDER_DIRECTION_SELL"))
+        self.assertEqual(place.call_args.kwargs["reason"], "канал")
+
+    def test_breakout_buys_slot_share(self):
+        positions = [{"ticker": "SBER", "qty": 10.0, "price": 300.0, "avg": 290.0}]
+        levels = {
+            "SBER": {"top": 310.0, "floor": 280.0},
+            "LKOH": {"top": 5_000.0, "floor": 4_500.0},
+            "ROSN": {"top": 400.0, "floor": 380.0},
+            "VTBR": {"top": 80.0, "floor": 70.0},
+        }
+        prices = {"SBER": 300.0, "LKOH": 5_100.0, "ROSN": 390.0, "VTBR": 84.0}
+        result, place = self._run(
+            positions=positions, levels=levels, prices=prices, cash=27_000.0, max_lots=(1000, 1000)
+        )
+        bought = [c.args for c in place.call_args_list]
+        self.assertEqual(bought, [("VTBR", "ORDER_DIRECTION_BUY", 119), ("LKOH", "ORDER_DIRECTION_BUY", 1)])
+        self.assertIn("пробой", result)
+
+    def test_no_entries_when_slots_full_or_cooldown(self):
+        self.skill._desk_bought |= {"LKOH", "ROSN"}
+        positions = [
+            {"ticker": t, "qty": 1.0, "price": 100.0, "avg": 100.0} for t in ("SBER", "LKOH", "ROSN")
+        ]
+        levels = {t: {"top": 90.0, "floor": 80.0} for t in ("SBER", "LKOH", "ROSN", "VTBR")}
+        _result, place = self._run(positions=positions, levels=levels, prices={"VTBR": 100.0})
+        place.assert_not_called()
+
+        sj._write_trades([
+            {"ticker": "VTBR", "side": "sell", "qty": 1, "lots": 1, "price": 90.0,
+             "reason": "канал", "ts_epoch": time.time() - 3600},
+        ])
+        _result, place = self._run(positions=[], levels=levels, prices={"VTBR": 100.0})
+        place.assert_not_called()
+
+    def test_watch_routes_to_trend(self):
+        with patch.object(self.skill, "_trend_cycle", return_value="тренд: ок") as cycle:
+            self.assertEqual(self.skill._desk_watch_locked(silent=True), "тренд: ок")
+        cycle.assert_called_once()
 
 
 if __name__ == "__main__":
