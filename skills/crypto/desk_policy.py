@@ -9,6 +9,7 @@ from typing import Any
 # Рукав альтов: до 75% счёта. Остальные 25% — резерв кармана SOL.
 # Берём только на провале у нижней полосы.
 DESK_ALT_SLEEVE = frozenset({
+    "BTC", "ETH",
     "SOL", "XRP", "DOGE", "LINK", "AVAX", "SUI", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
 })
 ALT_SLEEVE_MAX_PCT = 75.0

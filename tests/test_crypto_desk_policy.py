@@ -128,6 +128,19 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertLessEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_PCT + 0.5)
         self.assertIn("альты", why)
 
+    def test_btc_eth_enter_sleeve_at_lower_band(self):
+        self.assertIn("BTC", policy.DESK_ALT_SLEEVE)
+        self.assertIn("ETH", policy.DESK_ALT_SLEEVE)
+        rows = [
+            {"ticker": "BTC", "turnover": 1e9, "bb_z": -2.8},
+            {"ticker": "ETH", "turnover": 1e9, "bb_z": -2.6},
+            {"ticker": "SOL", "turnover": 1e9, "bb_z": -1.0},
+        ]
+        alloc, _why = policy.score_alloc(rows)
+        self.assertEqual(alloc.get("BTC"), policy.alt_slot_pct())
+        self.assertEqual(alloc.get("ETH"), policy.alt_slot_pct())
+        self.assertNotIn("SOL", alloc)
+
     def test_sol_in_sleeve(self):
         self.assertIn("SOL", policy.DESK_ALT_SLEEVE)
         rows = [
@@ -250,7 +263,7 @@ class TestDeskPolicy(unittest.TestCase):
         picked = policy.pick_watch_alt_entries(
             bands, target_alloc={"BTC": 40.0, "XRP": 11.7}, held_alts=set(), blocked={"DOT"}
         )
-        self.assertEqual(picked, ["LINK", "NEAR"])
+        self.assertEqual(picked, ["LINK"])
         none = policy.pick_watch_alt_entries(
             bands, target_alloc={"XRP": 11.7}, held_alts={"DOGE", "MNT"}, blocked=set()
         )
@@ -384,10 +397,13 @@ class TestDeskPolicy(unittest.TestCase):
                 {"ticker": "BTC", "chg_7": -20.0},
             ],
         )
-        self.assertEqual(entered, {"DOGE"})
+        self.assertEqual(entered, {"DOGE", "BTC"})
         stayed = policy.update_exclusions(entered, [{"ticker": "DOGE", "chg_7": -1.0}])
-        self.assertEqual(stayed, {"DOGE"})
-        left = policy.update_exclusions(stayed, [{"ticker": "DOGE", "chg_7": 0.2}])
+        self.assertEqual(stayed, {"DOGE", "BTC"})
+        left = policy.update_exclusions(
+            stayed,
+            [{"ticker": "DOGE", "chg_7": 0.2}, {"ticker": "BTC", "chg_7": 0.2}],
+        )
         self.assertEqual(left, set())
 
     def test_btc_dip_rules(self):
@@ -426,7 +442,7 @@ class TestDeskPolicy(unittest.TestCase):
                 held_values={"BNB": 80.0, "MNT": 0.3, "BTC": 10.0},
                 pocket_open=False,
             ),
-            {"BNB"},
+            {"BNB", "BTC"},
         )
         self.assertEqual(
             policy.watch_stream_tickers(held_values={"BNB": 80.0}, pocket_open=True),
@@ -758,7 +774,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"DOGE", "BTC"}
             alloc, why = self.skill.desk_score_alloc(rows)
-        self.assertEqual(alloc, {"DOGE": policy.alt_slot_pct()})
+        self.assertEqual(alloc, {"BTC": policy.alt_slot_pct(), "DOGE": policy.alt_slot_pct()})
         self.assertIn("новые альты не беру", why)
 
     def test_desk_score_uses_bull_cash_floor(self):
@@ -1031,7 +1047,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"DOGE", "BTC"}
             self.skill._rebalance({"DOGE": policy.alt_slot_pct()}, respect_hold=False)
-        self.assertNotIn(("BTC", "Sell"), placed)
+        self.assertIn(("BTC", "Sell"), placed)
         self.assertNotIn(("DOGE", "Sell"), placed)
 
     def _watch_alt(self, *, price: float, entry: float, alloc: dict, positions: list, cash: float = 60.0):
