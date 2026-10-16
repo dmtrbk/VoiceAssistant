@@ -99,29 +99,40 @@ def color_for(value: float | None) -> str:
 
 
 def caption_amount(value: float | None, suffix: str) -> tuple[str, str]:
-    """Одна цифра под сферой: текст и цвет. Пусто — тусклое тире."""
+    """День под сферой: со знаком. Пусто — тусклое тире."""
     if value is None:
         return "—", COLOR_MINUS
     return signed_amount(value, suffix), color_for(value)
 
 
+def asset_amount(value: float | None, suffix: str) -> tuple[str, str]:
+    """Вся стоимость счёта: без плюса, светлым. Пусто — тусклое тире."""
+    if value is None:
+        return "—", COLOR_MINUS
+    shown = int(round(value))
+    body = f"{abs(shown):,}".replace(",", " ")
+    if shown < 0:
+        return f"-{body} {suffix}", COLOR_MINUS
+    return f"{body} {suffix}", COLOR_PLUS
+
+
 def caption_rows(
     stocks: float | None,
     crypto: float | None,
-    stocks_life: float | None = None,
-    crypto_life: float | None = None,
+    stocks_value: float | None = None,
+    crypto_value: float | None = None,
 ) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
-    """Биржа сверху, крипта снизу. Слева день, справа заработанное, слэш по центру."""
+    """Биржа сверху, крипта снизу. Слева день, справа весь счёт."""
     slash = (" / ", COLOR_PLUS)
     stocks_row = (
         caption_amount(stocks, "₽"),
         slash,
-        caption_amount(stocks_life, "₽"),
+        asset_amount(stocks_value, "₽"),
     )
     crypto_row = (
         caption_amount(crypto, "$"),
         slash,
-        caption_amount(crypto_life, "$"),
+        asset_amount(crypto_value, "$"),
     )
     return stocks_row, crypto_row
 
@@ -238,6 +249,8 @@ def cache_is_fresh(now: float | None = None, cache_path: str | None = None) -> b
     stamp = os.path.getmtime(cache_path)
     current = time.time() if now is None else now
     raw = _read_pnl_raw()
+    if raw is not None and ("stocks_value" not in raw or "crypto_value" not in raw):
+        return False
     max_age = 5 * 60 if raw and raw.get("day_stale") else CACHE_MAX_AGE
     if current - stamp > max_age:
         return False
@@ -337,6 +350,47 @@ def crypto_lifetime_pnl(*, refresh: bool = True) -> float | None:
     if trades is None:
         return interest or None
     return trades + interest
+
+
+def fetch_stocks_value() -> float | None:
+    """Весь счёт Т-Инвест: бумаги, фонды и кэш."""
+    try:
+        from skills.stocks import StocksSkill
+        from skills.stocks.common import _PORTFOLIO, _quotation_to_float
+
+        skill = StocksSkill()
+        if not skill._token:
+            return None
+        account_id = skill._pick_account_id()
+        if not account_id:
+            return None
+        data = skill._post(
+            skill._url(_PORTFOLIO),
+            {"accountId": account_id, "currency": "RUB"},
+            cache_key=f"pf:{account_id}",
+        )
+        if data.get("totalAmountPortfolio"):
+            return float(_quotation_to_float(data.get("totalAmountPortfolio")))
+        positions, _day, _life = skill._positions()
+        cash = skill._broker_cash()
+        return cash + sum(float(item["price"]) * float(item["qty"]) for item in positions)
+    except Exception:
+        return None
+
+
+def fetch_crypto_value() -> float | None:
+    """Весь счёт Bybit: монеты, стейблы и проценты Earn."""
+    try:
+        from skills.crypto import CryptoSkill
+
+        skill = CryptoSkill()
+        skill._reload_env()
+        if not skill._api_key:
+            return None
+        cash, positions = skill._wallet()
+        return float(cash) + sum(float(item.get("value") or 0) for item in positions)
+    except Exception:
+        return None
 
 
 def fetch_stocks_life() -> float | None:
@@ -458,6 +512,14 @@ def read_life_cache(cache_path: str | None = None) -> tuple[float | None, float 
     return _num_field(raw, "stocks_life"), _num_field(raw, "crypto_life")
 
 
+def read_value_cache(cache_path: str | None = None) -> tuple[float | None, float | None]:
+    """Стоимость счетов целиком. Пусто, пока кэш ещё без этих полей."""
+    raw = _read_pnl_raw(cache_path)
+    if raw is None:
+        return None, None
+    return _num_field(raw, "stocks_value"), _num_field(raw, "crypto_value")
+
+
 def write_pnl_cache(
     stocks: float | None,
     crypto: float | None,
@@ -465,6 +527,8 @@ def write_pnl_cache(
     crypto_life: float | None = None,
     cache_path: str | None = None,
     *,
+    stocks_value: float | None = None,
+    crypto_value: float | None = None,
     day_stale: bool = False,
 ) -> None:
     cache_path = cache_path or PNL_CACHE_PATH
@@ -473,6 +537,8 @@ def write_pnl_cache(
         "crypto": crypto,
         "stocks_life": stocks_life,
         "crypto_life": crypto_life,
+        "stocks_value": stocks_value,
+        "crypto_value": crypto_value,
         "day_stale": day_stale,
     }
     tmp_path = cache_path + ".tmp"
@@ -486,11 +552,14 @@ def _store(
     crypto: float | None,
     stocks_life: float | None = None,
     crypto_life: float | None = None,
+    stocks_value: float | None = None,
+    crypto_value: float | None = None,
     *,
     fetch_missing_life: bool = True,
 ) -> str:
     remembered_day = read_pnl_cache() or (None, None)
     remembered_stocks, remembered_crypto = read_life_cache()
+    remembered_stock_value, remembered_crypto_value = read_value_cache()
     day_stale = False
     if stocks is None:
         stocks = remembered_day[0]
@@ -508,6 +577,14 @@ def _store(
     if crypto_life is None:
         crypto_life = remembered_crypto
         day_stale = True
+    if stocks_value is None and fetch_missing_life:
+        stocks_value = fetch_stocks_value()
+    if stocks_value is None:
+        stocks_value = remembered_stock_value
+    if crypto_value is None and fetch_missing_life:
+        crypto_value = fetch_crypto_value()
+    if crypto_value is None:
+        crypto_value = remembered_crypto_value
     text = render_lines(
         stocks,
         crypto,
@@ -519,7 +596,15 @@ def _store(
     except Exception:
         pass
     try:
-        write_pnl_cache(stocks, crypto, stocks_life, crypto_life, day_stale=day_stale)
+        write_pnl_cache(
+            stocks,
+            crypto,
+            stocks_life,
+            crypto_life,
+            stocks_value=stocks_value,
+            crypto_value=crypto_value,
+            day_stale=day_stale,
+        )
     except Exception:
         pass
     return text
@@ -537,6 +622,8 @@ def load_text() -> str:
             crypto,
             stocks_life=fetch_stocks_life(),
             crypto_life=fetch_crypto_life(),
+            stocks_value=fetch_stocks_value(),
+            crypto_value=fetch_crypto_value(),
         )
 
 

@@ -58,12 +58,12 @@ class TestConkyMarkets(unittest.TestCase):
         self.assertEqual(conky_markets.color_for(0), "c0c0c0")
 
     def test_caption_rows(self):
-        stocks, crypto = conky_markets.caption_rows(-5, -2, 178, 1)
+        stocks, crypto = conky_markets.caption_rows(-5, -2, 17840, 4310)
         self.assertEqual(stocks[0], ("-5 ₽", "888888"))
         self.assertEqual(stocks[1], (" / ", "c0c0c0"))
-        self.assertEqual(stocks[2], ("+178 ₽", "c0c0c0"))
+        self.assertEqual(stocks[2], ("17 840 ₽", "c0c0c0"))
         self.assertEqual(crypto[0], ("-2 $", "888888"))
-        self.assertEqual(crypto[2], ("+1 $", "c0c0c0"))
+        self.assertEqual(crypto[2], ("4 310 $", "c0c0c0"))
         empty, _crypto = conky_markets.caption_rows(None, None, None, None)
         self.assertEqual(empty[0][0], "—")
         self.assertEqual(empty[2][0], "—")
@@ -200,7 +200,11 @@ class TestConkyMarkets(unittest.TestCase):
         with open(cache, "w", encoding="utf-8") as handle:
             handle.write("old")
         os.utime(cache, (time.time(), time.time()))
-        with mock.patch.object(conky_markets, "JOURNAL_PATHS", (journal,)):
+        fresh = {"stocks_value": 1, "crypto_value": 1}
+        with (
+            mock.patch.object(conky_markets, "JOURNAL_PATHS", (journal,)),
+            mock.patch.object(conky_markets, "_read_pnl_raw", return_value=fresh),
+        ):
             self.assertTrue(conky_markets.cache_is_fresh(cache_path=cache))
             time.sleep(0.02)
             with open(journal, "w", encoding="utf-8") as handle:

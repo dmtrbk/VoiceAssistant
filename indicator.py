@@ -57,7 +57,7 @@ STATUS_COLORS = {
 # Шар сверху, две строки кэша рынков снизу. Свечение не заходит на цифры.
 _ORB_SIDE = 150
 _CAPTION_TOP = 99
-_CAPTION_SAMPLE = "+12 345 ₽ / -1 234 ₽"
+_CAPTION_SAMPLE = "+12 345 ₽ / 123 456 ₽"
 
 class OrbWidget(QWidget):
     """Сфера и две строки рынков под ней. Окно одно: цифры едут вместе с шаром."""
@@ -160,8 +160,8 @@ class OrbWidget(QWidget):
             import conky_markets
 
             day = conky_markets.read_pnl_cache() or (None, None)
-            life = conky_markets.read_life_cache()
-            nxt = (day[0], day[1], life[0], life[1])
+            value = conky_markets.read_value_cache()
+            nxt = (day[0], day[1], value[0], value[1])
         except Exception:
             return
         if nxt != self._pnl:
