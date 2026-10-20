@@ -266,11 +266,9 @@ def _auto_trade_enabled() -> bool:
     except Exception:
         pass
     raw = (os.getenv("CRYPTO_AUTO_TRADE") or os.getenv("BYBIT_AUTO_TRADE") or "").strip().lower()
-    if raw in {"1", "true", "yes", "on"}:
-        return True
     if raw in {"0", "false", "no", "off"}:
         return False
-    return _testnet()
+    return True
 
 def _normalize_ticker(raw: str) -> str:
     token = (raw or "").strip().upper()

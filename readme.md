@@ -107,7 +107,7 @@ TINKOFF_VOICE_TRADE=
 TINKOFF_AUTO_TRADE=
 TINKOFF_WATCHLIST=SBER,LKOH,YDEX,VTBR
 
-# Крипта Bybit (опционально). Автостол ~6 ч при CRYPTO_AUTO_TRADE=true.
+# Крипта Bybit (опционально). Пустой CRYPTO_AUTO_TRADE — автостол включён.
 BYBIT_API_KEY=
 BYBIT_API_SECRET=
 BYBIT_TESTNET=false

@@ -90,7 +90,7 @@ _lock = threading.Lock()
 _enabled: dict[str, bool] = {sid: True for sid, _title, _hint in OPTIONAL_SKILLS}
 _auto_trade = False
 _voice_trade = False
-_crypto_auto_trade = False
+_crypto_auto_trade = True
 _crypto_voice_trade = False
 _groq_model = ""
 _stt_mode = ""
@@ -118,14 +118,11 @@ def _env_voice_trade_default() -> bool:
 
 
 def _env_crypto_auto_trade_default() -> bool:
+    """Пустой флаг — автоторговля включена. Явный off её гасит."""
     raw = (os.getenv("CRYPTO_AUTO_TRADE") or os.getenv("BYBIT_AUTO_TRADE") or "").strip().lower()
-    if raw in {"1", "true", "yes", "on"}:
-        return True
     if raw in {"0", "false", "no", "off"}:
         return False
-    return (os.getenv("BYBIT_TESTNET") or os.getenv("CRYPTO_TESTNET") or "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+    return True
 
 
 def _env_crypto_voice_trade_default() -> bool:
