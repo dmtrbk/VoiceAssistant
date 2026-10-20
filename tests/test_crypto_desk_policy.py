@@ -392,13 +392,13 @@ class TestDeskPolicy(unittest.TestCase):
         entered = policy.update_exclusions(
             set(),
             [
-                {"ticker": "DOGE", "chg_7": -4.0},
+                {"ticker": "DOGE", "chg_7": -6.0},
                 {"ticker": "SOL", "chg_7": -1.0},
                 {"ticker": "BTC", "chg_7": -20.0},
             ],
         )
         self.assertEqual(entered, {"DOGE", "BTC"})
-        stayed = policy.update_exclusions(entered, [{"ticker": "DOGE", "chg_7": -1.0}])
+        stayed = policy.update_exclusions(entered, [{"ticker": "DOGE", "chg_7": -2.0}])
         self.assertEqual(stayed, {"DOGE", "BTC"})
         left = policy.update_exclusions(
             stayed,

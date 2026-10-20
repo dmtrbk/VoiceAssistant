@@ -18,10 +18,10 @@ DESK_CASH_FLOOR_PCT = 25.0
 DESK_CASH_FLOOR_BULL_PCT = 8.0
 REBALANCE_BAND_PCT = 6.0
 REBALANCE_BAND_ALT_PCT = 8.0
-# Исключение по неделе: вход при 7д ≤ −3%, выход при 7д ≥ 0.
+# Исключение по неделе: вход при 7д ≤ −5%, выход при 7д ≥ −1%.
 # Между этими порогами список не прыгает.
-EXCLUDE_ENTER_CHG7 = -3.0
-EXCLUDE_EXIT_CHG7 = 0.0
+EXCLUDE_ENTER_CHG7 = -5.0
+EXCLUDE_EXIT_CHG7 = -1.0
 BTC_RISK_OFF_7D = -5.0
 BTC_RISK_OFF_DAY = -3.0
 BTC_BULL_7D = 5.0
@@ -81,7 +81,7 @@ def update_exclusions(
     excluded: set[str],
     rows: list[dict[str, Any]],
 ) -> set[str]:
-    """Монеты с неделей ≤ −3% в исключениях. Неделя ≥ 0 — выход из списка.
+    """Монеты с неделей ≤ −5% в исключениях. Неделя ≥ −1% — выход из списка.
 
     Значение между порогами состояние не меняет.
     """
