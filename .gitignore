@@ -22,6 +22,7 @@ jarvis_bought.json
 jarvis_trades.json
 jarvis_stocks_alloc.json
 jarvis_stocks_entry_arm.json
+jarvis_stocks_trend_arm.json
 jarvis_stocks_trail.json
 jarvis_stocks_daily.json
 jarvis_crypto_holds.json

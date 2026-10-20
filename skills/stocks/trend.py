@@ -10,18 +10,28 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from . import journal as stocks_journal
-from .common import _MOEX, _park_ticker, read_alloc_state, write_alloc_state
+from .common import (
+    _MOEX,
+    _park_ticker,
+    read_alloc_state,
+    read_trend_arms,
+    write_alloc_state,
+    write_trend_arms,
+)
 from .desk_policy import (
     COOLDOWN_HOURS,
     TREND_SLOTS,
     TREND_TICKERS,
     WATCH_PERIOD_CALM,
+    WATCH_PERIOD_NEAR,
     is_risk_off,
-    pick_trend_entries,
     trend_entry_window,
     trend_exit_reason,
     trend_levels,
+    trend_pullback_ready,
+    trend_pullback_wait_line,
     trend_slot_lots,
+    update_trend_pullback_arm,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,7 +62,7 @@ class StocksTrendMixin:
         return levels
 
     def _trend_cycle(self, silent: bool = True) -> str:
-        """Выходы по стопу и каналу, затем входы на пробое в свободные слоты."""
+        """Выходы по стопу и каналу, затем входы после отката от пика пробоя."""
         state = read_alloc_state() or {}
         if not self._token:
             return "Режим тренда: торгового ключа нет."
@@ -60,8 +70,10 @@ class StocksTrendMixin:
             return "рынок закрыт"
         self._watch_period_sec = WATCH_PERIOD_CALM
         parts, sold, held = self._trend_exits()
-        why, bought = self._trend_entries(held, sold)
+        why, bought, waiting = self._trend_entries(held, sold)
         parts.extend(bought)
+        if waiting:
+            self._watch_period_sec = WATCH_PERIOD_NEAR
         if sold or bought:
             self._bust_broker_cache()
         self._park_idle()
@@ -120,18 +132,20 @@ class StocksTrendMixin:
                 logger.warning("[Биржа] тренд: выход %s: %s", ticker, exc)
         return parts, sold, held
 
-    def _trend_entries(self, held: set[str], sold: set[str]) -> tuple[str, list[str]]:
-        """(пояснение, ответы по покупкам)."""
+    def _trend_entries(self, held: set[str], sold: set[str]) -> tuple[str, list[str], bool]:
+        """(пояснение, ответы по покупкам, ждём откат)."""
         in_slots = [t for t in TREND_TICKERS if t in held and not self._is_owner_position(t)]
         free = TREND_SLOTS - len(in_slots)
         holding = f"держу {', '.join(in_slots)}" if in_slots else "позиций нет"
         if free <= 0:
-            return f"{holding}, слоты заняты", []
+            write_trend_arms({})
+            return f"{holding}, слоты заняты", [], False
         if not trend_entry_window(datetime.now(_MSK)):
-            return f"{holding}, входы только в основную сессию", []
+            return f"{holding}, входы только в основную сессию", [], bool(read_trend_arms())
         week, day = self._imoex_regime()
         if is_risk_off(week=week, day=day):
-            return f"{holding}. {self._regime_phrase(week, day)}", []
+            write_trend_arms({})
+            return f"{holding}. {self._regime_phrase(week, day)}", [], False
         try:
             cooldown = stocks_journal.cooldown_tickers(COOLDOWN_HOURS)
         except Exception:
@@ -140,8 +154,12 @@ class StocksTrendMixin:
             prices = {row["ticker"]: float(row["price"]) for row in self._tqbr_tape()}
         except Exception as exc:
             logger.warning("[Биржа] тренд: лента TQBR: %s", exc)
-            return f"{holding}, ленты нет", []
-        rows: list[dict[str, Any]] = []
+            return f"{holding}, ленты нет", [], False
+        prev = read_trend_arms()
+        now = time.time()
+        arms: dict[str, dict[str, float]] = {}
+        ready: list[dict[str, Any]] = []
+        waiting_lines: list[str] = []
         for ticker in TREND_TICKERS:
             if ticker in held or ticker in sold or ticker in cooldown or self._is_buy_blocked(ticker):
                 continue
@@ -153,13 +171,30 @@ class StocksTrendMixin:
             except Exception as exc:
                 logger.info("[Биржа] тренд: канал %s: %s", ticker, exc)
                 continue
-            if levels:
-                rows.append({"ticker": ticker, "price": price, "top": levels["top"]})
-        picks = pick_trend_entries(rows, free)
+            if not levels:
+                continue
+            top = float(levels["top"])
+            arm = update_trend_pullback_arm(prev.get(ticker), price=price, top=top, now=now)
+            if not arm:
+                continue
+            arms[ticker] = arm
+            if trend_pullback_ready(arm, price=price):
+                ready.append({"ticker": ticker, "price": price, "top": arm["top"], "peak": arm["peak"]})
+            else:
+                line = trend_pullback_wait_line(ticker, arm, price)
+                waiting_lines.append(line)
+                logger.info("[Биржа] тренд: %s", line)
+        write_trend_arms(arms)
+        if not ready and not waiting_lines:
+            return f"{holding}, пробоев нет", [], False
+        ready.sort(key=lambda r: float(r["peak"]) / float(r["top"]), reverse=True)
+        picks = ready[:free]
         if not picks:
-            return f"{holding}, пробоев нет", []
+            wait_names = ", ".join(r.split()[0] for r in waiting_lines[:free]) or "—"
+            return f"{holding}, жду откат: {wait_names}", [], True
         equity = self._trend_equity()
         parts: list[str] = []
+        bought: list[str] = []
         for row in picks:
             ticker = row["ticker"]
             try:
@@ -174,16 +209,21 @@ class StocksTrendMixin:
                     logger.info("[Биржа] тренд: на %s не хватает денег", ticker)
                     continue
                 logger.info(
-                    "[Биржа] тренд: пробой %s %.4g > %.4g, беру %d лот.",
-                    ticker, row["price"], row["top"], lots,
+                    "[Биржа] тренд: откат %s %.4g (пик %.4g, пробой %.4g), беру %d лот.",
+                    ticker, row["price"], row["peak"], row["top"], lots,
                 )
                 parts.append(self._place_order(ticker, "ORDER_DIRECTION_BUY", lots, reason="пробой"))
+                bought.append(ticker)
+                arms.pop(ticker, None)
                 self._bust_broker_cache()
                 time.sleep(0.6)
             except Exception as exc:
                 logger.warning("[Биржа] тренд: вход %s: %s", ticker, exc)
-        names = ", ".join(r["ticker"] for r in picks)
-        return f"{holding}, пробой: {names}", parts
+        if bought:
+            write_trend_arms(arms)
+        names = ", ".join(bought) if bought else "—"
+        still_wait = bool(arms) and len(bought) < free
+        return f"{holding}, пробой: {names}", parts, still_wait or bool(waiting_lines and not bought)
 
     def _trend_equity(self) -> float:
         """Деньги стола: кэш, фонд паркинга и бумаги стола, без бумаг хозяина."""

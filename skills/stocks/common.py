@@ -41,6 +41,7 @@ _BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_bought.json")
 _TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_trades.json")
 _ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_stocks_alloc.json")
 _ENTRY_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_stocks_entry_arm.json")
+_TREND_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_stocks_trend_arm.json")
 _TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_stocks_trail.json")
 _DAILY_PATH = os.path.join(_PROJECT_DIR, "jarvis_stocks_daily.json")
 _MOEX_HISTORY = "https://iss.moex.com/iss/history/engines/stock/markets/shares"
@@ -323,6 +324,64 @@ def write_entry_arms(arms: dict[str, dict[str, float]], path: str | None = None)
         os.replace(tmp_path, path)
     except Exception as exc:
         logger.warning("[Биржа] не записал ожидание входа: %s", exc)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def read_trend_arms(path: str | None = None) -> dict[str, dict[str, float]]:
+    """Ожидание отката после пробоя: тикер → пик рывка, уровень пробоя, время."""
+    path = path or _TREND_ARM_PATH
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    source = raw.get("arms") if isinstance(raw.get("arms"), dict) else raw
+    arms: dict[str, dict[str, float]] = {}
+    for key, value in source.items():
+        ticker = str(key or "").upper().strip()
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            peak = float(value.get("peak") or 0)
+            top = float(value.get("top") or 0)
+            ts = float(value.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if peak > 0 and top > 0:
+            arms[ticker] = {"peak": peak, "top": top, "ts": ts}
+    return arms
+
+
+def write_trend_arms(arms: dict[str, dict[str, float]], path: str | None = None) -> None:
+    path = path or _TREND_ARM_PATH
+    clean: dict[str, dict[str, float]] = {}
+    for key, value in (arms or {}).items():
+        ticker = str(key or "").upper().strip()
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            peak = float(value.get("peak") or 0)
+            top = float(value.get("top") or 0)
+        except (TypeError, ValueError):
+            continue
+        if peak <= 0 or top <= 0:
+            continue
+        clean[ticker] = {"peak": peak, "top": top, "ts": float(value.get("ts") or 0)}
+    payload = {"arms": clean}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Биржа] не записал ожидание отката: %s", exc)
         try:
             os.remove(tmp_path)
         except OSError:

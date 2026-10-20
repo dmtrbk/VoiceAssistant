@@ -42,9 +42,12 @@ PARK_MIN_PCT = 3.0
 PARK_MIN_RUB = 500.0
 # Тренд (STOCKS_STRATEGY=trend): покупка на пробое максимума 55 дней, продажа ниже
 # минимума 10 дней или по стопу от входа. Уровни — только по завершённым дням.
+# После пробоя не берём на пике: ждём откат TREND_PULLBACK_PCT от вершины рывка,
+# но только пока цена ещё выше уровня пробоя — иначе пробой сорвался.
 TREND_ENTRY_DAYS = 55
 TREND_EXIT_DAYS = 10
 TREND_STOP_PCT = 8.0
+TREND_PULLBACK_PCT = 1.5
 TREND_SLOTS = 3
 TREND_TICKERS = (
     "SBER", "LKOH", "GAZP", "ROSN", "NVTK", "GMKN",
@@ -353,6 +356,63 @@ def pick_trend_entries(rows: list[dict[str, Any]], free_slots: int) -> list[dict
     ]
     hits.sort(key=lambda r: float(r["price"]) / float(r["top"]), reverse=True)
     return hits[: max(0, int(free_slots))]
+
+
+def update_trend_pullback_arm(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    top: float,
+    now: float,
+) -> dict[str, float] | None:
+    """Пробой запоминает пик. Ниже канала — сброс: пробой не удержался."""
+    px = float(price or 0)
+    ceiling = float(top or 0)
+    if px <= 0 or ceiling <= 0 or px <= ceiling:
+        return None
+    if state is None:
+        return {"peak": px, "top": ceiling, "ts": float(now)}
+    try:
+        peak = max(px, float(state.get("peak") or 0))
+        armed_top = float(state.get("top") or ceiling)
+        ts = float(state.get("ts") or now)
+    except (TypeError, ValueError):
+        return {"peak": px, "top": ceiling, "ts": float(now)}
+    if armed_top <= 0:
+        armed_top = ceiling
+    return {"peak": peak, "top": armed_top, "ts": ts}
+
+
+def trend_pullback_ready(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    pullback_pct: float = TREND_PULLBACK_PCT,
+) -> bool:
+    """Покупка: откат от пика рывка, цена всё ещё выше уровня пробоя."""
+    if not state:
+        return False
+    try:
+        peak = float(state.get("peak") or 0)
+        top = float(state.get("top") or 0)
+    except (TypeError, ValueError):
+        return False
+    px = float(price or 0)
+    if peak <= 0 or top <= 0 or px <= 0 or px <= top:
+        return False
+    need = peak * (1.0 - float(pullback_pct) / 100.0)
+    return px <= need + 1e-12
+
+
+def trend_pullback_wait_line(ticker: str, state: dict[str, Any], price: float) -> str:
+    """Строка дозора: пик, цена входа после отката и уровень пробоя."""
+    peak = float(state.get("peak") or 0)
+    top = float(state.get("top") or 0)
+    need = peak * (1.0 - TREND_PULLBACK_PCT / 100.0)
+    return (
+        f"{str(ticker or '?').upper()} жду откат: пик {peak:.4g}, "
+        f"вход ≤{need:.4g} (−{TREND_PULLBACK_PCT:g}%), пробой {top:.4g}, сейчас {float(price):.4g}"
+    )
 
 
 def trend_slot_lots(*, equity: float, cash: float, price: float, lot: int) -> int:

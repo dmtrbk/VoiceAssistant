@@ -41,11 +41,14 @@ from skills.stocks.desk_policy import (
     EXIT_REASONS,
     TREND_ENTRY_DAYS,
     TREND_EXIT_DAYS,
+    TREND_PULLBACK_PCT,
     pick_trend_entries,
     trend_entry_window,
     trend_exit_reason,
     trend_levels,
+    trend_pullback_ready,
     trend_slot_lots,
+    update_trend_pullback_arm,
 )
 
 _MSK = ZoneInfo("Europe/Moscow")
@@ -805,6 +808,17 @@ class TestStocksTrendPolicy(unittest.TestCase):
         self.assertFalse(trend_entry_window(datetime(2026, 10, 15, 18, 0, tzinfo=_MSK)))
         self.assertFalse(trend_entry_window(datetime(2026, 10, 17, 12, 0, tzinfo=_MSK)))
 
+    def test_pullback_arm_tracks_peak_and_ready(self):
+        arm = update_trend_pullback_arm(None, price=84.0, top=80.0, now=1.0)
+        self.assertEqual(arm, {"peak": 84.0, "top": 80.0, "ts": 1.0})
+        self.assertFalse(trend_pullback_ready(arm, price=84.0))
+        arm = update_trend_pullback_arm(arm, price=85.0, top=80.0, now=2.0)
+        self.assertEqual(arm["peak"], 85.0)
+        need = 85.0 * (1 - TREND_PULLBACK_PCT / 100.0)
+        self.assertTrue(trend_pullback_ready(arm, price=need))
+        self.assertFalse(trend_pullback_ready(arm, price=need + 0.1))
+        self.assertIsNone(update_trend_pullback_arm(arm, price=79.0, top=80.0, now=3.0))
+
 
 class TestStocksTrendDesk(unittest.TestCase):
     def setUp(self):
@@ -816,6 +830,7 @@ class TestStocksTrendDesk(unittest.TestCase):
             ("trades.json", "_TRADE_PATH"),
             ("alloc.json", "_ALLOC_PATH"),
             ("entry_arm.json", "_ENTRY_ARM_PATH"),
+            ("trend_arm.json", "_TREND_ARM_PATH"),
             ("trail.json", "_TRAIL_PATH"),
             ("daily.json", "_DAILY_PATH"),
         ):
@@ -862,7 +877,7 @@ class TestStocksTrendDesk(unittest.TestCase):
         self.assertEqual(place.call_args.args[:2], ("SBER", "ORDER_DIRECTION_SELL"))
         self.assertEqual(place.call_args.kwargs["reason"], "канал")
 
-    def test_breakout_buys_slot_share(self):
+    def test_breakout_waits_pullback_then_buys(self):
         positions = [{"ticker": "SBER", "qty": 10.0, "price": 300.0, "avg": 290.0}]
         levels = {
             "SBER": {"top": 310.0, "floor": 280.0},
@@ -870,12 +885,31 @@ class TestStocksTrendDesk(unittest.TestCase):
             "ROSN": {"top": 400.0, "floor": 380.0},
             "VTBR": {"top": 80.0, "floor": 70.0},
         }
-        prices = {"SBER": 300.0, "LKOH": 5_100.0, "ROSN": 390.0, "VTBR": 84.0}
+        peak = {"SBER": 300.0, "LKOH": 5_100.0, "ROSN": 390.0, "VTBR": 84.0}
         result, place = self._run(
-            positions=positions, levels=levels, prices=prices, cash=27_000.0, max_lots=(1000, 1000)
+            positions=positions, levels=levels, prices=peak, cash=27_000.0, max_lots=(1000, 1000)
+        )
+        place.assert_not_called()
+        self.assertIn("жду откат", result)
+        self.assertEqual(self.skill._watch_period_sec, 3 * 60)
+
+        pull = {
+            "SBER": 300.0,
+            "LKOH": 5_100.0 * (1 - TREND_PULLBACK_PCT / 100.0),
+            "ROSN": 390.0,
+            "VTBR": 84.0 * (1 - TREND_PULLBACK_PCT / 100.0),
+        }
+        result, place = self._run(
+            positions=positions, levels=levels, prices=pull, cash=27_000.0, max_lots=(1000, 1000)
         )
         bought = [c.args for c in place.call_args_list]
-        self.assertEqual(bought, [("VTBR", "ORDER_DIRECTION_BUY", 119), ("LKOH", "ORDER_DIRECTION_BUY", 1)])
+        self.assertEqual(
+            bought,
+            [
+                ("VTBR", "ORDER_DIRECTION_BUY", 120),
+                ("LKOH", "ORDER_DIRECTION_BUY", 1),
+            ],
+        )
         self.assertIn("пробой", result)
 
     def test_no_entries_when_slots_full_or_cooldown(self):
