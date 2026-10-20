@@ -37,10 +37,10 @@ ALT_ENTRY_CANCEL_Z = -0.5
 POCKET_ENTRY_BOUNCE_PCT = 1.0
 POCKET_ENTRY_HOLD_SEC = 10 * 60
 # Живой выход рукава — ловушка вершины, не касание средней.
-# +3% взводит верх. Продажа на откате −1% после 5 минут, и только если плюс ещё ≥ +3%.
+# +3% взводит верх. Продажа на откате −0,5% после 5 минут, и только если плюс ещё ≥ +3%.
 # Прогон выше +8% не режем: это верх рабочей зоны, не потолок.
 ALT_EXIT_ARM_PCT = 3.0
-ALT_EXIT_PULLBACK_PCT = 1.0
+ALT_EXIT_PULLBACK_PCT = 0.5
 ALT_EXIT_HOLD_SEC = 5 * 60
 ALT_EXIT_MIN_GAIN_PCT = 1.0  # старый порог у средней; его держит crypto_backtest.py
 ALT_STOP_LOSS_PCT = 7.0
@@ -60,7 +60,7 @@ BTC_DIP_PCT = 25.0
 BTC_DIP_DAY_PCT = -3.0
 BTC_DIP_EXIT_PCT = 1.1
 # Плюс +1,1% только взводит вершину. Продажа — откат от неё, пауза короче входа.
-POCKET_EXIT_PULLBACK_PCT = 1.0
+POCKET_EXIT_PULLBACK_PCT = 0.5
 POCKET_EXIT_HOLD_SEC = 5 * 60
 BTC_DIP_STOP_PCT = 15.0
 WATCH_MAX_TRADES_PER_HOUR = 2
@@ -290,7 +290,7 @@ def pocket_exit_ready(
     price: float,
     now: float | None = None,
 ) -> bool:
-    """Продажа кармана: −1% от вершины, и эта вершина уже 5 минут не обновлялась."""
+    """Продажа кармана: −0,5% от вершины, и эта вершина уже 5 минут не обновлялась."""
     if not state or not _bounce_held(state, now, POCKET_EXIT_HOLD_SEC):
         return False
     high = float(state.get("high") or 0)
@@ -343,7 +343,7 @@ def alt_exit_ready(
     entry: float,
     now: float | None = None,
 ) -> bool:
-    """Продажа рукава: −1% от вершины, вершина 5 минут не обновлялась, плюс ещё ≥ +3%."""
+    """Продажа рукава: −0,5% от вершины, вершина 5 минут не обновлялась, плюс ещё ≥ +3%."""
     if not state or not _bounce_held(state, now, ALT_EXIT_HOLD_SEC):
         return False
     high = float(state.get("high") or 0)

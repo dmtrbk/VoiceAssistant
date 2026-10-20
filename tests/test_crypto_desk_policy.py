@@ -420,7 +420,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.btc_dip_exit_reason(price=100.4, entry=100.0))
         armed = policy.update_pocket_exit_arm(None, price=101.1, entry=100.0, now=10.0)
         self.assertAlmostEqual(armed["high"], 101.1)
-        self.assertFalse(policy.pocket_exit_ready(armed, price=100.5, now=10.0 + policy.POCKET_EXIT_HOLD_SEC))
+        self.assertFalse(policy.pocket_exit_ready(armed, price=100.9, now=10.0 + policy.POCKET_EXIT_HOLD_SEC))
         higher = policy.update_pocket_exit_arm(armed, price=104.0, entry=100.0, now=20.0)
         self.assertEqual(higher["ts"], 20.0)
         held = policy.update_pocket_exit_arm(higher, price=103.5, entry=100.0, now=20.0 + policy.POCKET_EXIT_HOLD_SEC)
