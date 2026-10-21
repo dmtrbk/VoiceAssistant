@@ -141,6 +141,41 @@ QPushButton#navBtn:checked {{
     background: {p.window};
     color: {p.fg};
 }}
+QPushButton#linkBtn {{
+    background: transparent;
+    color: {p.accent};
+    border: none;
+    padding: 8px 0 4px;
+    text-align: left;
+    font-size: 13px;
+    font-weight: 500;
+}}
+QPushButton#linkBtn:hover {{ color: {p.fg}; }}
+QPushButton#primaryBtn {{
+    background: {p.accent};
+    color: {p.accent_fg};
+    border: none;
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+}}
+QSpinBox, QDoubleSpinBox {{
+    background: {p.window};
+    color: {p.fg};
+    padding: 6px 8px;
+    border: 1px solid {p.divider};
+    border-radius: 8px;
+    min-height: 24px;
+}}
+QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {p.accent}; }}
+QLabel#chip {{
+    color: {p.fg};
+    background: {p.submenu};
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 13px;
+}}
 QStackedWidget {{ background: transparent; }}
 QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}

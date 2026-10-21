@@ -41,15 +41,8 @@ from .common import (
 )
 from .desk_policy import (
     ALT_BB_INTERVAL,
-    ALT_ENTRY_BOUNCE_PCT,
-    ALT_ENTRY_HOLD_SEC,
-    ALT_EXIT_ARM_PCT,
-    ALT_EXIT_HOLD_SEC,
-    ALT_EXIT_PULLBACK_PCT,
     ALT_HELD_MIN_USD,
-    ALT_MAX_NAMES,
     ALT_MIN_HOLD_HOURS,
-    CHURN_COOLDOWN_HOURS,
     DESK_ALT_SLEEVE,
     MAX_DAY_PUMP_PCT,
     PROBE_DAY_MIN_PCT,
@@ -86,10 +79,6 @@ from .desk_policy import (
     cash_floor_pct,
     filter_auto_candidates,
     is_risk_off,
-    POCKET_ENTRY_BOUNCE_PCT,
-    POCKET_ENTRY_HOLD_SEC,
-    POCKET_EXIT_HOLD_SEC,
-    POCKET_EXIT_PULLBACK_PCT,
     score_alloc,
     should_rebalance_leg,
     should_watch_dip_buy,
@@ -101,6 +90,7 @@ from .desk_policy import (
     update_pocket_arm,
     update_pocket_exit_arm,
     pocket_bounce_ready,
+    cfg,
     watch_period_sec,
     watch_rate_ok,
     watch_snapshot_line,
@@ -354,8 +344,8 @@ class CryptoDeskMixin:
         for row in rows:
             if float(row.get("held") or 0) > 0:
                 held.add(str(row.get("ticker") or "").upper())
-        cool = crypto_journal.cooldown_tickers(CHURN_COOLDOWN_HOURS)
-        recent = crypto_journal.recently_bought(CHURN_COOLDOWN_HOURS)
+        cool = crypto_journal.cooldown_tickers(cfg().cooldown_hours)
+        recent = crypto_journal.recently_bought(cfg().cooldown_hours)
         # Недавняя покупка не блок на ребаланс уже держанного, но не даём набирать новую с нуля.
         cool |= {t for t in recent if t not in held}
         return filter_auto_candidates(
@@ -386,7 +376,7 @@ class CryptoDeskMixin:
                 continue
             held.append((value, item))
         held.sort(key=lambda pair: pair[0], reverse=True)
-        return {item["ticker"]: alt_slot_pct() for _value, item in held[:ALT_MAX_NAMES]}
+        return {item["ticker"]: alt_slot_pct() for _value, item in held[:cfg().sleeve_max_names]}
 
     def desk_score_alloc(self, candidates: list[dict[str, Any]] | None = None) -> tuple[dict[str, float], str]:
         btc7, btc_day = self._btc_regime()
@@ -464,7 +454,7 @@ class CryptoDeskMixin:
                 book = "; ".join(parts)
             except Exception:
                 book = "счёт недоступен"
-        cool = crypto_journal.cooldown_tickers(CHURN_COOLDOWN_HOURS)
+        cool = crypto_journal.cooldown_tickers(cfg().cooldown_hours)
         lines = [f"Портфель: {book}"]
         try:
             from .sentiment import fear_greed_line
@@ -613,8 +603,8 @@ class CryptoDeskMixin:
         triggers: dict[str, dict[str, float]] = {
             ticker: {
                 "low": float(row["low"]),
-                "bounce": ALT_ENTRY_BOUNCE_PCT,
-                "hold": ALT_ENTRY_HOLD_SEC,
+                "bounce": cfg().sleeve_bounce_pct,
+                "hold": cfg().sleeve_hold_sec,
                 "ts": float(row.get("ts") or 0),
             }
             for ticker, row in arms["alts"].items()
@@ -624,8 +614,8 @@ class CryptoDeskMixin:
             symbols.add(BTC_DIP_TICKER)
             prev = triggers.get(BTC_DIP_TICKER)
             low = float(pocket_arm["low"])
-            bounce = POCKET_ENTRY_BOUNCE_PCT
-            hold = float(POCKET_ENTRY_HOLD_SEC)
+            bounce = cfg().pocket_bounce_pct
+            hold = float(cfg().pocket_hold_sec)
             ts = float(pocket_arm.get("ts") or 0)
             if prev:
                 if float(prev["low"]) < low:
@@ -639,8 +629,8 @@ class CryptoDeskMixin:
             symbols.add(SUI_DIP_TICKER)
             prev = triggers.get(SUI_DIP_TICKER)
             low = float(sui_arm["low"])
-            bounce = POCKET_ENTRY_BOUNCE_PCT
-            hold = float(POCKET_ENTRY_HOLD_SEC)
+            bounce = cfg().pocket_bounce_pct
+            hold = float(cfg().pocket_hold_sec)
             ts = float(sui_arm.get("ts") or 0)
             if prev:
                 if float(prev["low"]) < low:
@@ -659,15 +649,15 @@ class CryptoDeskMixin:
         for ticker, arm in read_sleeve_exits().items():
             exits[ticker] = {
                 "high": float(arm["high"]),
-                "pullback": ALT_EXIT_PULLBACK_PCT,
-                "hold": float(ALT_EXIT_HOLD_SEC),
+                "pullback": cfg().sleeve_exit_pullback_pct,
+                "hold": float(cfg().sleeve_exit_hold_sec),
                 "ts": float(arm.get("ts") or 0),
             }
         if float(dip.get("qty") or 0) > 0 and exit_high > 0:
             pocket_exit = {
                 "high": exit_high,
-                "pullback": POCKET_EXIT_PULLBACK_PCT,
-                "hold": float(POCKET_EXIT_HOLD_SEC),
+                "pullback": cfg().pocket_exit_pullback_pct,
+                "hold": float(cfg().pocket_exit_hold_sec),
                 "ts": float(dip.get("exit_ts") or 0),
             }
             prev = exits.get(BTC_DIP_TICKER)
@@ -678,8 +668,8 @@ class CryptoDeskMixin:
         if float(sui_pos.get("qty") or 0) > 0 and sui_high > 0:
             sui_exit = {
                 "high": sui_high,
-                "pullback": POCKET_EXIT_PULLBACK_PCT,
-                "hold": float(POCKET_EXIT_HOLD_SEC),
+                "pullback": cfg().pocket_exit_pullback_pct,
+                "hold": float(cfg().pocket_exit_hold_sec),
                 "ts": float(sui_pos.get("exit_ts") or 0),
             }
             prev = exits.get(SUI_DIP_TICKER)
@@ -754,13 +744,13 @@ class CryptoDeskMixin:
                     "[Крипта] альт %s у нижней полосы 4h (z %.2f) — жду отскок %.1f%% от %.4g",
                     ticker,
                     float(z or 0),
-                    ALT_ENTRY_BOUNCE_PCT,
+                    cfg().sleeve_bounce_pct,
                     updated["low"],
                 )
             elif px > 0 and not alt_bounce_ready(
                 updated, price=px, z=None if z is None else float(z), now=now
             ):
-                need = updated["low"] * (1.0 + ALT_ENTRY_BOUNCE_PCT / 100.0)
+                need = updated["low"] * (1.0 + cfg().sleeve_bounce_pct / 100.0)
                 logger.info(
                     "[Крипта] альт %s жду отскок: дно %.4g сейчас %.4g нужно %.4g z %.2f",
                     ticker,
@@ -786,11 +776,11 @@ class CryptoDeskMixin:
             logger.info(
                 "[Крипта] карман %s сутки в просадке — жду отскок %.1f%% от %.4g",
                 BTC_DIP_TICKER,
-                POCKET_ENTRY_BOUNCE_PCT,
+                cfg().pocket_bounce_pct,
                 pocket["low"],
             )
         elif pocket and sol_px > 0 and not pocket_bounce_ready(pocket, price=sol_px, now=now):
-            need = pocket["low"] * (1.0 + POCKET_ENTRY_BOUNCE_PCT / 100.0)
+            need = pocket["low"] * (1.0 + cfg().pocket_bounce_pct / 100.0)
             logger.info(
                 "[Крипта] карман %s жду отскок: дно %.4g сейчас %.4g нужно %.4g",
                 BTC_DIP_TICKER,
@@ -815,11 +805,11 @@ class CryptoDeskMixin:
             logger.info(
                 "[Крипта] карман %s сутки в просадке — жду отскок %.1f%% от %.4g",
                 SUI_DIP_TICKER,
-                POCKET_ENTRY_BOUNCE_PCT,
+                cfg().pocket_bounce_pct,
                 sui["low"],
             )
         elif sui and sui_px > 0 and not pocket_bounce_ready(sui, price=sui_px, now=now):
-            need = sui["low"] * (1.0 + POCKET_ENTRY_BOUNCE_PCT / 100.0)
+            need = sui["low"] * (1.0 + cfg().pocket_bounce_pct / 100.0)
             logger.info(
                 "[Крипта] карман %s жду отскок: дно %.4g сейчас %.4g нужно %.4g",
                 SUI_DIP_TICKER,
@@ -1115,15 +1105,15 @@ class CryptoDeskMixin:
             if not reason:
                 if exit_state and price > 0 and entry > 0:
                     high = float(exit_state["high"])
-                    pull = high * (1.0 - ALT_EXIT_PULLBACK_PCT / 100.0)
-                    floor = entry * (1.0 + ALT_EXIT_ARM_PCT / 100.0)
+                    pull = high * (1.0 - cfg().sleeve_exit_pullback_pct / 100.0)
+                    floor = entry * (1.0 + cfg().sleeve_exit_arm_pct / 100.0)
                     if pull < floor:
                         logger.info(
                             "[Крипта] альт %s вершина %.4g, откат %.4g ниже плюса +%.0f%%",
                             ticker,
                             high,
                             pull,
-                            ALT_EXIT_ARM_PCT,
+                            cfg().sleeve_exit_arm_pct,
                         )
                     else:
                         logger.info(
@@ -1174,7 +1164,7 @@ class CryptoDeskMixin:
             and current_values.get(t, 0.0) >= ALT_HELD_MIN_USD
         }
         try:
-            blocked = set(crypto_journal.cooldown_tickers(CHURN_COOLDOWN_HOURS))
+            blocked = set(crypto_journal.cooldown_tickers(cfg().cooldown_hours))
         except Exception:
             blocked = set()
         blocked |= trail_sold
@@ -1189,7 +1179,7 @@ class CryptoDeskMixin:
         )
         alt_arms = entry_arms["alts"]
         taken = {t for t in target_alloc if t in sleeve_names()} | held_alts
-        if allow_entries and len(taken) < ALT_MAX_NAMES:
+        if allow_entries and len(taken) < cfg().sleeve_max_names:
             slot = alt_slot_pct()
             ready = [
                 t for t, state in alt_arms.items()
@@ -1204,7 +1194,7 @@ class CryptoDeskMixin:
                 )
             ]
             ready.sort(key=lambda t: float((bands_for(t) or {}).get("z") or 0))
-            room = ALT_MAX_NAMES - len(taken)
+            room = cfg().sleeve_max_names - len(taken)
             for t in ready[:room]:
                 target_alloc[t] = slot
                 target_values[t] = equity * slot / 100.0
@@ -1424,7 +1414,7 @@ class CryptoDeskMixin:
             reason = btc_dip_exit_reason(price=price, entry=entry, exit_arm=exit_state, now=now)
             if not reason or price <= 0:
                 if exit_state and price > 0:
-                    need = float(exit_state["high"]) * (1.0 - POCKET_EXIT_PULLBACK_PCT / 100.0)
+                    need = float(exit_state["high"]) * (1.0 - cfg().pocket_exit_pullback_pct / 100.0)
                     logger.info(
                         "[Крипта] карман %s жду откат: верх %.4g сейчас %.4g нужно %.4g",
                         ticker,
@@ -1694,6 +1684,8 @@ class CryptoDeskMixin:
         state = read_probe()
         if float(state.get("qty") or 0) > 0:
             self._probe_exit(state)
+            return
+        if not cfg().probe_on:
             return
         if state.get("arm_ticker"):
             self._probe_arm(state)

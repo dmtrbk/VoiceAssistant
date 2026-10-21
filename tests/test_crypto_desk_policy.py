@@ -11,10 +11,15 @@ from zoneinfo import ZoneInfo
 
 from skills.crypto import desk_policy as policy
 from skills.crypto import journal as crypto_journal
+from skills.crypto.settings import store as crypto_settings_store
 from skills.crypto.skill import CryptoSkill
 
 
 _MSK = ZoneInfo("Europe/Moscow")
+_SETTINGS_DIR = tempfile.TemporaryDirectory()
+_SETTINGS_PATH = os.path.join(_SETTINGS_DIR.name, "settings.json")
+crypto_settings_store._PATH = _SETTINGS_PATH
+crypto_settings_store.reset_cache()
 
 
 class TestDeskPolicy(unittest.TestCase):

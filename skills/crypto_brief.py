@@ -17,9 +17,9 @@ from skills.crypto.common import (
     read_sui_dip,
 )
 from skills.crypto.desk_policy import (
-    ALT_EXIT_ARM_PCT,
     BTC_DIP_EXIT_PCT,
     BTC_DIP_TICKER,
+    cfg,
     sleeve_names,
     SUI_DIP_TICKER,
 )
@@ -167,7 +167,7 @@ def build_crypto_brief(skill) -> str:
                     ". До средней осталось "
                     + _format_pct(_gap_pct(price, ma)).replace("плюс ", "")
                 )
-            elif pnl is not None and pnl >= ALT_EXIT_ARM_PCT:
+            elif pnl is not None and pnl >= cfg().sleeve_exit_arm_pct:
                 sentence += ". Плюс уже от +3%, стол держит вершину и продаст откат"
         parts.append(sentence + ".")
 

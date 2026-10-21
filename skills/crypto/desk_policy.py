@@ -102,6 +102,13 @@ CHURN_COOLDOWN_HOURS = 12.0
 ALT_MIN_HOLD_HOURS = 12.0
 
 
+def cfg():
+    """Живые пороги из настроек стола. Нет файла — рабочие числа выше."""
+    from skills.crypto.settings import current
+
+    return current()
+
+
 def update_exclusions(
     excluded: set[str],
     rows: list[dict[str, Any]],
@@ -130,7 +137,7 @@ def btc_dip_should_buy(*, day_chg: float | None, qty: float) -> bool:
     """Покупка кармана, только если его ещё нет и сутки просели."""
     if qty > 0 or day_chg is None:
         return False
-    return float(day_chg) <= BTC_DIP_DAY_PCT
+    return float(day_chg) <= cfg().pocket_day_pct
 
 
 def btc_dip_exit_reason(
@@ -146,7 +153,7 @@ def btc_dip_exit_reason(
     if px <= 0 or ent <= 0:
         return None
     gain = (px / ent - 1.0) * 100.0
-    if gain <= -BTC_DIP_STOP_PCT:
+    if gain <= -cfg().pocket_stop_pct:
         return "стоп"
     if pocket_exit_ready(exit_arm, price=px, now=now):
         return "вершина"
@@ -210,17 +217,17 @@ def watch_tp_day_pct_for(ticker: str) -> float:
 
 def btc_dip_quote(equity: float) -> float:
     """Сколько USDT класть в карман SOL при входе: доля счёта."""
-    return max(0.0, float(equity or 0)) * BTC_DIP_PCT / 100.0
+    return max(0.0, float(equity or 0)) * cfg().pocket_pct / 100.0
 
 
 def sui_dip_quote() -> float:
     """Карман SUI: фиксированная сумма, не доля счёта."""
-    return float(SUI_DIP_USD)
+    return float(cfg().sui_usd)
 
 
 def probe_quote() -> float:
     """Щуп: фиксированные 30$, не доля счёта."""
-    return float(PROBE_USD)
+    return float(cfg().probe_usd)
 
 
 def ema_last(values: list[float], period: int) -> float | None:
@@ -289,10 +296,11 @@ def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         return None
     if low <= 0 or high <= 0 or price <= 0 or not vols:
         return None
-    if (high - low) / low * 100.0 > PROBE_SHELF_MAX_RANGE_PCT:
+    limits = cfg()
+    if (high - low) / low * 100.0 > limits.probe_shelf_range_pct:
         return None
-    floor = high * (1.0 + PROBE_BREAK_MIN_PCT / 100.0)
-    ceiling = high * (1.0 + PROBE_BREAK_MAX_PCT / 100.0)
+    floor = high * (1.0 + limits.probe_break_min_pct / 100.0)
+    ceiling = high * (1.0 + limits.probe_break_max_pct / 100.0)
     if price < floor or price > ceiling:
         return None
     typical = _median(vols)
@@ -343,7 +351,7 @@ def probe_exit_reason(
     if px <= 0 or ent <= 0:
         return None
     gain = (px / ent - 1.0) * 100.0
-    if gain <= -PROBE_MAX_LOSS_PCT:
+    if gain <= -cfg().probe_max_loss_pct:
         return "стоп"
     if level > 0 and px <= level:
         return "полка"
@@ -361,15 +369,18 @@ def pocket_cash_reserve(equity: float, *, pocket_open: bool) -> float:
     return btc_dip_quote(equity)
 
 
-def alt_slot_pct(sleeve_pct: float = ALT_SLEEVE_MAX_PCT, max_names: int = ALT_MAX_NAMES) -> float:
-    return round(max(0.0, float(sleeve_pct)) / max(1, int(max_names)), 1)
+def alt_slot_pct(sleeve_pct: float | None = None, max_names: int | None = None) -> float:
+    limits = cfg()
+    sleeve = limits.sleeve_max_pct if sleeve_pct is None else float(sleeve_pct)
+    names = limits.sleeve_max_names if max_names is None else int(max_names)
+    return round(max(0.0, sleeve) / max(1, names), 1)
 
 
 def alt_entry_ok(bb_z: Any) -> bool:
     """Новый альт / докуп: цена у нижней полосы 4h."""
     if bb_z is None:
         return False
-    return float(bb_z) <= ALT_BB_ENTRY_Z
+    return float(bb_z) <= cfg().sleeve_entry_z
 
 
 def _arm_low(state: dict[str, Any] | None, price: float, now: float) -> dict[str, float]:
@@ -397,13 +408,14 @@ def update_alt_arm(
     if z is None:
         return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
     zf = float(z)
-    if state is not None and zf > ALT_ENTRY_CANCEL_Z:
+    limits = cfg()
+    if state is not None and zf > limits.sleeve_cancel_z:
         return None
     px = float(price or 0)
     if px <= 0:
         return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
     if state is None:
-        if zf <= ALT_BB_ENTRY_Z:
+        if zf <= limits.sleeve_entry_z:
             return {"low": px, "ts": float(now)}
         return None
     return _arm_low(state, px, now)
@@ -417,15 +429,16 @@ def alt_bounce_ready(
     now: float | None = None,
 ) -> bool:
     """Покупка рукава: +1,5% от дна, дно держится 20 минут, z ещё не у средней."""
-    if not state or z is None or float(z) > ALT_ENTRY_STILL_Z:
+    limits = cfg()
+    if not state or z is None or float(z) > limits.sleeve_still_z:
         return False
-    if not _bounce_held(state, now, ALT_ENTRY_HOLD_SEC):
+    if not _bounce_held(state, now, limits.sleeve_hold_sec):
         return False
     low = float(state.get("low") or 0)
     px = float(price or 0)
     if low <= 0 or px <= 0:
         return False
-    return px >= low * (1.0 + ALT_ENTRY_BOUNCE_PCT / 100.0) - 1e-12
+    return px >= low * (1.0 + limits.sleeve_bounce_pct / 100.0) - 1e-12
 
 
 def update_pocket_arm(
@@ -438,7 +451,7 @@ def update_pocket_arm(
     """Сутки ≤ −3% запоминают дно. Выше порога сигнал снимается."""
     if day_chg is None:
         return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
-    if float(day_chg) > BTC_DIP_DAY_PCT:
+    if float(day_chg) > cfg().pocket_day_pct:
         return None
     px = float(price or 0)
     if px <= 0:
@@ -455,13 +468,14 @@ def pocket_bounce_ready(
     now: float | None = None,
 ) -> bool:
     """Покупка кармана: +1% от дна, и это дно уже 10 минут не обновлялось."""
-    if not state or not _bounce_held(state, now, POCKET_ENTRY_HOLD_SEC):
+    limits = cfg()
+    if not state or not _bounce_held(state, now, limits.pocket_hold_sec):
         return False
     low = float(state.get("low") or 0)
     px = float(price or 0)
     if low <= 0 or px <= 0:
         return False
-    return px >= low * (1.0 + POCKET_ENTRY_BOUNCE_PCT / 100.0) - 1e-12
+    return px >= low * (1.0 + limits.pocket_bounce_pct / 100.0) - 1e-12
 
 
 def update_pocket_exit_arm(
@@ -500,13 +514,14 @@ def pocket_exit_ready(
     now: float | None = None,
 ) -> bool:
     """Продажа кармана: −0,5% от вершины, и эта вершина уже 5 минут не обновлялась."""
-    if not state or not _bounce_held(state, now, POCKET_EXIT_HOLD_SEC):
+    limits = cfg()
+    if not state or not _bounce_held(state, now, limits.pocket_exit_hold_sec):
         return False
     high = float(state.get("high") or 0)
     px = float(price or 0)
     if high <= 0 or px <= 0:
         return False
-    return px <= high * (1.0 - POCKET_EXIT_PULLBACK_PCT / 100.0) + 1e-12
+    return px <= high * (1.0 - limits.pocket_exit_pullback_pct / 100.0) + 1e-12
 
 
 def position_basis(entry: float, anchor: float | None) -> float:
@@ -536,7 +551,7 @@ def update_alt_exit_arm(
         return {"high": float(state["high"]), "ts": float(state.get("ts") or now)}
     gain = (px / ent - 1.0) * 100.0
     if state is None:
-        if gain < ALT_EXIT_ARM_PCT - 1e-6:
+        if gain < cfg().sleeve_exit_arm_pct - 1e-6:
             return None
         return {"high": px, "ts": float(now)}
     high = float(state.get("high") or 0)
@@ -553,17 +568,18 @@ def alt_exit_ready(
     now: float | None = None,
 ) -> bool:
     """Продажа рукава: −0,5% от вершины, вершина 5 минут не обновлялась, плюс ещё ≥ +3%."""
-    if not state or not _bounce_held(state, now, ALT_EXIT_HOLD_SEC):
+    limits = cfg()
+    if not state or not _bounce_held(state, now, limits.sleeve_exit_hold_sec):
         return False
     high = float(state.get("high") or 0)
     px = float(price or 0)
     ent = float(entry or 0)
     if high <= 0 or px <= 0 or ent <= 0:
         return False
-    if px > high * (1.0 - ALT_EXIT_PULLBACK_PCT / 100.0) + 1e-12:
+    if px > high * (1.0 - limits.sleeve_exit_pullback_pct / 100.0) + 1e-12:
         return False
     gain = (px / ent - 1.0) * 100.0
-    return gain >= ALT_EXIT_ARM_PCT - 1e-6
+    return gain >= limits.sleeve_exit_arm_pct - 1e-6
 
 
 def alt_exit_reason(
@@ -582,7 +598,7 @@ def alt_exit_reason(
         return None
     gain = (px / ent - 1.0) * 100.0
     # Ровно −7% в float чуть больше порога — иначе стоп молчит.
-    if gain <= -ALT_STOP_LOSS_PCT + 1e-6:
+    if gain <= -cfg().sleeve_stop_pct + 1e-6:
         return "стоп"
     if alt_exit_ready(exit_arm, price=px, entry=ent, now=now):
         return "вершина"
@@ -637,13 +653,13 @@ def cash_floor_pct(*, btc_chg_7: float | None, btc_chg_day: float | None) -> flo
     if btc_chg_7 is not None and btc_chg_7 >= BTC_BULL_7D:
         if btc_chg_day is None or btc_chg_day > -1.0:
             return DESK_CASH_FLOOR_BULL_PCT
-    return DESK_CASH_FLOOR_PCT
+    return cfg().pocket_pct
 
 
 def band_pct_for(ticker: str) -> float:
     """Коридор ребаланса рукава."""
     del ticker
-    return REBALANCE_BAND_ALT_PCT
+    return cfg().rebalance_pct
 
 
 def filter_auto_candidates(
@@ -682,11 +698,14 @@ def filter_auto_candidates(
 def pick_alts(
     rows: list[dict[str, Any]],
     *,
-    sleeve_pct: float = ALT_SLEEVE_MAX_PCT,
-    max_names: int = ALT_MAX_NAMES,
+    sleeve_pct: float | None = None,
+    max_names: int | None = None,
     excluded: set[str] | None = None,
 ) -> dict[str, float]:
     """Рукав: держанные до выхода + новые у нижней полосы, кроме исключений."""
+    limits = cfg()
+    sleeve_pct = limits.sleeve_max_pct if sleeve_pct is None else float(sleeve_pct)
+    max_names = limits.sleeve_max_names if max_names is None else int(max_names)
     slot = alt_slot_pct(sleeve_pct, max_names)
     if slot <= 0:
         return {}
@@ -714,12 +733,19 @@ def pick_alts(
 def score_alloc(
     candidates: list[dict[str, Any]],
     *,
-    cash_floor_pct: float = DESK_CASH_FLOOR_PCT,
-    alt_sleeve_pct: float = ALT_SLEEVE_MAX_PCT,
-    alt_max_names: int = ALT_MAX_NAMES,
+    cash_floor_pct: float | None = None,
+    alt_sleeve_pct: float | None = None,
+    alt_max_names: int | None = None,
     excluded: set[str] | None = None,
 ) -> tuple[dict[str, float], str]:
     """Рукав альтов (Боллинджер 4h). Недобор и исключения остаются кэшем."""
+    limits = cfg()
+    if cash_floor_pct is None:
+        cash_floor_pct = limits.pocket_pct
+    if alt_sleeve_pct is None:
+        alt_sleeve_pct = limits.sleeve_max_pct
+    if alt_max_names is None:
+        alt_max_names = limits.sleeve_max_names
     floor = max(0.0, min(100.0, float(cash_floor_pct)))
     if floor >= 100.0:
         return {}, "Рынок слабый — держу кэш."
@@ -752,7 +778,7 @@ def should_rebalance_leg(
     current_value: float,
     target_value: float,
     equity: float,
-    band_pct: float = REBALANCE_BAND_PCT,
+    band_pct: float | None = None,
     min_trade_usd: float,
     day_chg: float | None = None,
     take_profit_pct: float | None = None,
@@ -762,6 +788,8 @@ def should_rebalance_leg(
     Take-profit: сильный дневной памп при избытке над целью — фиксируем даже внутри band.
     """
     excess = float(current_value) - float(target_value)
+    if band_pct is None:
+        band_pct = cfg().rebalance_pct
     tp = TAKE_PROFIT_DAY_PCT if take_profit_pct is None else float(take_profit_pct)
     if (
         day_chg is not None
@@ -820,19 +848,20 @@ def watch_period_sec(
             continue
         gain = (px / ent - 1.0) * 100.0
         kind = str(leg.get("kind") or "alt")
+        limits = cfg()
         if kind == "pocket":
             if float(leg.get("exit_high") or 0) > 0:
                 return int(hot)
             if gain >= BTC_DIP_EXIT_PCT - NEAR_TP_PCT:
                 return int(hot)
-            if gain <= -BTC_DIP_STOP_PCT + NEAR_SL_PCT:
+            if gain <= -limits.pocket_stop_pct + NEAR_SL_PCT:
                 return int(hot)
             continue
         if float(leg.get("exit_high") or 0) > 0:
             return int(hot)
-        if gain >= ALT_EXIT_ARM_PCT - NEAR_TP_PCT:
+        if gain >= limits.sleeve_exit_arm_pct - NEAR_TP_PCT:
             return int(hot)
-        if gain <= -ALT_STOP_LOSS_PCT + NEAR_SL_PCT:
+        if gain <= -limits.sleeve_stop_pct + NEAR_SL_PCT:
             return int(hot)
     return period
 
@@ -861,23 +890,25 @@ def watch_snapshot_line(
         bits.append(f"отсчёт {rule:.4g} {gain:+.2f}%")
     if kind == "pocket":
         hi = float(exit_high or 0)
+        stop = cfg().pocket_stop_pct
         if hi > 0:
-            need = hi * (1.0 - POCKET_EXIT_PULLBACK_PCT / 100.0)
-            bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + BTC_DIP_STOP_PCT:.1f}пп")
+            need = hi * (1.0 - cfg().pocket_exit_pullback_pct / 100.0)
+            bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + stop:.1f}пп")
         else:
             bits.append(
-                f"до ловушки {BTC_DIP_EXIT_PCT - gain:+.2f}пп до стопа {gain + BTC_DIP_STOP_PCT:.1f}пп"
+                f"до ловушки {BTC_DIP_EXIT_PCT - gain:+.2f}пп до стопа {gain + stop:.1f}пп"
             )
     else:
         hi = float(exit_high or 0)
+        limits = cfg()
         if hi > 0:
-            pull = hi * (1.0 - ALT_EXIT_PULLBACK_PCT / 100.0)
-            floor = rule * (1.0 + ALT_EXIT_ARM_PCT / 100.0)
+            pull = hi * (1.0 - limits.sleeve_exit_pullback_pct / 100.0)
+            floor = rule * (1.0 + limits.sleeve_exit_arm_pct / 100.0)
             need = pull if pull >= floor else floor
-            bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + ALT_STOP_LOSS_PCT:.1f}пп")
+            bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + limits.sleeve_stop_pct:.1f}пп")
         else:
             bits.append(
-                f"до ловушки {ALT_EXIT_ARM_PCT - gain:+.2f}пп до стопа {gain + ALT_STOP_LOSS_PCT:.1f}пп"
+                f"до ловушки {limits.sleeve_exit_arm_pct - gain:+.2f}пп до стопа {gain + limits.sleeve_stop_pct:.1f}пп"
             )
         if ma and float(ma) > 0:
             bits.append(f"MA {px / float(ma) - 1.0:+.2%}")
@@ -930,10 +961,12 @@ def pick_watch_alt_entries(
     target_alloc: dict[str, float],
     held_alts: set[str],
     blocked: set[str],
-    max_names: int = ALT_MAX_NAMES,
+    max_names: int | None = None,
     excluded: set[str] | None = None,
 ) -> list[str]:
     """Дозор: новые альты у нижней полосы 4h, пока в рукаве есть свободные слоты."""
+    if max_names is None:
+        max_names = cfg().sleeve_max_names
     banned = {str(t).upper() for t in (excluded or set())}
     taken = {t for t in target_alloc if t in sleeve_names()} | set(held_alts)
     room = max(0, int(max_names) - len(taken))

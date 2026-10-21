@@ -119,6 +119,7 @@ class SettingsWindow(QWidget):
         self._crypto_voice_box: QCheckBox | None = None
         self._crypto_auto_box: QCheckBox | None = None
         self._crypto_menu: QFrame | None = None
+        self._desk_window = None
         self._list: QVBoxLayout | None = None
 
         self._stack = QStackedWidget()
@@ -652,11 +653,28 @@ class SettingsWindow(QWidget):
             auto_box,
         )
 
+        self._add_divider(col)
+        desk_btn = QPushButton("Параметры стола")
+        desk_btn.setObjectName("linkBtn")
+        desk_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        desk_btn.setFlat(True)
+        desk_btn.clicked.connect(self._open_desk_settings)
+        col.addWidget(desk_btn)
+
         self._crypto_voice_box = voice_box
         self._crypto_auto_box = auto_box
         self._crypto_menu = menu
         parent.addWidget(menu)
         self._sync_crypto_menu(crypto_on)
+
+    def _open_desk_settings(self) -> None:
+        from skills.crypto.settings.ui import DeskSettingsWindow
+
+        if self._desk_window is None:
+            self._desk_window = DeskSettingsWindow()
+        self._desk_window.show()
+        self._desk_window.raise_()
+        self._desk_window.activateWindow()
 
     def _sync_crypto_menu(self, crypto_on: bool) -> None:
         if (
