@@ -143,6 +143,13 @@ class TestSecurityAndSettings(unittest.TestCase):
                 settings.set_widget_form("сфера")
                 settings._loaded = False
                 self.assertEqual(settings.get_widget_form(), "orb")
+                events = []
+                while True:
+                    try:
+                        events.append(settings.settings_events.get_nowait())
+                    except Exception:
+                        break
+                self.assertIn("widget", events)
 
 
 if __name__ == "__main__":

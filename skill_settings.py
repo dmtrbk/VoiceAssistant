@@ -521,6 +521,10 @@ def set_widget_form(form: str) -> None:
     with _lock:
         _widget_form = chosen
     _persist()
+    try:
+        settings_events.put_nowait("widget")
+    except queue.Full:
+        pass
     logging.info("[Настройки] Виджет: %s", chosen)
 
 

@@ -58,6 +58,7 @@ STATUS_COLORS = {
 _ORB_SIDE = 150
 _CAPTION_TOP = 99
 _CAPTION_SAMPLE = "+12 345 ₽ / 123 456 ₽"
+_PLATE_BAR_W = 8
 
 class OrbWidget(QWidget):
     """Сфера и две строки рынков под ней. Окно одно: цифры едут вместе с шаром."""
@@ -106,14 +107,14 @@ class OrbWidget(QWidget):
         font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         return font
 
-    def _sync_form(self) -> None:
+    def _sync_form(self, force: bool = False) -> None:
         try:
             from skill_settings import get_widget_form
 
             form = get_widget_form()
         except Exception:
             form = "orb"
-        if form == self._form:
+        if form == self._form and not force:
             return
         self._form = form
         self._apply_metrics()
@@ -125,14 +126,14 @@ class OrbWidget(QWidget):
             self._caption_font.setPointSize(12)
             metrics = QFontMetrics(self._caption_font)
             text_w = metrics.horizontalAdvance(_CAPTION_SAMPLE)
-            width = 10 + 4 + 10 + text_w + 12
+            width = 10 + _PLATE_BAR_W + 10 + text_w + 12
             height = 8 + metrics.height() * 2 + 8
-            self.resize(width, height)
+            self.setFixedSize(width, height)
             return
         self._caption_font.setPointSize(10)
         metrics = QFontMetrics(self._caption_font)
         width = max(_ORB_SIDE, metrics.horizontalAdvance(_CAPTION_SAMPLE) + 16)
-        self.resize(width, _ORB_SIDE)
+        self.setFixedSize(width, _ORB_SIDE)
 
     def _place_corner(self) -> None:
         screen = QGuiApplication.primaryScreen().geometry()
@@ -225,6 +226,8 @@ class OrbWidget(QWidget):
                 break
             if event == "open":
                 self.open_settings()
+            elif event == "widget":
+                self._sync_form(force=True)
 
     def update_pulse(self):
         """Логика изменения радиуса свечения в зависимости от статуса"""
@@ -287,7 +290,7 @@ class OrbWidget(QWidget):
         metrics = painter.fontMetrics()
         rows = conky_markets.caption_rows(*self._pnl)
         pad_x, pad_y = 10, 8
-        bar_w, gap = 4, 10
+        bar_w, gap = _PLATE_BAR_W, 10
         text_h = metrics.height() * 2
         bar = (pad_x, pad_y, bar_w, text_h)
         painter.setPen(Qt.PenStyle.NoPen)
