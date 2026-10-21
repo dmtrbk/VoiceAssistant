@@ -47,6 +47,12 @@ ALT_STOP_LOSS_PCT = 7.0
 ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
 MAX_DAY_PUMP_PCT = 25.0
+# Стейблы не рукав, даже если оборот большой. Базовый список остаётся всегда.
+SLEEVE_SKIP = frozenset({
+    "USDT", "USDC", "DAI", "FDUSD", "USDE", "USDS", "USD1", "RLUSD",
+    "TUSD", "USDD", "PYUSD", "USDY", "USDP", "GUSD", "EURC", "EUR", "USD",
+})
+_live_extra: set[str] = set()
 # Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
 TAKE_PROFIT_DAY_PCT = 18.0
 TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем на подъёме
@@ -91,7 +97,7 @@ def update_exclusions(
     current = {str(ticker).upper() for ticker in excluded}
     for row in rows:
         ticker = str(row.get("ticker") or "").upper()
-        if ticker not in DESK_ALT_SLEEVE:
+        if ticker not in sleeve_names():
             continue
         chg7 = row.get("chg_7")
         if chg7 is None:
@@ -131,8 +137,51 @@ def btc_dip_exit_reason(
     return None
 
 
+def _leveraged_base(ticker: str) -> bool:
+    """Плечо Bybit: BTC3L, ETHDOWN. Короткое имя вроде PUMP не плечо."""
+    name = str(ticker or "").upper()
+    if name.endswith(("3L", "3S", "5L", "5S", "DOWN")):
+        return True
+    return name.endswith("UP") and len(name) > 4
+
+
+def sleeve_names() -> frozenset[str]:
+    """Базовый рукав плюс монеты, которые стол добавил по обороту."""
+    return DESK_ALT_SLEEVE | frozenset(_live_extra)
+
+
+def set_live_sleeve(tickers: set[str] | frozenset[str]) -> None:
+    """Запомнить оборотный рукав в этом процессе. Базовый список не снимается."""
+    global _live_extra
+    _live_extra = {
+        str(ticker).upper()
+        for ticker in tickers
+        if str(ticker).upper() and str(ticker).upper() not in DESK_ALT_SLEEVE
+    }
+
+
+def liquid_sleeve_names(rows: list[dict[str, Any]]) -> set[str]:
+    """Базовый список и любой спот с оборотом ≥ $5 млн. Стейблы и плечо мимо."""
+    names = set(DESK_ALT_SLEEVE)
+    for row in rows:
+        ticker = str(row.get("ticker") or "").upper()
+        if (
+            not ticker
+            or ticker in SLEEVE_SKIP
+            or _leveraged_base(ticker)
+        ):
+            continue
+        try:
+            turnover = float(row.get("turnover") or 0)
+        except (TypeError, ValueError):
+            continue
+        if turnover >= MIN_TURNOVER_USD:
+            names.add(ticker)
+    return names
+
+
 def is_alt_sleeve(ticker: str) -> bool:
-    return str(ticker or "").upper() in DESK_ALT_SLEEVE
+    return str(ticker or "").upper() in sleeve_names()
 
 
 def take_profit_day_pct_for(ticker: str) -> float:
@@ -456,7 +505,7 @@ def filter_auto_candidates(
     cool = {str(t).upper() for t in (cooldown or set())}
     held_u = {str(t).upper() for t in held}
     watch_u = [str(t).upper() for t in watchlist]
-    allow = DESK_ALT_SLEEVE | held_u | set(watch_u)
+    allow = sleeve_names() | held_u | set(watch_u)
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in rows:
@@ -490,7 +539,7 @@ def pick_alts(
     if slot <= 0:
         return {}
     blocked = {str(t).upper() for t in (excluded or set())}
-    alts = [r for r in rows if str(r.get("ticker") or "").upper() in DESK_ALT_SLEEVE]
+    alts = [r for r in rows if str(r.get("ticker") or "").upper() in sleeve_names()]
     held = sorted(
         (r for r in alts if _held_value(r) >= ALT_HELD_MIN_USD),
         key=_held_value,
@@ -525,7 +574,7 @@ def score_alloc(
     sleeve = max(0.0, min(float(alt_sleeve_pct), 100.0 - floor))
     alt_rows = [
         row for row in candidates
-        if str(row.get("ticker") or "").upper() in DESK_ALT_SLEEVE
+        if str(row.get("ticker") or "").upper() in sleeve_names()
     ]
     alt_alloc = pick_alts(
         alt_rows,
@@ -583,7 +632,7 @@ def watch_stream_tickers(
     out = {
         str(ticker).upper()
         for ticker, value in (held_values or {}).items()
-        if str(ticker).upper() in DESK_ALT_SLEEVE and float(value or 0) >= float(min_usd)
+        if str(ticker).upper() in sleeve_names() and float(value or 0) >= float(min_usd)
     }
     if pocket_open:
         out.add(BTC_DIP_TICKER)
@@ -710,10 +759,12 @@ def should_watch_dip_buy(
     bb_z: float | None = None,
     excluded: set[str] | None = None,
 ) -> bool:
-    """Новый альт у нижней полосы. Держанный не усредняем, исключённый не берём."""
-    del dip_pct, day_chg
+    """Новый альт у нижней полосы. Держанный не усредняем, исключённый и памп суток не берём."""
+    del dip_pct
     t = str(ticker or "").upper()
-    if t not in DESK_ALT_SLEEVE or t in {str(x).upper() for x in (excluded or set())}:
+    if t not in sleeve_names() or t in {str(x).upper() for x in (excluded or set())}:
+        return False
+    if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
         return False
     gap = float(target_value) - float(current_value)
     if gap < float(min_trade_usd):
@@ -732,14 +783,14 @@ def pick_watch_alt_entries(
 ) -> list[str]:
     """Дозор: новые альты у нижней полосы 4h, пока в рукаве есть свободные слоты."""
     banned = {str(t).upper() for t in (excluded or set())}
-    taken = {t for t in target_alloc if t in DESK_ALT_SLEEVE} | set(held_alts)
+    taken = {t for t in target_alloc if t in sleeve_names()} | set(held_alts)
     room = max(0, int(max_names) - len(taken))
     if room <= 0:
         return []
     ready = [
         (float(b["z"]), t)
         for t, b in bands.items()
-        if t in DESK_ALT_SLEEVE
+        if t in sleeve_names()
         and t not in taken
         and t not in blocked
         and t not in banned

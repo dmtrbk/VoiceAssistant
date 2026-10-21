@@ -49,6 +49,10 @@ from .desk_policy import (
     ALT_MIN_HOLD_HOURS,
     CHURN_COOLDOWN_HOURS,
     DESK_ALT_SLEEVE,
+    MAX_DAY_PUMP_PCT,
+    liquid_sleeve_names,
+    set_live_sleeve,
+    sleeve_names,
     BTC_DIP_TICKER,
     SUI_DIP_TICKER,
     btc_dip_quote,
@@ -200,7 +204,40 @@ class CryptoDeskMixin:
             return True
         return self._desk_bought_ready and ticker not in self._desk_bought
 
+    def _refresh_sleeve(self) -> None:
+        """Базовый список плюс спот с оборотом от $5 млн. Уже купленное стол не выбрасывает."""
+        try:
+            tape = self._tape()
+        except Exception as exc:
+            logger.warning("[Крипта] рукав, лента: %s", exc)
+            return
+        names = liquid_sleeve_names(tape)
+        if self._desk_bought_ready:
+            try:
+                _cash, positions = self._wallet()
+                names |= {
+                    item["ticker"]
+                    for item in positions
+                    if item["ticker"] in self._desk_bought
+                }
+            except Exception as exc:
+                logger.info("[Крипта] рукав, кошелёк: %s", exc)
+        prev = sleeve_names()
+        set_live_sleeve(names)
+        self._sleeve_chg = {
+            str(row.get("ticker") or "").upper(): float(row.get("chg") or 0)
+            for row in tape
+        }
+        if names != prev:
+            fresh = sorted(names - DESK_ALT_SLEEVE)
+            logger.info(
+                "[Крипта] рукав %d монет, сверх списка: %s",
+                len(names),
+                ", ".join(fresh) or "—",
+            )
+
     def desk_candidates(self) -> list[dict[str, Any]]:
+        self._refresh_sleeve()
         tape = self._tape()
         from_tape = {row["ticker"]: row for row in tape}
         held: dict[str, float] = {}
@@ -226,7 +263,7 @@ class CryptoDeskMixin:
             except Exception:
                 pass
             bb: dict[str, Any] = {}
-            if ticker in DESK_ALT_SLEEVE:
+            if ticker in sleeve_names():
                 bands = self._alt_bands(ticker)
                 if bands:
                     bb = {"bb_z": bands["z"], "bb_ma": bands["ma"]}
@@ -243,7 +280,7 @@ class CryptoDeskMixin:
                 **bb,
             })
 
-        for ticker in list(held) + list(self._watchlist) + list(DESK_ALT_SLEEVE):
+        for ticker in list(held) + list(self._watchlist) + list(sleeve_names()):
             row = from_tape.get(ticker)
             if row is None:
                 try:
@@ -302,7 +339,7 @@ class CryptoDeskMixin:
         return filter_auto_candidates(
             rows,
             held=held,
-            watchlist=list(self._watchlist) + list(DESK_ALT_SLEEVE),
+            watchlist=list(self._watchlist) + list(sleeve_names()),
             cooldown=cool,
         )
 
@@ -315,7 +352,7 @@ class CryptoDeskMixin:
         held = sorted(
             (
                 p for p in positions
-                if p["ticker"] in DESK_ALT_SLEEVE
+                if p["ticker"] in sleeve_names()
                 and not self._is_owner_position(p["ticker"])
                 and float(p.get("value") or 0) >= ALT_HELD_MIN_USD
             ),
@@ -462,7 +499,7 @@ class CryptoDeskMixin:
         tape = BybitPublicTape()
         self._bybit_tape = tape
         state = read_alloc_state() or {}
-        seed = {t for t in (state.get("alloc") or {}) if t in DESK_ALT_SLEEVE}
+        seed = {t for t in (state.get("alloc") or {}) if t in sleeve_names()}
         if float(read_btc_dip().get("qty") or 0) > 0:
             seed.add(BTC_DIP_TICKER)
         if float(read_sui_dip().get("qty") or 0) > 0:
@@ -507,7 +544,7 @@ class CryptoDeskMixin:
         held_values = {
             ticker: float(pos.get("value") or 0)
             for ticker, pos in positions.items()
-            if ticker in DESK_ALT_SLEEVE and not self._is_owner_position(ticker)
+            if ticker in sleeve_names() and not self._is_owner_position(ticker)
         }
         pocket_open = float(read_btc_dip().get("qty") or 0) > 0
         arms = read_entry_arms()
@@ -627,12 +664,15 @@ class CryptoDeskMixin:
         for ticker in list(alts):
             if ticker in held or ticker in blocked or ticker in excluded:
                 alts.pop(ticker, None)
-        for ticker in DESK_ALT_SLEEVE:
+        for ticker in sleeve_names():
             if ticker in held or ticker in blocked or ticker in excluded:
                 continue
             band = bands.get(ticker) or {}
             z = band.get("z") if band else None
             if z is None and ticker not in alts:
+                continue
+            day = day_chgs.get(ticker)
+            if day is not None and float(day) >= MAX_DAY_PUMP_PCT and ticker not in alts:
                 continue
             state = alts.get(ticker)
             if state and taped.get(ticker):
@@ -835,7 +875,7 @@ class CryptoDeskMixin:
     def _watch_react(self, target_alloc: dict[str, float], *, allow_entries: bool = True) -> str:
         """Выход альта → новые альты. Меняет target_alloc на месте."""
         for ticker in list(target_alloc):
-            if ticker not in DESK_ALT_SLEEVE:
+            if ticker not in sleeve_names():
                 target_alloc.pop(ticker, None)
         excluded = _read_ticker_set(common._EXCLUDED_PATH) or set()
         try:
@@ -878,6 +918,9 @@ class CryptoDeskMixin:
             if need_px:
                 prices[ticker] = live
             day_chgs[ticker] = chg
+        for ticker, chg in getattr(self, "_sleeve_chg", {}).items():
+            if day_chgs.get(ticker) is None:
+                day_chgs[ticker] = chg
         relevant = set(positions) | set(target_alloc)
         target_values = {
             ticker: equity * (target_alloc.get(ticker, 0.0) / 100.0) for ticker in relevant
@@ -961,7 +1004,7 @@ class CryptoDeskMixin:
             new_trail.pop(ticker, None)
 
         alt_bands: dict[str, dict[str, float] | None] = {}
-        fetched_bands = self._gather_map(self._alt_bands, DESK_ALT_SLEEVE, label="полосы")
+        fetched_bands = self._gather_map(self._alt_bands, sleeve_names(), label="полосы")
         alt_bands.update(fetched_bands)
 
         def bands_for(ticker: str) -> dict[str, float] | None:
@@ -973,7 +1016,7 @@ class CryptoDeskMixin:
         kept_exits: dict[str, dict[str, float]] = {}
         exit_now = time.time()
         for ticker, pos in positions.items():
-            if ticker not in DESK_ALT_SLEEVE or ticker in trail_sold:
+            if ticker not in sleeve_names() or ticker in trail_sold:
                 continue
             if self._is_owner_position(ticker):
                 continue
@@ -1065,7 +1108,7 @@ class CryptoDeskMixin:
 
         held_alts = {
             t for t in positions
-            if t in DESK_ALT_SLEEVE
+            if t in sleeve_names()
             and t not in trail_sold
             and current_values.get(t, 0.0) >= ALT_HELD_MIN_USD
         }
@@ -1084,7 +1127,7 @@ class CryptoDeskMixin:
             excluded=excluded,
         )
         alt_arms = entry_arms["alts"]
-        taken = {t for t in target_alloc if t in DESK_ALT_SLEEVE} | held_alts
+        taken = {t for t in target_alloc if t in sleeve_names()} | held_alts
         if allow_entries and len(taken) < ALT_MAX_NAMES:
             slot = alt_slot_pct()
             ready = [
@@ -1119,7 +1162,7 @@ class CryptoDeskMixin:
                 if ticker in trail_sold:
                     continue
                 need = target_values.get(ticker, 0) - current_values.get(ticker, 0)
-                is_alt = ticker in DESK_ALT_SLEEVE
+                is_alt = ticker in sleeve_names()
                 bounced = is_alt and alt_bounce_ready(
                     alt_arms.get(ticker),
                     price=float(prices.get(ticker) or 0),
@@ -1184,7 +1227,7 @@ class CryptoDeskMixin:
         legs: list[dict[str, Any]] = []
         snap: list[str] = []
         for ticker, pos in positions.items():
-            if ticker not in DESK_ALT_SLEEVE or self._is_owner_position(ticker):
+            if ticker not in sleeve_names() or self._is_owner_position(ticker):
                 continue
             sleeve_value = float(current_values.get(ticker) or pos.get("value") or 0)
             if sleeve_value < ALT_HELD_MIN_USD:
@@ -1374,7 +1417,7 @@ class CryptoDeskMixin:
 
     def _rebalance(self, target_alloc: dict[str, float], *, respect_hold: bool = True) -> str:
         for ticker in list(target_alloc):
-            if ticker not in DESK_ALT_SLEEVE:
+            if ticker not in sleeve_names():
                 target_alloc.pop(ticker, None)
         cash, positions_list = self._wallet()
         positions = {item["ticker"]: item for item in positions_list}
@@ -1424,7 +1467,7 @@ class CryptoDeskMixin:
                 equity=equity,
                 band_pct=band_pct_for(ticker),
                 min_trade_usd=min_trade,
-                day_chg=None if ticker in DESK_ALT_SLEEVE else day_chgs.get(ticker),
+                day_chg=None if ticker in sleeve_names() else day_chgs.get(ticker),
                 take_profit_pct=take_profit_day_pct_for(ticker),
             )
         ]
@@ -1437,11 +1480,11 @@ class CryptoDeskMixin:
                 fresh = set()
         kept_alt_value = 0.0
         for ticker, excess in sells:
-            if ticker not in DESK_ALT_SLEEVE:
+            if ticker not in sleeve_names():
                 continue
             if target_alloc.get(ticker, 0.0) <= 0 and self._is_owner_position(ticker):
                 continue
-            if ticker in fresh and ticker in DESK_ALT_SLEEVE:
+            if ticker in fresh and ticker in sleeve_names():
                 kept_alt_value += excess
                 logger.info(
                     "[Крипта] %s куплен < %d ч назад — не ротирую (выход только у средней или стоп)",
@@ -1492,15 +1535,15 @@ class CryptoDeskMixin:
         ]
         # Удержанный свежий альт занимает место в рукаве — новые альты добираем на остаток.
         if kept_alt_value > 0:
-            alt_need = sum(n for t, n in buys if t in DESK_ALT_SLEEVE and n > 0)
+            alt_need = sum(n for t, n in buys if t in sleeve_names() and n > 0)
             if alt_need > 0:
                 scale = max(0.0, alt_need - kept_alt_value) / alt_need
-                buys = [(t, n * scale if t in DESK_ALT_SLEEVE else n) for t, n in buys]
+                buys = [(t, n * scale if t in sleeve_names() else n) for t, n in buys]
         buys = [(t, n) for t, n in buys if n > 0]
         buys.sort(key=lambda item: item[1], reverse=True)
         need_sum = sum(need for _ticker, need in buys)
         for ticker, need in buys:
-            if ticker not in DESK_ALT_SLEEVE:
+            if ticker not in sleeve_names():
                 continue
             if cash < _MIN_QUOTE:
                 break
@@ -1595,6 +1638,7 @@ class CryptoDeskMixin:
             tape_why = tape.consume_signals() if tape is not None else ""
             try:
                 self._reload_env()
+                self._refresh_sleeve()
                 if now >= next_desk:
                     self._trade_auto(silent=True)
                     self._maybe_daily_report()

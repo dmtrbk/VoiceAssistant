@@ -19,7 +19,7 @@ from skills.crypto.desk_policy import (
     ALT_EXIT_ARM_PCT,
     BTC_DIP_EXIT_PCT,
     BTC_DIP_TICKER,
-    DESK_ALT_SLEEVE,
+    sleeve_names,
     SUI_DIP_TICKER,
 )
 from skills.crypto.journal import open_avg_costs, read_lifetime_pnl
@@ -147,7 +147,7 @@ def build_crypto_brief(skill) -> str:
                 )
             else:
                 sentence += ". Карман уже на выходе"
-        elif ticker in DESK_ALT_SLEEVE:
+        elif ticker in sleeve_names():
             if ticker in excluded:
                 sentence += ". Новая покупка закрыта, эта позиция ещё держится"
             bands = None

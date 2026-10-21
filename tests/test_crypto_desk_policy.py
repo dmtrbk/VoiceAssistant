@@ -406,6 +406,41 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertEqual(left, set())
 
+    def test_liquid_sleeve_keeps_core_and_adds_turnover(self):
+        names = policy.liquid_sleeve_names([
+            {"ticker": "HYPE", "turnover": 10_000_000},
+            {"ticker": "DOOD", "turnover": 14_000_000, "chg": 200.0},
+            {"ticker": "TINY", "turnover": 100_000},
+            {"ticker": "RLUSD", "turnover": 20_000_000},
+            {"ticker": "BTCUP", "turnover": 20_000_000},
+            {"ticker": "PUMP", "turnover": 8_000_000},
+            {"ticker": "SOL", "turnover": 1_000_000},
+        ])
+        self.assertIn("HYPE", names)
+        self.assertIn("DOOD", names)
+        self.assertIn("PUMP", names)
+        self.assertIn("SOL", names)
+        self.assertIn("DOT", names)
+        self.assertNotIn("TINY", names)
+        self.assertNotIn("RLUSD", names)
+        self.assertNotIn("BTCUP", names)
+        policy.set_live_sleeve(names)
+        try:
+            alloc = policy.pick_alts([
+                {"ticker": "HYPE", "bb_z": -3.2, "held_value": 0},
+            ])
+            self.assertEqual(alloc.get("HYPE"), policy.alt_slot_pct())
+            self.assertFalse(policy.should_watch_dip_buy(
+                ticker="DOOD",
+                day_chg=200.0,
+                current_value=0,
+                target_value=100,
+                min_trade_usd=5,
+                bb_z=-3.0,
+            ))
+        finally:
+            policy.set_live_sleeve(set())
+
     def test_btc_dip_rules(self):
         self.assertTrue(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-3.0, qty=0.01))
