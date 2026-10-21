@@ -59,6 +59,9 @@ BTC_DIP_TICKER = "SOL"
 BTC_DIP_PCT = 25.0
 BTC_DIP_DAY_PCT = -3.0
 BTC_DIP_EXIT_PCT = 1.1
+# Второй карман: те же сутки и отскок, фиксированные 50$ вместо доли счёта.
+SUI_DIP_TICKER = "SUI"
+SUI_DIP_USD = 50.0
 # Плюс +1,1% только взводит вершину. Продажа — откат от неё, пауза короче входа.
 POCKET_EXIT_PULLBACK_PCT = 0.5
 POCKET_EXIT_HOLD_SEC = 5 * 60
@@ -141,8 +144,13 @@ def watch_tp_day_pct_for(ticker: str) -> float:
 
 
 def btc_dip_quote(equity: float) -> float:
-    """Сколько USDT класть в карман при входе: доля счёта."""
+    """Сколько USDT класть в карман SOL при входе: доля счёта."""
     return max(0.0, float(equity or 0)) * BTC_DIP_PCT / 100.0
+
+
+def sui_dip_quote() -> float:
+    """Карман SUI: фиксированная сумма, не доля счёта."""
+    return float(SUI_DIP_USD)
 
 
 def pocket_cash_reserve(equity: float, *, pocket_open: bool) -> float:

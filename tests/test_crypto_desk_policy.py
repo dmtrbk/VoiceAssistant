@@ -412,6 +412,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-2.0, qty=0))
         self.assertEqual(policy.alt_slot_pct(), 25.0)
         self.assertAlmostEqual(policy.btc_dip_quote(1000.0), 250.0)
+        self.assertEqual(policy.sui_dip_quote(), 50.0)
         self.assertEqual(policy.pocket_cash_reserve(1000.0, pocket_open=False), 250.0)
         self.assertEqual(policy.pocket_cash_reserve(1000.0, pocket_open=True), 0.0)
         self.assertIsNone(policy.btc_dip_exit_reason(price=101.1, entry=100.0))
@@ -625,6 +626,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ("alloc.json", "_ALLOC_PATH"),
             ("trail.json", "_TRAIL_PATH"),
             ("btc_dip.json", "_BTC_DIP_PATH"),
+            ("sui_dip.json", "_SUI_DIP_PATH"),
             ("entry_arm.json", "_ENTRY_ARM_PATH"),
             ("excluded.json", "_EXCLUDED_PATH"),
             ("anchor.json", "_ANCHOR_PATH"),
@@ -813,9 +815,9 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(
                 self.skill,
                 "_wallet",
-                return_value=(100.0, []),
+                return_value=(400.0, []),
             ),
-            patch.object(self.skill, "_cash_and_held", return_value=(100.0, {})),
+            patch.object(self.skill, "_cash_and_held", return_value=(400.0, {})),
             patch.object(self.skill, "_ensure_desk_bought"),
             patch.object(self.skill, "_ticker", return_value={"price": 1.0, "chg": 0.0, "turnover": 1}),
             patch.object(self.skill, "_place_order", side_effect=place),
@@ -823,7 +825,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_alt_entry_ready", return_value=True),
             patch("skills.crypto.desk.time.sleep"),
         ):
-            # цели: LINK 60, AVAX 40 при equity≈100 → need 60 и 40, budget≈99.8
+            # цели: LINK 60, AVAX 40 при equity≈400. Резерв SOL 100$ и SUI 50$.
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"LINK", "AVAX"}
             self.skill._rebalance({"LINK": 60.0, "AVAX": 40.0})
@@ -831,8 +833,8 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertIn("LINK", by_ticker)
         self.assertIn("AVAX", by_ticker)
         self.assertGreater(by_ticker["LINK"], by_ticker["AVAX"])
-        # 25% счёта остаются резерву кармана и в рукав не уходят.
-        self.assertAlmostEqual(sum(by_ticker.values()), 100.0 * 0.998 - 25.0, places=1)
+        # 25% счёта — карман SOL, ещё 50$ — карман SUI. В рукав это не уходит.
+        self.assertAlmostEqual(sum(by_ticker.values()), 400.0 * 0.998 - 100.0 - 50.0, places=1)
 
     def test_buy_resets_stale_trail_leg(self):
         from skills.crypto import common as crypto_common
@@ -899,11 +901,11 @@ class TestDeskAutoUsesScore(unittest.TestCase):
                 self.skill,
                 "_wallet",
                 return_value=(
-                    70.0,
+                    200.0,
                     [{"ticker": "DOGE", "qty": 300.0, "value": 30.0, "price": 0.1, "name": "Дож"}],
                 ),
             ),
-            patch.object(self.skill, "_cash_and_held", return_value=(70.0, {})),
+            patch.object(self.skill, "_cash_and_held", return_value=(200.0, {})),
             patch.object(self.skill, "_ensure_desk_bought"),
             patch.object(self.skill, "_ticker", return_value={"price": 0.1, "chg": 1.0, "turnover": 1}),
             patch.object(self.skill, "_place_order", side_effect=place),
@@ -1018,6 +1020,77 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertEqual(placed[0][0], "SOL")
         self.assertEqual(placed[0][2], 0.01)
         self.assertEqual(read_btc_dip()["qty"], 0.0)
+
+    def test_sui_pocket_buys_fifty_and_keeps_sol(self):
+        from skills.crypto.common import read_btc_dip, read_entry_arms, read_sui_dip, write_btc_dip, write_entry_arms
+
+        write_btc_dip(0.2, 100.0)
+        now = time.time()
+        write_entry_arms(
+            {},
+            {"low": 100.0, "ts": now},
+            sui={"low": 1.0, "ts": now - policy.POCKET_ENTRY_HOLD_SEC - 5},
+        )
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, quote_usdt))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch.object(
+                self.skill,
+                "_cash_and_held",
+                return_value=(80.0, {"SUI": {"qty": 40.0, "value": 50.0, "price": 1.01}}),
+            ),
+        ):
+            phrase = self.skill._trade_btc_dip(
+                day_chg=-4.0,
+                positions={},
+                price=1.01,
+                blocked=False,
+                equity=400.0,
+                ticker=policy.SUI_DIP_TICKER,
+            )
+        self.assertIn("ok", phrase or "")
+        self.assertEqual(placed, [("SUI", "Buy", 50.0)])
+        self.assertAlmostEqual(read_sui_dip()["qty"], 40.0)
+        self.assertAlmostEqual(read_btc_dip()["qty"], 0.2)
+        arms = read_entry_arms()
+        self.assertIsNone(arms.get("sui"))
+        self.assertIsNotNone(arms.get("pocket"))
+
+    def test_rebalance_sells_sui_sleeve_keeps_pocket(self):
+        from skills.crypto.common import read_sui_dip, write_sui_dip
+
+        write_sui_dip(40.0, 1.0)
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, base_qty))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(
+                self.skill,
+                "_wallet",
+                return_value=(
+                    200.0,
+                    [{"ticker": "SUI", "qty": 90.0, "value": 90.0, "price": 1.0, "name": "Суи"}],
+                ),
+            ),
+            patch.object(self.skill, "_cash_and_held", return_value=(200.0, {})),
+            patch.object(self.skill, "_ensure_desk_bought"),
+            patch.object(self.skill, "_ticker", return_value={"price": 1.0, "chg": 0.0, "turnover": 1}),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.desk.time.sleep"),
+        ):
+            self.skill._desk_bought_ready = True
+            self.skill._desk_bought = {"SUI"}
+            self.skill._rebalance({}, respect_hold=False)
+        self.assertEqual(placed, [("SUI", "Sell", 50.0)])
+        self.assertAlmostEqual(read_sui_dip()["qty"], 40.0)
 
     def test_risk_off_sells_core_keeps_alt(self):
         placed: list[tuple[str, str]] = []
@@ -1153,7 +1226,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         )
         buys = [(t, q) for t, side, _b, q in placed if side == "Buy"]
         self.assertEqual([t for t, _q in buys], ["LINK"], result)
-        self.assertAlmostEqual(buys[0][1], 100.0 * policy.alt_slot_pct() / 100.0, places=1)
+        self.assertAlmostEqual(buys[0][1], 100.0 * 0.998 - 75.0, places=1)
         self.assertEqual(state["alloc"].get("LINK"), policy.alt_slot_pct())
 
     def test_watch_rate_limit_still_exits_alt(self):

@@ -13,12 +13,14 @@ from skills.crypto.common import (
     _read_ticker_set,
     _spoken,
     read_btc_dip,
+    read_sui_dip,
 )
 from skills.crypto.desk_policy import (
     ALT_EXIT_ARM_PCT,
     BTC_DIP_EXIT_PCT,
     BTC_DIP_TICKER,
     DESK_ALT_SLEEVE,
+    SUI_DIP_TICKER,
 )
 from skills.crypto.journal import open_avg_costs, read_lifetime_pnl
 from skills.text_utils import norm as _norm
@@ -106,6 +108,9 @@ def build_crypto_brief(skill) -> str:
     dip = read_btc_dip()
     dip_qty = float(dip.get("qty") or 0)
     dip_entry = float(dip.get("entry") or 0)
+    sui = read_sui_dip()
+    sui_qty = float(sui.get("qty") or 0)
+    sui_entry = float(sui.get("entry") or 0)
     holds = {str(ticker).upper() for ticker in getattr(skill, "_manual_holds", set())}
     excluded = _read_ticker_set(_EXCLUDED_PATH) or set()
     dust: list[str] = []
@@ -119,8 +124,13 @@ def build_crypto_brief(skill) -> str:
             dust.append(name)
             continue
         entry = float(costs.get(ticker) or 0)
-        pocket = ticker == BTC_DIP_TICKER and dip_qty > 0 and dip_entry > 0
-        if pocket:
+        pocket = (
+            (ticker == BTC_DIP_TICKER and dip_qty > 0 and dip_entry > 0)
+            or (ticker == SUI_DIP_TICKER and sui_qty > 0 and sui_entry > 0)
+        )
+        if ticker == SUI_DIP_TICKER and sui_qty > 0 and sui_entry > 0:
+            entry = sui_entry
+        elif ticker == BTC_DIP_TICKER and dip_qty > 0 and dip_entry > 0:
             entry = dip_entry
         pnl = _pnl_pct(price, entry)
         sentence = f"{name} {_format_usd(value)}"

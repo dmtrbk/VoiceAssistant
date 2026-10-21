@@ -37,6 +37,7 @@ class TestCryptoBrief(unittest.TestCase):
         with (
             mock.patch("skills.crypto_brief.open_avg_costs", return_value={"DOGE": 0.09}),
             mock.patch("skills.crypto_brief.read_btc_dip", return_value={"qty": 0, "entry": 0}),
+            mock.patch("skills.crypto_brief.read_sui_dip", return_value={"qty": 0, "entry": 0}),
             mock.patch("skills.crypto_brief._read_ticker_set", return_value={"ADA"}),
             mock.patch("skills.crypto_brief.read_lifetime_pnl", return_value=10.0),
         ):

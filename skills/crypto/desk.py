@@ -27,12 +27,14 @@ from .common import (
     read_btc_dip,
     read_entry_arms,
     read_sleeve_exits,
+    read_sui_dip,
     read_trail_state,
     write_alloc_state,
     write_anchors,
     write_btc_dip,
     write_entry_arms,
     write_sleeve_exits,
+    write_sui_dip,
     write_trail_state,
 )
 from .desk_policy import (
@@ -48,8 +50,10 @@ from .desk_policy import (
     CHURN_COOLDOWN_HOURS,
     DESK_ALT_SLEEVE,
     BTC_DIP_TICKER,
+    SUI_DIP_TICKER,
     btc_dip_quote,
     pocket_cash_reserve,
+    sui_dip_quote,
     position_basis,
     alt_bounce_ready,
     alt_exit_reason,
@@ -461,8 +465,17 @@ class CryptoDeskMixin:
         seed = {t for t in (state.get("alloc") or {}) if t in DESK_ALT_SLEEVE}
         if float(read_btc_dip().get("qty") or 0) > 0:
             seed.add(BTC_DIP_TICKER)
+        if float(read_sui_dip().get("qty") or 0) > 0:
+            seed.add(SUI_DIP_TICKER)
         tape.set_symbols(seed)
         tape.start()
+
+    def _open_pocket_qty(self, ticker: str) -> float:
+        if ticker == BTC_DIP_TICKER:
+            return float(read_btc_dip().get("qty") or 0)
+        if ticker == SUI_DIP_TICKER:
+            return float(read_sui_dip().get("qty") or 0)
+        return 0.0
 
     def _drop_anchor(self, ticker: str) -> None:
         anchors = read_anchors()
@@ -524,6 +537,23 @@ class CryptoDeskMixin:
                 bounce = min(bounce, float(prev["bounce"]))
                 hold = max(hold, float(prev.get("hold") or 0))
             triggers[BTC_DIP_TICKER] = {"low": low, "bounce": bounce, "hold": hold, "ts": ts}
+        sui_arm = arms.get("sui")
+        if sui_arm:
+            symbols.add(SUI_DIP_TICKER)
+            prev = triggers.get(SUI_DIP_TICKER)
+            low = float(sui_arm["low"])
+            bounce = POCKET_ENTRY_BOUNCE_PCT
+            hold = float(POCKET_ENTRY_HOLD_SEC)
+            ts = float(sui_arm.get("ts") or 0)
+            if prev:
+                if float(prev["low"]) < low:
+                    low = float(prev["low"])
+                    ts = float(prev.get("ts") or ts)
+                bounce = min(bounce, float(prev["bounce"]))
+                hold = max(hold, float(prev.get("hold") or 0))
+            triggers[SUI_DIP_TICKER] = {"low": low, "bounce": bounce, "hold": hold, "ts": ts}
+        if float(read_sui_dip().get("qty") or 0) > 0:
+            symbols.add(SUI_DIP_TICKER)
         tape.set_symbols(symbols)
         tape.set_entry_arms(triggers)
         dip = read_btc_dip()
@@ -546,6 +576,18 @@ class CryptoDeskMixin:
             prev = exits.get(BTC_DIP_TICKER)
             if prev is None or _exit_trigger(pocket_exit) >= _exit_trigger(prev):
                 exits[BTC_DIP_TICKER] = pocket_exit
+        sui_pos = read_sui_dip()
+        sui_high = float(sui_pos.get("exit_high") or 0)
+        if float(sui_pos.get("qty") or 0) > 0 and sui_high > 0:
+            sui_exit = {
+                "high": sui_high,
+                "pullback": POCKET_EXIT_PULLBACK_PCT,
+                "hold": float(POCKET_EXIT_HOLD_SEC),
+                "ts": float(sui_pos.get("exit_ts") or 0),
+            }
+            prev = exits.get(SUI_DIP_TICKER)
+            if prev is None or _exit_trigger(sui_exit) >= _exit_trigger(prev):
+                exits[SUI_DIP_TICKER] = sui_exit
         tape.set_exit_arms(exits)
         tape.set_legs([leg for leg in legs if str(leg.get("ticker") or "").upper() in symbols])
 
@@ -656,8 +698,37 @@ class CryptoDeskMixin:
                 sol_px,
                 need,
             )
-        write_entry_arms(alts, pocket)
-        return {"alts": alts, "pocket": pocket}
+        sui_state = stored.get("sui")
+        sui_px = float(prices.get(SUI_DIP_TICKER) or 0)
+        if sui_state and taped.get(SUI_DIP_TICKER):
+            sui_state = {
+                **sui_state,
+                "low": min(float(sui_state["low"]), float(taped[SUI_DIP_TICKER])),
+            }
+        sui = update_pocket_arm(
+            sui_state,
+            price=sui_px,
+            day_chg=day_chgs.get(SUI_DIP_TICKER),
+            now=now,
+        )
+        if sui and stored.get("sui") is None:
+            logger.info(
+                "[Крипта] карман %s сутки в просадке — жду отскок %.1f%% от %.4g",
+                SUI_DIP_TICKER,
+                POCKET_ENTRY_BOUNCE_PCT,
+                sui["low"],
+            )
+        elif sui and sui_px > 0 and not pocket_bounce_ready(sui, price=sui_px, now=now):
+            need = sui["low"] * (1.0 + POCKET_ENTRY_BOUNCE_PCT / 100.0)
+            logger.info(
+                "[Крипта] карман %s жду отскок: дно %.4g сейчас %.4g нужно %.4g",
+                SUI_DIP_TICKER,
+                sui["low"],
+                sui_px,
+                need,
+            )
+        write_entry_arms(alts, pocket, sui=sui)
+        return {"alts": alts, "pocket": pocket, "sui": sui}
 
     def _alt_entry_ready(self, ticker: str, price: float) -> bool:
         """Полный стол не открывает альт, пока нет отскока от нижней полосы."""
@@ -783,7 +854,7 @@ class CryptoDeskMixin:
             px = self._ticker(ticker)
             return float(px.get("price") or 0), float(px.get("chg") or 0)
 
-        want_px = set(target_alloc) | set(positions) | {BTC_DIP_TICKER}
+        want_px = set(target_alloc) | set(positions) | {BTC_DIP_TICKER, SUI_DIP_TICKER}
         fetched_px: dict[str, tuple[float, float | None]] = {}
         need_rest: set[str] = set()
         for ticker in want_px:
@@ -819,6 +890,12 @@ class CryptoDeskMixin:
         if dip_qty_watch > 0 and dip_px_watch > 0 and BTC_DIP_TICKER in current_values:
             current_values[BTC_DIP_TICKER] = max(
                 0.0, current_values[BTC_DIP_TICKER] - dip_qty_watch * dip_px_watch
+            )
+        sui_qty_watch = float(read_sui_dip().get("qty") or 0)
+        sui_px_watch = float(prices.get(SUI_DIP_TICKER) or 0)
+        if sui_qty_watch > 0 and sui_px_watch > 0 and SUI_DIP_TICKER in current_values:
+            current_values[SUI_DIP_TICKER] = max(
+                0.0, current_values[SUI_DIP_TICKER] - sui_qty_watch * sui_px_watch
             )
         parts: list[str] = []
         trail_sold: set[str] = set()
@@ -856,7 +933,7 @@ class CryptoDeskMixin:
             }
             if not updated["hit"]:
                 continue
-            pocket_qty = float(read_btc_dip().get("qty") or 0) if ticker == BTC_DIP_TICKER else 0.0
+            pocket_qty = self._open_pocket_qty(ticker)
             qty = alt_sleeve_qty_for_exit(
                 ticker=ticker,
                 held_qty=float(pos.get("qty") or 0),
@@ -904,7 +981,7 @@ class CryptoDeskMixin:
             live = self._tape_quote(ticker)
             if live and float(live.get("price") or 0) > 0:
                 price = float(live["price"])
-            pocket_qty = float(read_btc_dip().get("qty") or 0) if ticker == BTC_DIP_TICKER else 0.0
+            pocket_qty = self._open_pocket_qty(ticker)
             qty = alt_sleeve_qty_for_exit(
                 ticker=ticker,
                 held_qty=float(pos.get("qty") or 0),
@@ -982,6 +1059,8 @@ class CryptoDeskMixin:
         reserve = pocket_cash_reserve(
             equity, pocket_open=float(read_btc_dip().get("qty") or 0) > 0
         )
+        if float(read_sui_dip().get("qty") or 0) <= 0:
+            reserve += sui_dip_quote()
         cash = max(0.0, budget - reserve)
 
         held_alts = {
@@ -1086,6 +1165,17 @@ class CryptoDeskMixin:
         )
         if dip_phrase:
             parts.append(dip_phrase)
+        sui_phrase = self._trade_btc_dip(
+            day_chg=day_chgs.get(SUI_DIP_TICKER),
+            positions=positions,
+            price=float(prices.get(SUI_DIP_TICKER) or 0),
+            blocked=SUI_DIP_TICKER in trail_sold,
+            equity=equity,
+            allow_entry=allow_entries,
+            ticker=SUI_DIP_TICKER,
+        )
+        if sui_phrase:
+            parts.append(sui_phrase)
         self._prune_anchors({
             ticker
             for ticker, pos in positions.items()
@@ -1151,6 +1241,29 @@ class CryptoDeskMixin:
                     basis=basis,
                 )
             )
+        sui = read_sui_dip()
+        sui_entry = float(sui.get("entry") or 0)
+        sui_px_now = float(prices.get(SUI_DIP_TICKER) or 0)
+        if float(sui.get("qty") or 0) > 0 and sui_px_now > 0 and sui_entry > 0:
+            exit_high = float(sui.get("exit_high") or 0)
+            basis = read_anchors().get(SUI_DIP_TICKER) or 0.0
+            legs.append({
+                "ticker": SUI_DIP_TICKER,
+                "price": sui_px_now,
+                "entry": position_basis(sui_entry, basis),
+                "kind": "pocket",
+                "exit_high": exit_high,
+            })
+            snap.append(
+                watch_snapshot_line(
+                    SUI_DIP_TICKER,
+                    price=sui_px_now,
+                    entry=sui_entry,
+                    kind="pocket",
+                    exit_high=exit_high,
+                    basis=basis,
+                )
+            )
         self._sync_tape(positions, legs)
         period = watch_period_sec(legs=legs)
         self._set_watch_tempo(period)
@@ -1173,10 +1286,14 @@ class CryptoDeskMixin:
         blocked: bool,
         equity: float = 0.0,
         allow_entry: bool = True,
+        ticker: str | None = None,
     ) -> str | None:
-        """Карман SOL на долю счёта. Уже открытый не добираем, слот рукава не трогаем."""
-        ticker = BTC_DIP_TICKER
-        dip = read_btc_dip()
+        """Карман SOL на долю счёта или SUI на 50$. Уже открытый не добираем."""
+        ticker = ticker or BTC_DIP_TICKER
+        sui = ticker == SUI_DIP_TICKER
+        load = read_sui_dip if sui else read_btc_dip
+        store = write_sui_dip if sui else write_btc_dip
+        dip = load()
         qty = float(dip.get("qty") or 0)
         if qty > 0:
             book_entry = float(dip.get("entry") or 0)
@@ -1194,7 +1311,7 @@ class CryptoDeskMixin:
                 exit_state = {"high": taped_high, "ts": now}
             exit_state = update_pocket_exit_arm(exit_state, price=price, entry=entry, now=now)
             if exit_state:
-                write_btc_dip(
+                store(
                     qty,
                     book_entry,
                     exit_high=float(exit_state["high"]),
@@ -1215,11 +1332,11 @@ class CryptoDeskMixin:
             held = float((positions.get(ticker) or {}).get("qty") or 0)
             sell_qty = min(qty, held)
             if sell_qty <= 0:
-                write_btc_dip(0, 0)
+                store(0, 0)
                 self._drop_anchor(ticker)
                 return None
             phrase = self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
-            write_btc_dip(0, 0)
+            store(0, 0)
             self._drop_anchor(ticker)
             logger.info(
                 "[Крипта] карман %s: выход (%s) %.6g по %.4g",
@@ -1231,10 +1348,11 @@ class CryptoDeskMixin:
             return phrase
         if blocked or not allow_entry or not btc_dip_should_buy(day_chg=day_chg, qty=0):
             return None
-        pocket_arm = read_entry_arms().get("pocket")
-        if not pocket_bounce_ready(pocket_arm, price=price, now=time.time()):
+        arms_now = read_entry_arms()
+        arm = arms_now.get("sui" if sui else "pocket")
+        if not pocket_bounce_ready(arm, price=price, now=time.time()):
             return None
-        budget = btc_dip_quote(equity)
+        budget = sui_dip_quote() if sui else btc_dip_quote(equity)
         free_cash, _held_now = self._cash_and_held()
         quote = min(budget, free_cash * common._BUY_CASH_BUFFER)
         if budget < _MIN_QUOTE or quote < budget * 0.9:
@@ -1245,9 +1363,12 @@ class CryptoDeskMixin:
         after = float((held.get(ticker) or {}).get("qty") or 0)
         bought = after - before
         if bought > 0:
-            write_btc_dip(bought, quote / bought)
+            store(bought, quote / bought)
             arms_now = read_entry_arms()
-            write_entry_arms(arms_now["alts"], None)
+            if sui:
+                write_entry_arms(arms_now["alts"], arms_now.get("pocket"), sui=False)
+            else:
+                write_entry_arms(arms_now["alts"], None)
             logger.info("[Крипта] карман %s: купил на %.0f$ на отскоке от дна", ticker, quote)
         return phrase
 
@@ -1285,6 +1406,12 @@ class CryptoDeskMixin:
             # Карман не продаём как лишний альт, в том числе в риск-офф.
             current_values[BTC_DIP_TICKER] = max(
                 0.0, current_values[BTC_DIP_TICKER] - dip_qty * dip_px
+            )
+        sui_qty = float(read_sui_dip().get("qty") or 0)
+        sui_px = float(prices.get(SUI_DIP_TICKER) or 0)
+        if sui_qty > 0 and sui_px > 0 and SUI_DIP_TICKER in current_values:
+            current_values[SUI_DIP_TICKER] = max(
+                0.0, current_values[SUI_DIP_TICKER] - sui_qty * sui_px
             )
         parts: list[str] = []
         sells = [
@@ -1324,8 +1451,9 @@ class CryptoDeskMixin:
                 continue
             price = prices.get(ticker) or 0.0
             qty = float(positions.get(ticker, {}).get("qty") or 0)
-            if ticker == BTC_DIP_TICKER and dip_qty > 0:
-                qty = max(0.0, qty - dip_qty)
+            pocket_held = self._open_pocket_qty(ticker)
+            if pocket_held > 0:
+                qty = max(0.0, qty - pocket_held)
             if target_alloc.get(ticker, 0.0) <= 0:
                 sell_qty = qty
             else:
@@ -1345,6 +1473,8 @@ class CryptoDeskMixin:
         reserve = pocket_cash_reserve(
             equity, pocket_open=float(read_btc_dip().get("qty") or 0) > 0
         )
+        if float(read_sui_dip().get("qty") or 0) <= 0:
+            reserve += sui_dip_quote()
         cash = max(0.0, budget - reserve)
         buys = [
             (ticker, target_values.get(ticker, 0) - current_values.get(ticker, 0))

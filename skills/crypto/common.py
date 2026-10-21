@@ -52,6 +52,7 @@ _ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_alloc.json")
 _TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trail.json")
 _EARN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_earn.json")
 _BTC_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_btc_dip.json")
+_SUI_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_sui_dip.json")
 _ENTRY_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_entry_arm.json")
 _ANCHOR_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_anchor.json")
 
@@ -570,10 +571,38 @@ def read_btc_dip(path: str | None = None) -> dict[str, float]:
     return {"qty": qty, "entry": entry, "exit_high": max(exit_high, 0.0), "exit_ts": exit_ts}
 
 
+def _parse_low_arm(raw: Any) -> dict[str, float] | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        low = float(raw.get("low") or 0)
+        ts = float(raw.get("ts") or 0)
+    except (TypeError, ValueError):
+        return None
+    if low <= 0:
+        return None
+    return {"low": low, "ts": ts}
+
+
+def read_sui_dip(path: str | None = None) -> dict[str, float]:
+    return read_btc_dip(path or _SUI_DIP_PATH)
+
+
+def write_sui_dip(
+    qty: float,
+    entry: float,
+    path: str | None = None,
+    *,
+    exit_high: float = 0.0,
+    exit_ts: float = 0.0,
+) -> None:
+    write_btc_dip(qty, entry, path or _SUI_DIP_PATH, exit_high=exit_high, exit_ts=exit_ts)
+
+
 def read_entry_arms(path: str | None = None) -> dict[str, Any]:
     """Ожидание отскока: дно альта или кармана, пока заявку не ставим."""
     path = path or _ENTRY_ARM_PATH
-    empty: dict[str, Any] = {"alts": {}, "pocket": None}
+    empty: dict[str, Any] = {"alts": {}, "pocket": None, "sui": None}
     if not os.path.isfile(path):
         return empty
     try:
@@ -596,26 +625,32 @@ def read_entry_arms(path: str | None = None) -> dict[str, Any]:
         if low <= 0:
             continue
         alts[ticker] = {"low": low, "ts": ts}
-    pocket = None
-    raw_pocket = raw.get("pocket")
-    if isinstance(raw_pocket, dict):
-        try:
-            low = float(raw_pocket.get("low") or 0)
-            ts = float(raw_pocket.get("ts") or 0)
-        except (TypeError, ValueError):
-            low = 0.0
-            ts = 0.0
-        if low > 0:
-            pocket = {"low": low, "ts": ts}
-    return {"alts": alts, "pocket": pocket}
+    pocket = _parse_low_arm(raw.get("pocket"))
+    sui = _parse_low_arm(raw.get("sui"))
+    return {"alts": alts, "pocket": pocket, "sui": sui}
+
+
+_KEEP_SUI = object()
 
 
 def write_entry_arms(
     alts: dict[str, dict[str, Any]],
     pocket: dict[str, Any] | None,
     path: str | None = None,
+    *,
+    sui: Any = _KEEP_SUI,
 ) -> None:
     path = path or _ENTRY_ARM_PATH
+    # Без аргумента sui ждёт SUI не трогаем. None или False снимает ожидание.
+    if sui is _KEEP_SUI and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                prev = json.load(handle)
+        except Exception:
+            prev = {}
+        sui = _parse_low_arm(prev.get("sui") if isinstance(prev, dict) else None)
+    elif not sui:
+        sui = None
     clean: dict[str, dict[str, float]] = {}
     for key, value in (alts or {}).items():
         ticker = _normalize_ticker(str(key))
@@ -631,6 +666,8 @@ def write_entry_arms(
     payload: dict[str, Any] = {"alts": clean}
     if pocket and float(pocket.get("low") or 0) > 0:
         payload["pocket"] = {"low": float(pocket["low"]), "ts": float(pocket.get("ts") or 0)}
+    if isinstance(sui, dict) and float(sui.get("low") or 0) > 0:
+        payload["sui"] = {"low": float(sui["low"]), "ts": float(sui.get("ts") or 0)}
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:
