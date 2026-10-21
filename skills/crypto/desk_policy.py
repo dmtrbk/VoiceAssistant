@@ -63,6 +63,10 @@ PROBE_BREAK_MIN_PCT = 4.0
 PROBE_BREAK_MAX_PCT = 12.0
 PROBE_VOL_MULT = 3.0
 PROBE_ENTRY_HOLD_SEC = 4 * 60
+PROBE_CHASE_PCT = 1.5
+PROBE_SHELF_DRIFT_PCT = 1.5
+PROBE_SHELF_DRIFT_BARS = 8
+PROBE_RUN_PCT = 6.0
 PROBE_MAX_LOSS_PCT = 8.0
 PROBE_SCAN_LIMIT = 10
 PROBE_PERIOD_SEC = 60
@@ -306,16 +310,40 @@ def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     typical = _median(vols)
     if typical <= 0 or impulse < typical * PROBE_VOL_MULT:
         return None
+    prev_high = float(closed[-1].get("high") or 0)
+    if prev_high >= high * (1.0 + limits.probe_break_min_pct / 100.0):
+        return None
+    tail = shelf[-PROBE_SHELF_DRIFT_BARS:]
+    if len(tail) >= 2:
+        old = float(tail[0].get("close") or 0)
+        new = float(tail[-1].get("close") or 0)
+        if old > 0 and abs(new / old - 1.0) * 100.0 > PROBE_SHELF_DRIFT_PCT:
+            return None
+    quiet = [float(bar.get("volume") or 0) for bar in shelf[:-2] if float(bar.get("volume") or 0) > 0]
+    base = _median(quiet) if quiet else typical
+    if base > 0:
+        for bar in shelf[-2:]:
+            if float(bar.get("volume") or 0) >= base * PROBE_VOL_MULT:
+                return None
     return {"shelf": high, "price": price}
 
 
-def probe_trends_ok(trend15: str, trend1h: str, day_chg: float | None) -> bool:
-    """15м бычий, час не медвежий, сутки ещё не улетели за +25%."""
+def probe_trends_ok(
+    trend15: str,
+    trend1h: str,
+    day_chg: float | None,
+    week_chg: float | None = None,
+) -> bool:
+    """15м бычий, час не медвежий, сутки ниже +25%, неделя не слабее −5%."""
     if trend15 != "bull" or trend1h == "bear":
         return False
     if day_chg is None:
         return False
-    return float(day_chg) < MAX_DAY_PUMP_PCT
+    if float(day_chg) >= MAX_DAY_PUMP_PCT:
+        return False
+    if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
+        return False
+    return True
 
 
 def probe_arm_action(
@@ -326,11 +354,17 @@ def probe_arm_action(
     shelf: float,
     trend15: str,
     day_chg: float | None,
+    arm_px: float = 0.0,
+    week_chg: float | None = None,
 ) -> str:
-    """buy — держится над полкой достаточно; drop — пробой погас; wait — ещё рано."""
+    """buy — держится над полкой; drop — пробой погас или цена ушла; wait — ещё рано."""
     if shelf <= 0 or price <= shelf or trend15 != "bull":
         return "drop"
     if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
+        return "drop"
+    if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
+        return "drop"
+    if arm_px > 0 and price > arm_px * (1.0 + PROBE_CHASE_PCT / 100.0):
         return "drop"
     if float(now) - float(armed_ts) < PROBE_ENTRY_HOLD_SEC:
         return "wait"
@@ -343,8 +377,10 @@ def probe_exit_reason(
     entry: float,
     shelf: float,
     trend15: str,
+    arm_px: float = 0.0,
+    peak: float = 0.0,
 ) -> str | None:
-    """Минус режем сразу. В плюсе сидим, пока 15м бычий, и выходим на медвежьем."""
+    """Маленький ход режется возвратом к цене ожидания. Уехавший — медвежьим 15м."""
     px = float(price or 0)
     ent = float(entry or 0)
     level = float(shelf or 0)
@@ -355,9 +391,14 @@ def probe_exit_reason(
         return "стоп"
     if level > 0 and px <= level:
         return "полка"
-    if gain <= 0 and trend15 != "bull":
+    high = max(float(peak or 0), px)
+    run = high >= ent * (1.0 + PROBE_RUN_PCT / 100.0)
+    scratch = float(arm_px or 0) or ent
+    if not run and scratch > 0 and px <= scratch:
+        return "ожидание"
+    if run and trend15 == "bear":
         return "тренд"
-    if gain > 0 and trend15 == "bear":
+    if not run and gain <= 0 and trend15 != "bull":
         return "тренд"
     return None
 
@@ -613,10 +654,9 @@ def alt_sleeve_qty_for_exit(
     price: float,
     min_trade_usd: float,
 ) -> float:
-    """Объём для альтового выхода: без кармана SOL и без пыли ниже min_trade."""
-    qty = max(0.0, float(held_qty or 0))
-    if ticker == BTC_DIP_TICKER:
-        qty = max(0.0, qty - max(0.0, float(pocket_qty or 0)))
+    """Объём для альтового выхода: без кармана и без щупа, и без пыли ниже min_trade."""
+    del ticker
+    qty = max(0.0, float(held_qty or 0) - max(0.0, float(pocket_qty or 0)))
     px = float(price or 0)
     if px <= 0 or qty <= 0:
         return 0.0

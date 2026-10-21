@@ -598,6 +598,8 @@ def _empty_probe() -> dict[str, Any]:
         "arm_ticker": "",
         "arm_shelf": 0.0,
         "arm_ts": 0.0,
+        "arm_px": 0.0,
+        "peak": 0.0,
     }
 
 
@@ -617,7 +619,7 @@ def read_probe(path: str | None = None) -> dict[str, Any]:
     out = _empty_probe()
     out["ticker"] = _normalize_ticker(str(raw.get("ticker") or ""))
     out["arm_ticker"] = _normalize_ticker(str(raw.get("arm_ticker") or ""))
-    for key in ("qty", "entry", "shelf", "arm_shelf", "arm_ts"):
+    for key in ("qty", "entry", "shelf", "arm_shelf", "arm_ts", "arm_px", "peak"):
         try:
             out[key] = float(raw.get(key) or 0)
         except (TypeError, ValueError):
@@ -627,10 +629,13 @@ def read_probe(path: str | None = None) -> dict[str, Any]:
         out["qty"] = 0.0
         out["entry"] = 0.0
         out["shelf"] = 0.0
+        out["peak"] = 0.0
     if out["arm_shelf"] <= 0:
         out["arm_ticker"] = ""
         out["arm_shelf"] = 0.0
         out["arm_ts"] = 0.0
+        if out["qty"] <= 0:
+            out["arm_px"] = 0.0
     return out
 
 
@@ -643,6 +648,8 @@ def write_probe(
     arm_ticker: str = "",
     arm_shelf: float = 0.0,
     arm_ts: float = 0.0,
+    arm_px: float = 0.0,
+    peak: float = 0.0,
     path: str | None = None,
 ) -> None:
     path = path or _PROBE_PATH
@@ -652,10 +659,15 @@ def write_probe(
         payload["qty"] = float(qty)
         payload["entry"] = float(entry)
         payload["shelf"] = float(shelf or 0)
+        payload["peak"] = float(peak or 0)
+        if float(arm_px or 0) > 0:
+            payload["arm_px"] = float(arm_px)
     if float(arm_shelf) > 0 and _normalize_ticker(arm_ticker):
         payload["arm_ticker"] = _normalize_ticker(arm_ticker)
         payload["arm_shelf"] = float(arm_shelf)
         payload["arm_ts"] = float(arm_ts or 0)
+        if float(arm_px or 0) > 0:
+            payload["arm_px"] = float(arm_px)
     if not payload:
         try:
             if os.path.isfile(path):

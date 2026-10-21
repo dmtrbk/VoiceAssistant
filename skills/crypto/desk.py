@@ -1071,7 +1071,10 @@ class CryptoDeskMixin:
         sleeve_exits = read_sleeve_exits()
         kept_exits: dict[str, dict[str, float]] = {}
         exit_now = time.time()
+        probe_ticker = str(read_probe().get("ticker") or "")
         for ticker, pos in positions.items():
+            if ticker == probe_ticker:
+                continue
             if ticker not in sleeve_names() or ticker in trail_sold:
                 continue
             if self._is_owner_position(ticker):
@@ -1278,9 +1281,15 @@ class CryptoDeskMixin:
         legs: list[dict[str, Any]] = []
         snap: list[str] = []
         for ticker, pos in positions.items():
+            if ticker == probe_ticker:
+                continue
             if ticker not in sleeve_names() or self._is_owner_position(ticker):
                 continue
-            sleeve_value = float(current_values.get(ticker) or pos.get("value") or 0)
+            sleeve_value = (
+                float(current_values[ticker])
+                if ticker in current_values
+                else float(pos.get("value") or 0)
+            )
             if sleeve_value < ALT_HELD_MIN_USD:
                 continue
             price = float(prices.get(ticker) or pos.get("price") or 0)
@@ -1676,6 +1685,20 @@ class CryptoDeskMixin:
                 blocked.add(str(item["ticker"]))
         return blocked
 
+    def _probe_week(self, ticker: str) -> float | None:
+        try:
+            mom = self._momentum(ticker)
+        except Exception as exc:
+            logger.info("[Крипта] щуп %s неделя: %s", ticker, exc)
+            return None
+        chg = mom.get("chg_7") if isinstance(mom, dict) else None
+        if chg is None:
+            return None
+        try:
+            return float(chg)
+        except (TypeError, ValueError):
+            return None
+
     def _probe_cycle(self) -> None:
         with common._TRADE_LOCK:
             self._probe_locked()
@@ -1707,11 +1730,23 @@ class CryptoDeskMixin:
                 trend = ma_trend([bar["close"] for bar in bars])
         except Exception as exc:
             logger.info("[Крипта] щуп %s тренд: %s", ticker, exc)
+        peak = max(float(state.get("peak") or 0), price)
+        if peak > float(state.get("peak") or 0) + 1e-12:
+            write_probe(
+                ticker=ticker,
+                qty=float(state.get("qty") or 0),
+                entry=float(state.get("entry") or 0),
+                shelf=float(state.get("shelf") or 0),
+                arm_px=float(state.get("arm_px") or 0),
+                peak=peak,
+            )
         reason = probe_exit_reason(
             price=price,
             entry=float(state.get("entry") or 0),
             shelf=float(state.get("shelf") or 0),
             trend15=trend,
+            arm_px=float(state.get("arm_px") or 0),
+            peak=peak,
         )
         if not reason:
             return
@@ -1750,6 +1785,7 @@ class CryptoDeskMixin:
         except Exception as exc:
             logger.info("[Крипта] щуп %s тренд: %s", ticker, exc)
             return
+        week = self._probe_week(ticker)
         action = probe_arm_action(
             armed_ts=float(state.get("arm_ts") or 0),
             now=time.time(),
@@ -1757,6 +1793,8 @@ class CryptoDeskMixin:
             shelf=shelf,
             trend15=trend,
             day_chg=day,
+            arm_px=float(state.get("arm_px") or 0),
+            week_chg=week,
         )
         if action == "wait":
             return
@@ -1770,9 +1808,9 @@ class CryptoDeskMixin:
                 trend,
             )
             return
-        self._probe_buy(ticker, shelf, price)
+        self._probe_buy(ticker, shelf, price, arm_px=float(state.get("arm_px") or price))
 
-    def _probe_buy(self, ticker: str, shelf: float, price: float) -> None:
+    def _probe_buy(self, ticker: str, shelf: float, price: float, arm_px: float = 0.0) -> None:
         free_cash, held_now = self._cash_and_held()
         quote = min(probe_quote(), free_cash * common._BUY_CASH_BUFFER)
         if quote < probe_quote() * 0.9:
@@ -1785,7 +1823,14 @@ class CryptoDeskMixin:
         bought = after - before
         if bought <= 0:
             return
-        write_probe(ticker=ticker, qty=bought, entry=quote / bought, shelf=shelf)
+        write_probe(
+            ticker=ticker,
+            qty=bought,
+            entry=quote / bought,
+            shelf=shelf,
+            arm_px=arm_px or price,
+            peak=price,
+        )
         logger.info("[Крипта] щуп %s: купил на %.0f$ над полкой %.4g", ticker, quote, shelf)
 
     def _probe_scan(self) -> None:
@@ -1825,16 +1870,19 @@ class CryptoDeskMixin:
             except Exception as exc:
                 logger.info("[Крипта] щуп %s час: %s", ticker, exc)
                 continue
-            if not probe_trends_ok(
+            week = self._probe_week(ticker)
+            if week is None or not probe_trends_ok(
                 ma_trend([bar["close"] for bar in bars]),
                 ma_trend([bar["close"] for bar in hour]),
                 float(row.get("chg") or 0),
+                week_chg=week,
             ):
                 continue
             write_probe(
                 arm_ticker=ticker,
                 arm_shelf=float(setup["shelf"]),
                 arm_ts=time.time(),
+                arm_px=float(setup["price"]),
             )
             logger.info(
                 "[Крипта] щуп %s полка %.4g сейчас %.4g — жду %d мин над полкой",

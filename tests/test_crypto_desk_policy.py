@@ -246,11 +246,21 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             0.0,
         )
+        self.assertEqual(
+            policy.alt_sleeve_qty_for_exit(
+                ticker="STRK",
+                held_qty=477.0,
+                pocket_qty=477.0,
+                price=0.06,
+                min_trade_usd=5.0,
+            ),
+            0.0,
+        )
         self.assertAlmostEqual(
             policy.alt_sleeve_qty_for_exit(
                 ticker="BNB",
                 held_qty=0.5,
-                pocket_qty=0.872,
+                pocket_qty=0.0,
                 price=750.0,
                 min_trade_usd=5.0,
             ),
@@ -458,6 +468,19 @@ class TestDeskPolicy(unittest.TestCase):
         wide = [{"high": 1.20, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(60)]
         self.assertIsNone(policy.probe_shelf_setup(wide + [prev, live]))
         self.assertIsNone(policy.probe_shelf_setup(shelf + [prev, {**live, "volume": 10.0}]))
+        late = {**prev, "high": 1.06}
+        self.assertIsNone(policy.probe_shelf_setup(shelf + [late, live]))
+        drifted = [dict(bar) for bar in shelf]
+        for index, bar in enumerate(drifted[-8:]):
+            close = 1.0 + index * 0.004
+            bar["close"] = close
+            bar["high"] = close
+            bar["low"] = close * 0.99
+        self.assertIsNone(policy.probe_shelf_setup(drifted + [prev, {**live, "close": 1.10, "high": 1.11}]))
+        loud = [dict(bar) for bar in shelf]
+        loud[-1]["volume"] = 40.0
+        loud[-2]["volume"] = 40.0
+        self.assertIsNone(policy.probe_shelf_setup(loud + [prev, live]))
 
         up = [float(i) for i in range(1, 80)]
         self.assertEqual(policy.ma_trend(up), "bull")
@@ -467,8 +490,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.probe_trends_ok("bull", "bear", 8.0))
         self.assertFalse(policy.probe_trends_ok("neutral", "neutral", 8.0))
         self.assertFalse(policy.probe_trends_ok("bull", "bull", 30.0))
+        self.assertFalse(policy.probe_trends_ok("bull", "neutral", 8.0, week_chg=-6.0))
+        self.assertTrue(policy.probe_trends_ok("bull", "neutral", 8.0, week_chg=-4.0))
 
-        base = dict(armed_ts=100.0, price=1.06, shelf=1.01, trend15="bull", day_chg=8.0)
+        base = dict(armed_ts=100.0, price=1.06, shelf=1.01, trend15="bull", day_chg=8.0, arm_px=1.05)
         self.assertEqual(policy.probe_arm_action(now=160.0, **base), "wait")
         self.assertEqual(
             policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **base),
@@ -478,10 +503,21 @@ class TestDeskPolicy(unittest.TestCase):
             policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **{**base, "price": 1.0}),
             "drop",
         )
-        self.assertIsNone(policy.probe_exit_reason(price=1.02, entry=1.05, shelf=1.0, trend15="bull"))
+        self.assertEqual(
+            policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **{**base, "price": 1.08}),
+            "drop",
+        )
+        self.assertEqual(
+            policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **base, week_chg=-6.0),
+            "drop",
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(price=1.02, entry=1.05, shelf=1.0, trend15="bull"),
+            "ожидание",
+        )
         self.assertEqual(
             policy.probe_exit_reason(price=1.02, entry=1.05, shelf=1.0, trend15="neutral"),
-            "тренд",
+            "ожидание",
         )
         self.assertEqual(
             policy.probe_exit_reason(price=1.0, entry=1.05, shelf=1.0, trend15="bull"),
@@ -496,6 +532,17 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(
             policy.probe_exit_reason(price=1.19, entry=1.05, shelf=1.0, trend15="bear"),
             "тренд",
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.10, entry=1.05, shelf=1.0, trend15="bull", arm_px=1.08, peak=1.20,
+            )
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=1.06, entry=1.05, shelf=1.0, trend15="bull", arm_px=1.07, peak=1.08,
+            ),
+            "ожидание",
         )
         self.assertEqual(policy.probe_quote(), 30.0)
 
@@ -1204,6 +1251,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         with (
             patch.object(self.skill, "_ticker", return_value={"price": 1.5, "chg": 8.0, "turnover": 2_000_000}),
             patch.object(self.skill, "_probe_bars", return_value=bars),
+            patch.object(self.skill, "_momentum", return_value={"chg_7": 1.0}),
             patch.object(self.skill, "_cash_and_held", side_effect=lambda: next(cash)),
             patch.object(self.skill, "_place_order", side_effect=place),
         ):
