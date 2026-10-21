@@ -441,6 +441,59 @@ class TestDeskPolicy(unittest.TestCase):
         finally:
             policy.set_live_sleeve(set())
 
+    def test_probe_shelf_trend_and_exit(self):
+        shelf = [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(60)]
+        prev = {"high": 1.02, "low": 0.99, "close": 1.0, "volume": 10.0}
+        live = {"high": 1.08, "low": 1.0, "close": 1.06, "volume": 40.0}
+        setup = policy.probe_shelf_setup(shelf + [prev, live])
+        self.assertIsNotNone(setup)
+        assert setup is not None
+        self.assertAlmostEqual(setup["shelf"], 1.01)
+        self.assertIsNone(policy.probe_shelf_setup(shelf + [prev, {**live, "close": 1.20, "volume": 80}]))
+        wide = [{"high": 1.20, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(60)]
+        self.assertIsNone(policy.probe_shelf_setup(wide + [prev, live]))
+        self.assertIsNone(policy.probe_shelf_setup(shelf + [prev, {**live, "volume": 10.0}]))
+
+        up = [float(i) for i in range(1, 80)]
+        self.assertEqual(policy.ma_trend(up), "bull")
+        self.assertEqual(policy.ma_trend(list(reversed(up))), "bear")
+        self.assertEqual(policy.ma_trend([5.0] * 80), "neutral")
+        self.assertTrue(policy.probe_trends_ok("bull", "neutral", 8.0))
+        self.assertFalse(policy.probe_trends_ok("bull", "bear", 8.0))
+        self.assertFalse(policy.probe_trends_ok("neutral", "neutral", 8.0))
+        self.assertFalse(policy.probe_trends_ok("bull", "bull", 30.0))
+
+        base = dict(armed_ts=100.0, price=1.06, shelf=1.01, trend15="bull", day_chg=8.0)
+        self.assertEqual(policy.probe_arm_action(now=160.0, **base), "wait")
+        self.assertEqual(
+            policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **base),
+            "buy",
+        )
+        self.assertEqual(
+            policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **{**base, "price": 1.0}),
+            "drop",
+        )
+        self.assertIsNone(policy.probe_exit_reason(price=1.02, entry=1.05, shelf=1.0, trend15="bull"))
+        self.assertEqual(
+            policy.probe_exit_reason(price=1.02, entry=1.05, shelf=1.0, trend15="neutral"),
+            "тренд",
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(price=1.0, entry=1.05, shelf=1.0, trend15="bull"),
+            "полка",
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(price=0.96, entry=1.05, shelf=0.5, trend15="bull"),
+            "стоп",
+        )
+        self.assertIsNone(policy.probe_exit_reason(price=1.20, entry=1.05, shelf=1.0, trend15="bull"))
+        self.assertIsNone(policy.probe_exit_reason(price=1.19, entry=1.05, shelf=1.0, trend15="neutral"))
+        self.assertEqual(
+            policy.probe_exit_reason(price=1.19, entry=1.05, shelf=1.0, trend15="bear"),
+            "тренд",
+        )
+        self.assertEqual(policy.probe_quote(), 30.0)
+
     def test_btc_dip_rules(self):
         self.assertTrue(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-3.0, qty=0.01))
@@ -662,6 +715,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ("trail.json", "_TRAIL_PATH"),
             ("btc_dip.json", "_BTC_DIP_PATH"),
             ("sui_dip.json", "_SUI_DIP_PATH"),
+            ("probe.json", "_PROBE_PATH"),
             ("entry_arm.json", "_ENTRY_ARM_PATH"),
             ("excluded.json", "_EXCLUDED_PATH"),
             ("anchor.json", "_ANCHOR_PATH"),
@@ -850,9 +904,9 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(
                 self.skill,
                 "_wallet",
-                return_value=(400.0, []),
+                return_value=(800.0, []),
             ),
-            patch.object(self.skill, "_cash_and_held", return_value=(400.0, {})),
+            patch.object(self.skill, "_cash_and_held", return_value=(800.0, {})),
             patch.object(self.skill, "_ensure_desk_bought"),
             patch.object(self.skill, "_ticker", return_value={"price": 1.0, "chg": 0.0, "turnover": 1}),
             patch.object(self.skill, "_place_order", side_effect=place),
@@ -860,7 +914,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_alt_entry_ready", return_value=True),
             patch("skills.crypto.desk.time.sleep"),
         ):
-            # цели: LINK 60, AVAX 40 при equity≈400. Резерв SOL 100$ и SUI 50$.
+            # цели: LINK 60, AVAX 40 при equity≈800. Резерв SOL 200$, SUI 50$ и щуп 30$.
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"LINK", "AVAX"}
             self.skill._rebalance({"LINK": 60.0, "AVAX": 40.0})
@@ -868,8 +922,8 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertIn("LINK", by_ticker)
         self.assertIn("AVAX", by_ticker)
         self.assertGreater(by_ticker["LINK"], by_ticker["AVAX"])
-        # 25% счёта — карман SOL, ещё 50$ — карман SUI. В рукав это не уходит.
-        self.assertAlmostEqual(sum(by_ticker.values()), 400.0 * 0.998 - 100.0 - 50.0, places=1)
+        # 25% счёта — карман SOL, 50$ — SUI, 30$ — щуп. В рукав это не уходит.
+        self.assertAlmostEqual(sum(by_ticker.values()), 800.0 * 0.998 - 200.0 - 50.0 - 30.0, places=1)
 
     def test_buy_resets_stale_trail_leg(self):
         from skills.crypto import common as crypto_common
@@ -1127,6 +1181,44 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertEqual(placed, [("SUI", "Sell", 50.0)])
         self.assertAlmostEqual(read_sui_dip()["qty"], 40.0)
 
+    def test_probe_buys_thirty_then_exits_under_shelf(self):
+        from skills.crypto.common import read_probe, write_probe
+
+        write_probe(arm_ticker="DOOD", arm_shelf=1.0, arm_ts=time.time() - policy.PROBE_ENTRY_HOLD_SEC - 5)
+        bars = [{"high": float(i), "low": float(i), "close": float(i), "volume": 1.0} for i in range(1, 70)]
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, quote_usdt, base_qty))
+            return f"ok {ticker}"
+
+        cash = iter((
+            (100.0, {}),
+            (70.0, {"DOOD": {"qty": 20.0, "value": 30.0, "price": 1.5}}),
+        ))
+        with (
+            patch.object(self.skill, "_ticker", return_value={"price": 1.5, "chg": 8.0, "turnover": 2_000_000}),
+            patch.object(self.skill, "_probe_bars", return_value=bars),
+            patch.object(self.skill, "_cash_and_held", side_effect=lambda: next(cash)),
+            patch.object(self.skill, "_place_order", side_effect=place),
+        ):
+            self.skill._probe_locked()
+        self.assertEqual(placed, [("DOOD", "Buy", 30.0, None)])
+        self.assertAlmostEqual(read_probe()["qty"], 20.0)
+        self.assertAlmostEqual(read_probe()["shelf"], 1.0)
+
+        placed.clear()
+        with (
+            patch.object(self.skill, "_ticker", return_value={"price": 0.9, "chg": 1.0, "turnover": 1}),
+            patch.object(self.skill, "_probe_bars", return_value=bars),
+            patch.object(self.skill, "_cash_and_held", return_value=(70.0, {"DOOD": {"qty": 20.0}})),
+            patch.object(self.skill, "_place_order", side_effect=place),
+        ):
+            self.skill._probe_locked()
+        self.assertEqual(placed, [("DOOD", "Sell", None, 20.0)])
+        self.assertEqual(read_probe()["qty"], 0.0)
+        self.assertEqual(read_probe()["ticker"], "")
+
     def test_risk_off_sells_core_keeps_alt(self):
         placed: list[tuple[str, str]] = []
 
@@ -1257,11 +1349,11 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         aged["alts"]["LINK"]["ts"] = time.time() - policy.ALT_ENTRY_HOLD_SEC - 5
         write_entry_arms(aged["alts"], aged.get("pocket"))
         placed, result, state = self._watch_alt(
-            price=18.3, entry=0.0, alloc={"BTC": 40.0}, positions=[], cash=100.0
+            price=18.3, entry=0.0, alloc={"BTC": 40.0}, positions=[], cash=400.0
         )
         buys = [(t, q) for t, side, _b, q in placed if side == "Buy"]
         self.assertEqual([t for t, _q in buys], ["LINK"], result)
-        self.assertAlmostEqual(buys[0][1], 100.0 * 0.998 - 75.0, places=1)
+        self.assertAlmostEqual(buys[0][1], 100.0, places=1)
         self.assertEqual(state["alloc"].get("LINK"), policy.alt_slot_pct())
 
     def test_watch_rate_limit_still_exits_alt(self):

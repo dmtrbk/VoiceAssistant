@@ -315,6 +315,8 @@ class CryptoQuotesMixin:
                     "price": last,
                     "chg": float(row.get("price24hPcnt") or 0) * 100.0,
                     "turnover": float(row.get("turnover24h") or 0),
+                    "high": float(row.get("highPrice24h") or 0),
+                    "low": float(row.get("lowPrice24h") or 0),
                 }
             )
         tape.sort(key=lambda item: item["turnover"], reverse=True)

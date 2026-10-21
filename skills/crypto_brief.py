@@ -13,6 +13,7 @@ from skills.crypto.common import (
     _read_ticker_set,
     _spoken,
     read_btc_dip,
+    read_probe,
     read_sui_dip,
 )
 from skills.crypto.desk_policy import (
@@ -111,6 +112,7 @@ def build_crypto_brief(skill) -> str:
     sui = read_sui_dip()
     sui_qty = float(sui.get("qty") or 0)
     sui_entry = float(sui.get("entry") or 0)
+    probe = read_probe()
     holds = {str(ticker).upper() for ticker in getattr(skill, "_manual_holds", set())}
     excluded = _read_ticker_set(_EXCLUDED_PATH) or set()
     dust: list[str] = []
@@ -132,6 +134,8 @@ def build_crypto_brief(skill) -> str:
             entry = sui_entry
         elif ticker == BTC_DIP_TICKER and dip_qty > 0 and dip_entry > 0:
             entry = dip_entry
+        elif ticker == str(probe.get("ticker") or "") and float(probe.get("qty") or 0) > 0:
+            entry = float(probe.get("entry") or entry)
         pnl = _pnl_pct(price, entry)
         sentence = f"{name} {_format_usd(value)}"
         if pnl is not None:
@@ -147,6 +151,8 @@ def build_crypto_brief(skill) -> str:
                 )
             else:
                 sentence += ". Карман уже на выходе"
+        elif ticker == str(probe.get("ticker") or "") and float(probe.get("qty") or 0) > 0:
+            sentence += ". Щуп над полкой, выход по медвежьему тренду 15 минут"
         elif ticker in sleeve_names():
             if ticker in excluded:
                 sentence += ". Новая покупка закрыта, эта позиция ещё держится"

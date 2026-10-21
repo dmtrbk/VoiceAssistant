@@ -53,6 +53,7 @@ _TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trail.json")
 _EARN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_earn.json")
 _BTC_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_btc_dip.json")
 _SUI_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_sui_dip.json")
+_PROBE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe.json")
 _ENTRY_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_entry_arm.json")
 _ANCHOR_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_anchor.json")
 
@@ -586,6 +587,89 @@ def _parse_low_arm(raw: Any) -> dict[str, float] | None:
 
 def read_sui_dip(path: str | None = None) -> dict[str, float]:
     return read_btc_dip(path or _SUI_DIP_PATH)
+
+
+def _empty_probe() -> dict[str, Any]:
+    return {
+        "ticker": "",
+        "qty": 0.0,
+        "entry": 0.0,
+        "shelf": 0.0,
+        "arm_ticker": "",
+        "arm_shelf": 0.0,
+        "arm_ts": 0.0,
+    }
+
+
+def read_probe(path: str | None = None) -> dict[str, Any]:
+    """Щуп: открытая монета и ожидание над полкой."""
+    path = path or _PROBE_PATH
+    empty = _empty_probe()
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    out = _empty_probe()
+    out["ticker"] = _normalize_ticker(str(raw.get("ticker") or ""))
+    out["arm_ticker"] = _normalize_ticker(str(raw.get("arm_ticker") or ""))
+    for key in ("qty", "entry", "shelf", "arm_shelf", "arm_ts"):
+        try:
+            out[key] = float(raw.get(key) or 0)
+        except (TypeError, ValueError):
+            out[key] = 0.0
+    if out["qty"] <= 0 or out["entry"] <= 0:
+        out["ticker"] = ""
+        out["qty"] = 0.0
+        out["entry"] = 0.0
+        out["shelf"] = 0.0
+    if out["arm_shelf"] <= 0:
+        out["arm_ticker"] = ""
+        out["arm_shelf"] = 0.0
+        out["arm_ts"] = 0.0
+    return out
+
+
+def write_probe(
+    *,
+    ticker: str = "",
+    qty: float = 0.0,
+    entry: float = 0.0,
+    shelf: float = 0.0,
+    arm_ticker: str = "",
+    arm_shelf: float = 0.0,
+    arm_ts: float = 0.0,
+    path: str | None = None,
+) -> None:
+    path = path or _PROBE_PATH
+    payload: dict[str, Any] = {}
+    if float(qty) > 0 and float(entry) > 0 and _normalize_ticker(ticker):
+        payload["ticker"] = _normalize_ticker(ticker)
+        payload["qty"] = float(qty)
+        payload["entry"] = float(entry)
+        payload["shelf"] = float(shelf or 0)
+    if float(arm_shelf) > 0 and _normalize_ticker(arm_ticker):
+        payload["arm_ticker"] = _normalize_ticker(arm_ticker)
+        payload["arm_shelf"] = float(arm_shelf)
+        payload["arm_ts"] = float(arm_ts or 0)
+    if not payload:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("[Крипта] не стёр щуп: %s", exc)
+        return
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал щуп: %s", exc)
 
 
 def write_sui_dip(

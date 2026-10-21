@@ -53,6 +53,22 @@ SLEEVE_SKIP = frozenset({
     "TUSD", "USDD", "PYUSD", "USDY", "USDP", "GUSD", "EURC", "EUR", "USD",
 })
 _live_extra: set[str] = set()
+# Щуп: 30$ на пробой тихой полки. Не слот рукава и не карман.
+PROBE_USD = 30.0
+PROBE_MIN_TURNOVER_USD = 1_000_000.0
+PROBE_DAY_MIN_PCT = 3.0
+PROBE_NEAR_HIGH = 0.99
+PROBE_SHELF_MAX_RANGE_PCT = 12.0
+PROBE_BREAK_MIN_PCT = 4.0
+PROBE_BREAK_MAX_PCT = 12.0
+PROBE_VOL_MULT = 3.0
+PROBE_ENTRY_HOLD_SEC = 4 * 60
+PROBE_MAX_LOSS_PCT = 8.0
+PROBE_SCAN_LIMIT = 10
+PROBE_PERIOD_SEC = 60
+PROBE_EMA_FAST = 20
+PROBE_EMA_SLOW = 50
+PROBE_SHELF_BARS = 96
 # Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
 TAKE_PROFIT_DAY_PCT = 18.0
 TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем на подъёме
@@ -200,6 +216,142 @@ def btc_dip_quote(equity: float) -> float:
 def sui_dip_quote() -> float:
     """Карман SUI: фиксированная сумма, не доля счёта."""
     return float(SUI_DIP_USD)
+
+
+def probe_quote() -> float:
+    """Щуп: фиксированные 30$, не доля счёта."""
+    return float(PROBE_USD)
+
+
+def ema_last(values: list[float], period: int) -> float | None:
+    """Последнее значение EMA. Мало точек — сигнала нет."""
+    period = int(period)
+    if period <= 0 or len(values) < period:
+        return None
+    k = 2.0 / (period + 1.0)
+    ema = sum(values[:period]) / period
+    for price in values[period:]:
+        ema = float(price) * k + ema * (1.0 - k)
+    return ema
+
+
+def ma_trend(closes: list[float]) -> str:
+    """Бычий/медвежий тренд как сводка средних: быстрая EMA против медленной и цены.
+
+    Совпадает по смыслу со вкладкой «Торговый анализ» Bybit, без осцилляторов.
+    """
+    if len(closes) < PROBE_EMA_SLOW:
+        return "neutral"
+    fast = ema_last(closes, PROBE_EMA_FAST)
+    slow = ema_last(closes, PROBE_EMA_SLOW)
+    price = float(closes[-1])
+    if fast is None or slow is None or price <= 0:
+        return "neutral"
+    if fast > slow and price > fast:
+        return "bull"
+    if fast < slow and price < fast:
+        return "bear"
+    return "neutral"
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(float(v) for v in values)
+    if not ordered:
+        return 0.0
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Живая цена на 4–12% выше узкой полки, объём импульса ≥ 3× медианы полки.
+
+    bars — от старых к новым, последняя свеча может быть ещё открытой.
+    Полка — до двух последних 15-минутных свечей.
+    """
+    if len(bars) < PROBE_EMA_SLOW + 2:
+        return None
+    forming = bars[-1]
+    closed = bars[:-1]
+    if len(closed) < 21:
+        return None
+    shelf = closed[:-1][-PROBE_SHELF_BARS:]
+    if len(shelf) < 20:
+        return None
+    try:
+        high = max(float(bar["high"]) for bar in shelf)
+        low = min(float(bar["low"]) for bar in shelf)
+        vols = [float(bar["volume"]) for bar in shelf if float(bar["volume"]) > 0]
+        price = float(forming["close"])
+        impulse = max(float(forming.get("volume") or 0), float(closed[-1].get("volume") or 0))
+    except (TypeError, ValueError, KeyError):
+        return None
+    if low <= 0 or high <= 0 or price <= 0 or not vols:
+        return None
+    if (high - low) / low * 100.0 > PROBE_SHELF_MAX_RANGE_PCT:
+        return None
+    floor = high * (1.0 + PROBE_BREAK_MIN_PCT / 100.0)
+    ceiling = high * (1.0 + PROBE_BREAK_MAX_PCT / 100.0)
+    if price < floor or price > ceiling:
+        return None
+    typical = _median(vols)
+    if typical <= 0 or impulse < typical * PROBE_VOL_MULT:
+        return None
+    return {"shelf": high, "price": price}
+
+
+def probe_trends_ok(trend15: str, trend1h: str, day_chg: float | None) -> bool:
+    """15м бычий, час не медвежий, сутки ещё не улетели за +25%."""
+    if trend15 != "bull" or trend1h == "bear":
+        return False
+    if day_chg is None:
+        return False
+    return float(day_chg) < MAX_DAY_PUMP_PCT
+
+
+def probe_arm_action(
+    *,
+    armed_ts: float,
+    now: float,
+    price: float,
+    shelf: float,
+    trend15: str,
+    day_chg: float | None,
+) -> str:
+    """buy — держится над полкой достаточно; drop — пробой погас; wait — ещё рано."""
+    if shelf <= 0 or price <= shelf or trend15 != "bull":
+        return "drop"
+    if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
+        return "drop"
+    if float(now) - float(armed_ts) < PROBE_ENTRY_HOLD_SEC:
+        return "wait"
+    return "buy"
+
+
+def probe_exit_reason(
+    *,
+    price: float,
+    entry: float,
+    shelf: float,
+    trend15: str,
+) -> str | None:
+    """Минус режем сразу. В плюсе сидим, пока 15м бычий, и выходим на медвежьем."""
+    px = float(price or 0)
+    ent = float(entry or 0)
+    level = float(shelf or 0)
+    if px <= 0 or ent <= 0:
+        return None
+    gain = (px / ent - 1.0) * 100.0
+    if gain <= -PROBE_MAX_LOSS_PCT:
+        return "стоп"
+    if level > 0 and px <= level:
+        return "полка"
+    if gain <= 0 and trend15 != "bull":
+        return "тренд"
+    if gain > 0 and trend15 == "bear":
+        return "тренд"
+    return None
 
 
 def pocket_cash_reserve(equity: float, *, pocket_open: bool) -> float:
