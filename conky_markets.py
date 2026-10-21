@@ -251,6 +251,8 @@ def cache_is_fresh(now: float | None = None, cache_path: str | None = None) -> b
     raw = _read_pnl_raw()
     if raw is not None and ("stocks_value" not in raw or "crypto_value" not in raw):
         return False
+    if raw is not None and raw.get("crypto_day_rev") != _CRYPTO_DAY_REV:
+        return False
     max_age = 5 * 60 if raw and raw.get("day_stale") else CACHE_MAX_AGE
     if current - stamp > max_age:
         return False
@@ -303,24 +305,125 @@ def _stocks_day_and_life() -> tuple[float, float] | None:
     return pair
 
 
+_CRYPTO_DAY_WINDOW = 24 * 60 * 60
+# Смена формулы дня крипты: старый кэш без этой метки пересчитывается.
+_CRYPTO_DAY_REV = 2
+
+
+def _price_before_window(price: float, chg_pct: float) -> float | None:
+    """Цена 24 часа назад из суточного процента Bybit."""
+    if price <= 0:
+        return None
+    factor = 1.0 + chg_pct / 100.0
+    if factor <= 0:
+        return None
+    return price / factor
+
+
+def crypto_day_move(
+    positions: list[dict],
+    trades: list[dict],
+    quotes: dict[str, dict],
+    now: float,
+    window_sec: float = _CRYPTO_DAY_WINDOW,
+) -> float:
+    """День крипты с момента покупки.
+
+    Лот старше суток — ход цены за 24 часа. Лот куплен внутри суток — только
+    от цены сделки до текущей. Монета на счёте без записи в журнале не получает
+    суточный процент: время входа неизвестно.
+    """
+    window_start = now - window_sec
+    book: dict[str, list[dict[str, float]]] = {}
+    day = 0.0
+
+    for entry in trades:
+        ticker = str(entry.get("ticker") or "").upper()
+        side = str(entry.get("side") or "").lower()
+        quote = float(entry.get("quote") or 0)
+        fill = float(entry.get("price") or 0)
+        ts = float(entry.get("ts_epoch") or 0)
+        if not ticker or fill <= 0 or quote <= 0:
+            continue
+        qty = quote / fill
+        if qty <= 0:
+            continue
+        lots = book.setdefault(ticker, [])
+        if side == "buy":
+            lots.append({"qty": qty, "price": fill, "ts": ts})
+            continue
+        if side != "sell":
+            continue
+        left = qty
+        quote_row = quotes.get(ticker) or {}
+        prev = _price_before_window(
+            float(quote_row.get("price") or 0),
+            float(quote_row.get("chg") or 0),
+        )
+        while left > 1e-12 and lots:
+            lot = lots[0]
+            take = min(left, lot["qty"])
+            if ts >= window_start:
+                if lot["ts"] >= window_start:
+                    day += take * (fill - lot["price"])
+                elif prev:
+                    day += take * (fill - prev)
+            lot["qty"] -= take
+            left -= take
+            if lot["qty"] <= 1e-12:
+                lots.pop(0)
+
+    for pos in positions:
+        ticker = str(pos.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        quote_row = quotes.get(ticker) or {}
+        price = float(quote_row.get("price") or pos.get("price") or 0)
+        qty = float(pos.get("qty") or 0)
+        if qty <= 0 and price > 0:
+            qty = float(pos.get("value") or 0) / price
+        if qty <= 0 or price <= 0:
+            continue
+        prev = _price_before_window(price, float(quote_row.get("chg") or 0))
+        covered = 0.0
+        for lot in book.get(ticker) or []:
+            take = min(lot["qty"], qty - covered)
+            if take <= 0:
+                break
+            covered += take
+            if lot["ts"] >= window_start:
+                day += take * (price - lot["price"])
+            elif prev:
+                day += take * (price - prev)
+    return day
+
+
 def crypto_day_pnl() -> float | None:
     from skills.crypto import CryptoSkill
+    from skills.crypto.journal import _read_trades
 
     skill = CryptoSkill()
     skill._reload_env()
     if not skill._api_key:
         return None
     _cash, positions = skill._wallet()
-    if not positions:
-        return 0.0
-    total = 0.0
-    for pos in positions:
-        ticker = str(pos.get("ticker") or "")
-        if not ticker:
+    trades = _read_trades()
+    now = time.time()
+    window_start = now - _CRYPTO_DAY_WINDOW
+    tickers = {str(pos.get("ticker") or "").upper() for pos in positions}
+    for entry in trades:
+        if float(entry.get("ts_epoch") or 0) >= window_start:
+            tickers.add(str(entry.get("ticker") or "").upper())
+    tickers.discard("")
+    quotes: dict[str, dict] = {}
+    for ticker in tickers:
+        try:
+            quotes[ticker] = skill._ticker(ticker)
+        except Exception:
             continue
-        chg = float(skill._ticker(ticker)["chg"])
-        total += float(pos.get("value") or 0) * (chg / 100.0)
-    return total
+    if not positions and not quotes:
+        return 0.0
+    return crypto_day_move(positions, trades, quotes, now)
 
 
 def crypto_earn_interest() -> float:
@@ -539,6 +642,7 @@ def write_pnl_cache(
         "crypto_life": crypto_life,
         "stocks_value": stocks_value,
         "crypto_value": crypto_value,
+        "crypto_day_rev": _CRYPTO_DAY_REV,
         "day_stale": day_stale,
     }
     tmp_path = cache_path + ".tmp"

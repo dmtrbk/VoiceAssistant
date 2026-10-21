@@ -57,6 +57,49 @@ class TestConkyMarkets(unittest.TestCase):
         self.assertEqual(conky_markets.color_for(None), "c0c0c0")
         self.assertEqual(conky_markets.color_for(0), "c0c0c0")
 
+    def test_crypto_day_ignores_move_before_buy(self):
+        now = 1_700_000_000.0
+        # Сейчас $10, за сутки цена +200%. Купили час назад по $0.09 — день только $1.
+        positions = [{"ticker": "DOOD", "qty": 100.0, "value": 10.0}]
+        trades = [{
+            "ticker": "DOOD",
+            "side": "buy",
+            "quote": 9.0,
+            "price": 0.09,
+            "ts_epoch": now - 3600,
+        }]
+        quotes = {"DOOD": {"price": 0.10, "chg": 200.0}}
+        self.assertAlmostEqual(
+            conky_markets.crypto_day_move(positions, trades, quotes, now),
+            1.0,
+        )
+
+    def test_crypto_day_skips_coin_without_journal(self):
+        now = 1_700_000_000.0
+        positions = [{"ticker": "DOOD", "qty": 100.0, "value": 10.0}]
+        quotes = {"DOOD": {"price": 0.10, "chg": 208.81}}
+        self.assertEqual(
+            conky_markets.crypto_day_move(positions, [], quotes, now),
+            0.0,
+        )
+
+    def test_crypto_day_uses_24h_for_old_lot(self):
+        now = 1_700_000_000.0
+        positions = [{"ticker": "KII", "qty": 2.0, "value": 20.0}]
+        trades = [{
+            "ticker": "KII",
+            "side": "buy",
+            "quote": 16.0,
+            "price": 8.0,
+            "ts_epoch": now - 3 * 86400,
+        }]
+        quotes = {"KII": {"price": 10.0, "chg": 10.0}}
+        # 2 * (10 - 10/1.1) = 20 * 10%
+        self.assertAlmostEqual(
+            conky_markets.crypto_day_move(positions, trades, quotes, now),
+            20.0 * 0.10 / 1.10,
+        )
+
     def test_caption_rows(self):
         stocks, crypto = conky_markets.caption_rows(-5, -2, 17840, 4310)
         self.assertEqual(stocks[0], ("-5 ₽", "888888"))
@@ -200,7 +243,7 @@ class TestConkyMarkets(unittest.TestCase):
         with open(cache, "w", encoding="utf-8") as handle:
             handle.write("old")
         os.utime(cache, (time.time(), time.time()))
-        fresh = {"stocks_value": 1, "crypto_value": 1}
+        fresh = {"stocks_value": 1, "crypto_value": 1, "crypto_day_rev": conky_markets._CRYPTO_DAY_REV}
         with (
             mock.patch.object(conky_markets, "JOURNAL_PATHS", (journal,)),
             mock.patch.object(conky_markets, "_read_pnl_raw", return_value=fresh),
