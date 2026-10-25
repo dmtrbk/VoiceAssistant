@@ -366,6 +366,11 @@ class TestCryptoSkill(unittest.TestCase):
                 "_signed",
                 return_value={"retCode": 0, "result": {"orderId": "1"}},
             ) as signed,
+            patch.object(
+                self.skill,
+                "_order_state",
+                return_value={"orderStatus": "Filled", "cumExecQty": "0.000263", "cumExecValue": "19.988"},
+            ),
         ):
             phrase = self.skill._place_order("BTC", "Sell", base_qty=0.00026352, price=76000.0)
         body = signed.call_args.args[2]

@@ -1451,15 +1451,34 @@ class CryptoDeskMixin:
                 store(0, 0)
                 self._drop_anchor(ticker)
                 return None
-            phrase = self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
-            store(0, 0)
-            self._drop_anchor(ticker)
+            seen = getattr(self, "_last_fill", None)
+            try:
+                phrase = self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
+            except Exception as exc:
+                logger.info("[Крипта] карман %s продажа не прошла: %s", ticker, exc)
+                return None
+            fill = getattr(self, "_last_fill", None)
+            sold = float(fill.get("qty") or 0) if fill is not seen and isinstance(fill, dict) else sell_qty
+            remain = max(0.0, qty - sold)
+            if remain * price < _MIN_QUOTE:
+                store(0, 0)
+                self._drop_anchor(ticker)
+            else:
+                store(
+                    remain,
+                    book_entry,
+                    exit_high=float(dip.get("exit_high") or 0),
+                    exit_ts=float(dip.get("exit_ts") or 0),
+                    low=float(dip.get("low") or 0),
+                )
+                logger.info("[Крипта] карман %s ещё %.6g монет после неполной продажи", ticker, remain)
+            fill_px = float(fill.get("price") or 0) if isinstance(fill, dict) else 0.0
             logger.info(
                 "[Крипта] карман %s: выход (%s) %.6g по %.4g",
                 ticker,
                 reason,
-                sell_qty,
-                price,
+                sold,
+                fill_px or price,
             )
             return phrase
         if blocked or not allow_entry:
@@ -1774,13 +1793,32 @@ class CryptoDeskMixin:
         if sell_qty <= 0:
             write_probe()
             return
-        self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
+        seen = getattr(self, "_last_fill", None)
+        try:
+            self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
+        except Exception as exc:
+            logger.info("[Крипта] щуп %s продажа не прошла: %s", ticker, exc)
+            return
+        fill = getattr(self, "_last_fill", None)
+        sold = float(fill.get("qty") or 0) if fill is not seen and isinstance(fill, dict) else sell_qty
+        left = max(0.0, float(state.get("qty") or 0) - sold)
+        if left * price >= _MIN_QUOTE:
+            write_probe(
+                ticker=ticker,
+                qty=left,
+                entry=float(state.get("entry") or 0),
+                shelf=float(state.get("shelf") or 0),
+                arm_px=float(state.get("arm_px") or 0),
+                peak=float(state.get("peak") or 0),
+            )
+            logger.info("[Крипта] щуп %s ещё %.6g монет после неполной продажи", ticker, left)
+            return
         write_probe()
         logger.info(
             "[Крипта] щуп %s: выход (%s) %.6g по %.4g",
             ticker,
             reason,
-            sell_qty,
+            sold,
             price,
         )
 

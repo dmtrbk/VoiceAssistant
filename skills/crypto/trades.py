@@ -254,6 +254,26 @@ class CryptoTradesMixin:
             )
         return done_qty, done_quote
 
+    def _await_fill(self, ticker: str, order_id: str) -> tuple[float, float]:
+        """Сколько рыночная заявка реально исполнилась. Принятие ордера ещё не сделка."""
+        deadline = time.time() + 8.0
+        state: dict[str, Any] = {}
+        while time.time() < deadline:
+            state = self._order_state(ticker, order_id)
+            status = str(state.get("orderStatus") or "")
+            if status in {"Filled", "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"}:
+                break
+            time.sleep(0.4)
+        else:
+            self._cancel_order(ticker, order_id)
+            state = self._order_state(ticker, order_id)
+        try:
+            qty = float(state.get("cumExecQty") or 0)
+            quote = float(state.get("cumExecValue") or 0)
+        except (TypeError, ValueError):
+            return 0.0, 0.0
+        return max(qty, 0.0), max(quote, 0.0)
+
     def _place_order(
         self,
         ticker: str,
@@ -303,28 +323,56 @@ class CryptoTradesMixin:
             amt = want_quote - maker_quote
             body["marketUnit"] = "quoteCoin"
             body["qty"] = f"{amt:.2f}"
-            filled_quote = amt
+            market_quote = amt
         else:
             qty_s = _qty_str(max(0.0, want_qty - maker_qty), filters["step"])
             body["marketUnit"] = "baseCoin"
             body["qty"] = qty_s
-            filled_quote = float(qty_s or 0) * px
+            market_quote = float(qty_s or 0) * px
         # Остаток меньше минимального лота — лимитной хватило, рыночную не ставим.
-        if filled_quote + 1e-9 < min_amt:
+        if market_quote + 1e-9 < min_amt:
             if maker_quote <= 0:
                 raise RuntimeError("no lots")
-            return self._finish_order(ticker, side, maker_quote, maker_quote / maker_qty)
+            return self._finish_order(
+                ticker, side, maker_quote, maker_quote / maker_qty, qty=maker_qty
+            )
         data = self._signed("POST", "/v5/order/create", body)
         result = data.get("result") or {}
-        if not result.get("orderId") and not result.get("orderLinkId"):
+        order_id = str(result.get("orderId") or "")
+        if not order_id and not result.get("orderLinkId"):
             raise RuntimeError(str(data.get("retMsg") or "заявка не прошла"))
-        if maker_quote > 0:
-            total_qty = maker_qty + (filled_quote / px if px else 0.0)
-            filled_quote += maker_quote
-            px = filled_quote / total_qty if total_qty else px
-        return self._finish_order(ticker, side, filled_quote, px)
+        mkt_qty, mkt_quote = self._await_fill(ticker, order_id) if order_id else (0.0, 0.0)
+        if mkt_qty > 0 and mkt_quote <= 0:
+            mkt_quote = mkt_qty * px
+        if mkt_qty > 0:
+            logger.info(
+                "[Крипта] рыночная %s %s: %.6g по %.6g на %.2f$",
+                side,
+                ticker,
+                mkt_qty,
+                mkt_quote / mkt_qty,
+                mkt_quote,
+            )
+        total_qty = maker_qty + mkt_qty
+        total_quote = maker_quote + mkt_quote
+        if total_qty <= 0 or total_quote <= 0:
+            raise RuntimeError("заявка не исполнилась")
+        return self._finish_order(
+            ticker, side, total_quote, total_quote / total_qty, qty=total_qty
+        )
 
-    def _finish_order(self, ticker: str, side: str, filled_quote: float, px: float) -> str:
+    def _finish_order(
+        self,
+        ticker: str,
+        side: str,
+        filled_quote: float,
+        px: float,
+        *,
+        qty: float = 0.0,
+    ) -> str:
+        if qty <= 0 and px > 0:
+            qty = filled_quote / px
+        self._last_fill = {"qty": float(qty), "quote": float(filled_quote), "price": float(px)}
         self._bust_private_cache()
         if side == "Buy":
             self._mark_desk_bought(ticker)

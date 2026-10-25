@@ -1010,6 +1010,11 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_filters", return_value={"step": 0.01, "min_amt": 5.0, "min_qty": 0.0}),
             patch.object(self.skill, "_ticker", return_value={"price": 0.65, "chg": 0.0, "turnover": 1}),
             patch.object(self.skill, "_signed", return_value={"result": {"orderId": "1"}}),
+            patch.object(
+                self.skill,
+                "_order_state",
+                return_value={"orderStatus": "Filled", "cumExecQty": "7.69", "cumExecValue": "5.0"},
+            ),
             patch.object(self.skill, "_journal_trade"),
             patch.object(self.skill, "_mark_desk_bought"),
         ):
@@ -1184,6 +1189,25 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertEqual(placed[0][0], "SOL")
         self.assertEqual(placed[0][2], 0.01)
         self.assertEqual(read_btc_dip()["qty"], 0.0)
+
+    def test_pocket_keeps_coins_when_sell_does_not_fill(self):
+        from skills.crypto.common import read_btc_dip, write_btc_dip
+
+        write_btc_dip(1.0, 100.0, low=90.0)
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            raise RuntimeError("заявка не исполнилась")
+
+        with patch.object(self.skill, "_place_order", side_effect=place):
+            phrase = self.skill._trade_btc_dip(
+                day_chg=-20.0,
+                positions={"SOL": {"qty": 1.0, "value": 80.0, "price": 80.0}},
+                price=80.0,
+                blocked=False,
+            )
+        self.assertIsNone(phrase)
+        self.assertAlmostEqual(read_btc_dip()["qty"], 1.0)
+        self.assertAlmostEqual(read_btc_dip()["low"], 90.0)
 
     def test_sui_pocket_buys_fifty_and_keeps_sol(self):
         from skills.crypto.common import read_btc_dip, read_entry_arms, read_sui_dip, write_btc_dip, write_entry_arms
@@ -1563,24 +1587,37 @@ class TestMakerOrders(unittest.TestCase):
         self.states = [
             {"orderStatus": "PartiallyFilled", "cumExecQty": "0.10", "cumExecValue": "10.0"},
             {"orderStatus": "Cancelled", "cumExecQty": "0.10", "cumExecValue": "10.0"},
+            {"orderStatus": "Filled", "cumExecQty": "0.16", "cumExecValue": "16.0"},
         ]
         self._run("Buy", quote_usdt=26.0)
         self.assertEqual([b["orderType"] for b in self.bodies], ["Limit", "Market"])
         self.assertAlmostEqual(float(self.bodies[1]["qty"]), 16.0, places=2)
 
     def test_unfilled_limit_falls_back_to_market(self):
-        self.states = [{"orderStatus": "Cancelled", "cumExecQty": "0", "cumExecValue": "0"}]
+        self.states = [
+            {"orderStatus": "Cancelled", "cumExecQty": "0", "cumExecValue": "0"},
+            {"orderStatus": "Filled", "cumExecQty": "0.26", "cumExecValue": "26.0"},
+        ]
         self._run("Sell", base_qty=0.26, price=100.0)
         self.assertEqual([b["orderType"] for b in self.bodies], ["Limit", "Market"])
         self.assertEqual(self.bodies[0]["price"], "100.01")  # продажа округляется вверх
         self.assertAlmostEqual(float(self.bodies[1]["qty"]), 0.26, places=4)
 
     def test_voice_order_stays_market(self):
+        self.states = [{"orderStatus": "Filled", "cumExecQty": "0.26", "cumExecValue": "26.0"}]
         with patch.object(self.skill, "_signed", side_effect=self._signed):
             self.skill._place_order("DOGE", "Buy", quote_usdt=26.0)
         self.assertEqual([b["orderType"] for b in self.bodies], ["Market"])
 
+    def test_unfilled_market_is_not_a_trade(self):
+        self.states = [{"orderStatus": "Cancelled", "cumExecQty": "0", "cumExecValue": "0"}]
+        with patch.object(self.skill, "_signed", side_effect=self._signed):
+            with self.assertRaises(RuntimeError):
+                self.skill._place_order("DOGE", "Buy", quote_usdt=26.0)
+        self.skill._journal_trade.assert_not_called()
+
     def test_maker_disabled_by_env(self):
+        self.states = [{"orderStatus": "Filled", "cumExecQty": "0.26", "cumExecValue": "26.0"}]
         with patch.dict(os.environ, {"CRYPTO_MAKER_ORDERS": "off"}):
             self._run("Buy", quote_usdt=26.0)
         self.assertEqual([b["orderType"] for b in self.bodies], ["Market"])
