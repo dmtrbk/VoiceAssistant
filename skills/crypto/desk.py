@@ -65,6 +65,7 @@ from .desk_policy import (
     probe_quote,
     probe_shelf_setup,
     probe_trends_ok,
+    pocket_dip_held,
     pocket_swing,
     update_pocket_swing_arm,
     POCKET_SWING_BARS,
@@ -691,6 +692,14 @@ class CryptoDeskMixin:
         if len(bars) < 4:
             return False, None
         return True, pocket_swing(bars)
+
+    def _pocket_dip_held(self, ticker: str, low: float) -> bool:
+        try:
+            bars = self._probe_bars(ticker, "15", POCKET_SWING_BARS + 2)
+        except Exception as exc:
+            logger.info("[Крипта] карман %s свечи: %s", ticker, exc)
+            return False
+        return pocket_dip_held(bars, low)
 
     def _swing_pocket_arm(
         self,
@@ -1488,6 +1497,13 @@ class CryptoDeskMixin:
         arms_now = read_entry_arms()
         arm = arms_now.get("ava" if sui else "pocket")
         if not pocket_bounce_ready(arm, price=price, now=time.time()):
+            return None
+        if not self._pocket_dip_held(ticker, float(arm["low"])):
+            logger.info(
+                "[Крипта] карман %s жду закрытую свечу после дна %.4g",
+                ticker,
+                float(arm["low"]),
+            )
             return None
         budget = sui_dip_quote() if sui else btc_dip_quote(equity)
         free_cash, _held_now = self._cash_and_held()

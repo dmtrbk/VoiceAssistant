@@ -525,6 +525,30 @@ def pocket_bounce_ready(
     return px >= low * (1.0 + limits.pocket_bounce_pct / 100.0) - 1e-12
 
 
+def pocket_dip_held(bars: list[dict[str, Any]], low: float) -> bool:
+    """Дно уже в закрытой свече, и следующая 15м закрылась, не обновив его.
+
+    bars — от старых к новым, последняя свеча может быть открытой.
+    """
+    if len(bars) < 3 or float(low or 0) <= 0:
+        return False
+    try:
+        floor = float(low)
+        if float(bars[-1].get("low") or 0) <= floor:
+            return False
+        closed = bars[:-1]
+        idx = None
+        for i in range(len(closed) - 1, -1, -1):
+            if float(closed[i].get("low") or 0) <= floor:
+                idx = i
+                break
+        if idx is None or idx + 1 >= len(closed):
+            return False
+        return float(closed[idx + 1].get("low") or 0) > floor
+    except (TypeError, ValueError):
+        return False
+
+
 def pocket_swing(bars: list[dict[str, Any]], *, pullback_pct: float = POCKET_SWING_PCT) -> float | None:
     """Дно отката, если цена хотя бы на pullback_pct ниже верха последних 4 часов.
 

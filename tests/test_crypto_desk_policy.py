@@ -570,6 +570,29 @@ class TestDeskPolicy(unittest.TestCase):
             "дно",
         )
         self.assertIsNone(policy.btc_dip_exit_reason(price=1.02, entry=1.0, swing_low=0.99))
+        fresh = [
+            {"high": 1.05, "low": 0.99, "close": 1.00, "volume": 1.0},
+            {"high": 1.02, "low": 1.00, "close": 1.01, "volume": 1.0},
+        ]
+        self.assertFalse(policy.pocket_dip_held(fresh, 0.99))
+        waiting = [
+            {"high": 1.08, "low": 1.05, "close": 1.06, "volume": 1.0},
+            {"high": 1.05, "low": 0.99, "close": 1.00, "volume": 1.0},
+            {"high": 1.03, "low": 1.01, "close": 1.02, "volume": 1.0},
+        ]
+        self.assertFalse(policy.pocket_dip_held(waiting, 0.99))
+        held = [
+            {"high": 1.05, "low": 0.99, "close": 1.00, "volume": 1.0},
+            {"high": 1.03, "low": 1.00, "close": 1.01, "volume": 1.0},
+            {"high": 1.04, "low": 1.01, "close": 1.02, "volume": 1.0},
+        ]
+        self.assertTrue(policy.pocket_dip_held(held, 0.99))
+        undercut = [
+            {"high": 1.05, "low": 0.99, "close": 1.00, "volume": 1.0},
+            {"high": 1.02, "low": 0.98, "close": 1.00, "volume": 1.0},
+            {"high": 1.03, "low": 1.00, "close": 1.01, "volume": 1.0},
+        ]
+        self.assertFalse(policy.pocket_dip_held(undercut, 0.99))
         self.assertEqual(policy.alt_slot_pct(), 25.0)
         self.assertAlmostEqual(policy.btc_dip_quote(1000.0), 250.0)
         self.assertEqual(policy.sui_dip_quote(), 50.0)
@@ -1225,8 +1248,15 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             placed.append((ticker, side, quote_usdt))
             return f"ok {ticker}"
 
+        held_bars = [
+            {"high": 1.2, "low": 1.05, "close": 1.1, "volume": 1.0},
+            {"high": 1.1, "low": 1.0, "close": 1.02, "volume": 1.0},
+            {"high": 1.08, "low": 1.01, "close": 1.04, "volume": 1.0},
+            {"high": 1.05, "low": 1.012, "close": 1.01, "volume": 1.0},
+        ]
         with (
             patch.object(self.skill, "_place_order", side_effect=place),
+            patch.object(self.skill, "_probe_bars", return_value=held_bars),
             patch.object(
                 self.skill,
                 "_cash_and_held",
