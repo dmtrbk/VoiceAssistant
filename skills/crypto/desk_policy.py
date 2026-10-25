@@ -542,7 +542,8 @@ def pocket_dip_held(bars: list[dict[str, Any]], low: float) -> bool:
             if float(closed[i].get("low") or 0) <= floor:
                 idx = i
                 break
-        if idx is None or idx + 1 >= len(closed):
+        # Подтверждение — именно последняя закрытая свеча. Часовой давности откат уже отыгран.
+        if idx is None or idx + 1 != len(closed) - 1:
             return False
         return float(closed[idx + 1].get("low") or 0) > floor
     except (TypeError, ValueError):
