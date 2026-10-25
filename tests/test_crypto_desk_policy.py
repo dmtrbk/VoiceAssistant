@@ -196,6 +196,8 @@ class TestDeskPolicy(unittest.TestCase):
     def test_alt_exit_reason(self):
         self.assertEqual(policy.alt_exit_reason(price=93.0, entry=100.0), "стоп")
         self.assertIsNone(policy.alt_exit_reason(price=95.0, entry=100.0))
+        self.assertEqual(policy.alt_exit_reason(price=97.0, entry=100.0, swing_low=98.0), "дно")
+        self.assertIsNone(policy.alt_exit_reason(price=99.0, entry=100.0, swing_low=98.0))
         self.assertIsNone(policy.alt_exit_reason(price=102.0, entry=100.0, ma=101.0))
         armed = policy.update_alt_exit_arm(None, price=103.0, entry=100.0, now=10.0)
         self.assertAlmostEqual(armed["high"], 103.0)
@@ -526,6 +528,17 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(
             policy.probe_exit_reason(price=1.0, entry=1.05, shelf=1.0, trend15="bull"),
             "полка",
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=1.04, entry=1.05, shelf=1.0, trend15="bull", entry_low=1.04
+            ),
+            "дно",
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.04, entry=1.0, shelf=0.5, trend15="bull", entry_low=1.05, peak=1.07
+            )
         )
         self.assertEqual(
             policy.probe_exit_reason(price=0.96, entry=1.05, shelf=0.5, trend15="bull"),
@@ -1480,9 +1493,15 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         aged = read_entry_arms()
         aged["alts"]["LINK"]["ts"] = time.time() - policy.ALT_ENTRY_HOLD_SEC - 5
         write_entry_arms(aged["alts"], aged.get("pocket"))
-        placed, result, state = self._watch_alt(
-            price=18.3, entry=0.0, alloc={"BTC": 40.0}, positions=[], cash=400.0
-        )
+        held_bars = [
+            {"high": 19.0, "low": 18.0, "close": 18.2, "volume": 1.0},
+            {"high": 18.8, "low": 18.2, "close": 18.4, "volume": 1.0},
+            {"high": 18.6, "low": 18.25, "close": 18.3, "volume": 1.0},
+        ]
+        with patch.object(self.skill, "_probe_bars", return_value=held_bars):
+            placed, result, state = self._watch_alt(
+                price=18.3, entry=0.0, alloc={"BTC": 40.0}, positions=[], cash=400.0
+            )
         buys = [(t, q) for t, side, _b, q in placed if side == "Buy"]
         self.assertEqual([t for t, _q in buys], ["LINK"], result)
         self.assertAlmostEqual(buys[0][1], 100.0, places=1)

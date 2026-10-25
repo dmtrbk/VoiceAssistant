@@ -504,6 +504,8 @@ def write_sleeve_exits(arms: dict[str, dict[str, float]], path: str | None = Non
         "sleeve_exits": clean,
         "ts": time.time(),
     }
+    if isinstance(prev.get("sleeve_lows"), dict):
+        payload["sleeve_lows"] = prev["sleeve_lows"]
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:
@@ -515,6 +517,52 @@ def write_sleeve_exits(arms: dict[str, dict[str, float]], path: str | None = Non
             os.remove(tmp_path)
         except OSError:
             pass
+
+
+def read_sleeve_lows(path: str | None = None) -> dict[str, float]:
+    """Дно входа рукава: под него продаём, пока −7% не настал."""
+    path = path or _TRAIL_PATH
+    raw = _read_trail_payload(path).get("sleeve_lows")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key, value in raw.items():
+        ticker = _normalize_ticker(str(key))
+        try:
+            low = float(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if ticker and low > 0:
+            out[ticker] = low
+    return out
+
+
+def write_sleeve_lows(lows: dict[str, float], path: str | None = None) -> None:
+    path = path or _TRAIL_PATH
+    prev = _read_trail_payload(path)
+    clean: dict[str, float] = {}
+    for key, value in (lows or {}).items():
+        ticker = _normalize_ticker(str(key))
+        try:
+            low = float(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if ticker and low > 0:
+            clean[ticker] = low
+    payload: dict[str, Any] = {
+        "legs": prev.get("legs") if isinstance(prev.get("legs"), dict) else {},
+        "sleeve_lows": clean,
+        "ts": time.time(),
+    }
+    if isinstance(prev.get("sleeve_exits"), dict):
+        payload["sleeve_exits"] = prev["sleeve_exits"]
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал дно рукава: %s", exc)
 
 
 def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
@@ -608,6 +656,7 @@ def _empty_probe() -> dict[str, Any]:
         "arm_ts": 0.0,
         "arm_px": 0.0,
         "peak": 0.0,
+        "low": 0.0,
     }
 
 
@@ -627,7 +676,7 @@ def read_probe(path: str | None = None) -> dict[str, Any]:
     out = _empty_probe()
     out["ticker"] = _normalize_ticker(str(raw.get("ticker") or ""))
     out["arm_ticker"] = _normalize_ticker(str(raw.get("arm_ticker") or ""))
-    for key in ("qty", "entry", "shelf", "arm_shelf", "arm_ts", "arm_px", "peak"):
+    for key in ("qty", "entry", "shelf", "arm_shelf", "arm_ts", "arm_px", "peak", "low"):
         try:
             out[key] = float(raw.get(key) or 0)
         except (TypeError, ValueError):
@@ -638,6 +687,7 @@ def read_probe(path: str | None = None) -> dict[str, Any]:
         out["entry"] = 0.0
         out["shelf"] = 0.0
         out["peak"] = 0.0
+        out["low"] = 0.0
     if out["arm_shelf"] <= 0:
         out["arm_ticker"] = ""
         out["arm_shelf"] = 0.0
@@ -658,6 +708,7 @@ def write_probe(
     arm_ts: float = 0.0,
     arm_px: float = 0.0,
     peak: float = 0.0,
+    low: float = 0.0,
     path: str | None = None,
 ) -> None:
     path = path or _PROBE_PATH
@@ -670,6 +721,8 @@ def write_probe(
         payload["peak"] = float(peak or 0)
         if float(arm_px or 0) > 0:
             payload["arm_px"] = float(arm_px)
+        if float(low or 0) > 0:
+            payload["low"] = float(low)
     if float(arm_shelf) > 0 and _normalize_ticker(arm_ticker):
         payload["arm_ticker"] = _normalize_ticker(arm_ticker)
         payload["arm_shelf"] = float(arm_shelf)
@@ -847,6 +900,8 @@ def write_trail_state(
     payload: dict[str, Any] = {"legs": clean, "ts": time.time()}
     if isinstance(prev.get("sleeve_exits"), dict):
         payload["sleeve_exits"] = prev["sleeve_exits"]
+    if isinstance(prev.get("sleeve_lows"), dict):
+        payload["sleeve_lows"] = prev["sleeve_lows"]
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:

@@ -28,6 +28,7 @@ from .common import (
     read_entry_arms,
     read_probe,
     read_sleeve_exits,
+    read_sleeve_lows,
     read_sui_dip,
     read_trail_state,
     write_alloc_state,
@@ -36,6 +37,7 @@ from .common import (
     write_entry_arms,
     write_probe,
     write_sleeve_exits,
+    write_sleeve_lows,
     write_sui_dip,
     write_trail_state,
 )
@@ -852,12 +854,50 @@ class CryptoDeskMixin:
         else:
             alts[ticker] = updated
         write_entry_arms(alts, arms.get("pocket"))
-        return alt_bounce_ready(
+        ready = alt_bounce_ready(
             updated,
             price=float(price or 0),
             z=None if z is None else float(z),
             now=time.time(),
         )
+        if not ready:
+            return False
+        low = float((updated or {}).get("low") or 0)
+        if low > 0 and self._pocket_dip_held(ticker, low):
+            return True
+        if low > 0:
+            logger.info("[Крипта] альт %s жду закрытую свечу после дна %.4g", ticker, low)
+        return False
+
+    def _sleeve_dip_ready(
+        self,
+        ticker: str,
+        state: dict[str, Any] | None,
+        price: float,
+        z: float | None,
+        now: float,
+    ) -> bool:
+        if not alt_bounce_ready(state, price=price, z=z, now=now):
+            return False
+        low = float((state or {}).get("low") or 0)
+        if low > 0 and self._pocket_dip_held(ticker, low):
+            return True
+        if low > 0:
+            logger.info("[Крипта] альт %s жду закрытую свечу после дна %.4g", ticker, low)
+        return False
+
+    def _save_sleeve_low(self, ticker: str, low: float) -> None:
+        if float(low or 0) <= 0:
+            return
+        lows = read_sleeve_lows()
+        lows[str(ticker).upper()] = float(low)
+        write_sleeve_lows(lows)
+
+    def _drop_sleeve_low(self, ticker: str) -> None:
+        lows = read_sleeve_lows()
+        if lows.pop(str(ticker).upper(), None) is None:
+            return
+        write_sleeve_lows(lows)
 
     def _gather_map(self, fn: Callable[[str], Any], keys: set[str] | list[str], *, label: str) -> dict[str, Any]:
         items = [str(key) for key in keys]
@@ -1118,7 +1158,11 @@ class CryptoDeskMixin:
             if exit_state:
                 kept_exits[ticker] = exit_state
             reason = alt_exit_reason(
-                price=price, entry=entry, exit_arm=exit_state, now=exit_now
+                price=price,
+                entry=entry,
+                exit_arm=exit_state,
+                now=exit_now,
+                swing_low=float(read_sleeve_lows().get(ticker) or 0),
             )
             if not reason:
                 if exit_state and price > 0 and entry > 0:
@@ -1163,6 +1207,7 @@ class CryptoDeskMixin:
             trail_sold.add(ticker)
             new_trail.pop(ticker, None)
             kept_exits.pop(ticker, None)
+            self._drop_sleeve_low(ticker)
             self._drop_anchor(ticker)
             target_alloc.pop(ticker, None)
             target_values[ticker] = 0.0
@@ -1204,11 +1249,12 @@ class CryptoDeskMixin:
                 if t not in taken
                 and t not in blocked
                 and t not in excluded
-                and alt_bounce_ready(
+                and self._sleeve_dip_ready(
+                    t,
                     state,
-                    price=float(prices.get(t) or 0),
-                    z=(bands_for(t) or {}).get("z"),
-                    now=time.time(),
+                    float(prices.get(t) or 0),
+                    (bands_for(t) or {}).get("z"),
+                    time.time(),
                 )
             ]
             ready.sort(key=lambda t: float((bands_for(t) or {}).get("z") or 0))
@@ -1232,11 +1278,12 @@ class CryptoDeskMixin:
                     continue
                 need = target_values.get(ticker, 0) - current_values.get(ticker, 0)
                 is_alt = ticker in sleeve_names()
-                bounced = is_alt and alt_bounce_ready(
+                bounced = is_alt and self._sleeve_dip_ready(
+                    ticker,
                     alt_arms.get(ticker),
-                    price=float(prices.get(ticker) or 0),
-                    z=(bands_for(ticker) or {}).get("z"),
-                    now=time.time(),
+                    float(prices.get(ticker) or 0),
+                    (bands_for(ticker) or {}).get("z"),
+                    time.time(),
                 )
                 if not should_watch_dip_buy(
                     ticker=ticker,
@@ -1260,7 +1307,9 @@ class CryptoDeskMixin:
                 if quote < _MIN_QUOTE:
                     continue
                 try:
+                    low = float((alt_arms.get(ticker) or {}).get("low") or 0)
                     parts.append(self._place_order(ticker, "Buy", quote_usdt=quote, maker=True))
+                    self._save_sleeve_low(ticker, low)
                     cash -= quote
                     alt_arms.pop(ticker, None)
                     time.sleep(0.4)
@@ -1670,7 +1719,9 @@ class CryptoDeskMixin:
                 logger.info("[Крипта] %s жду отскок от нижней полосы — покупку отложил", ticker)
                 continue
             try:
+                low = float((read_entry_arms()["alts"].get(ticker) or {}).get("low") or 0)
                 parts.append(self._place_order(ticker, "Buy", quote_usdt=quote, maker=True))
+                self._save_sleeve_low(ticker, low)
                 cash -= quote
                 time.sleep(0.4)
             except Exception as exc:
@@ -1789,6 +1840,7 @@ class CryptoDeskMixin:
                 shelf=float(state.get("shelf") or 0),
                 arm_px=float(state.get("arm_px") or 0),
                 peak=peak,
+                low=float(state.get("low") or 0),
             )
         reason = probe_exit_reason(
             price=price,
@@ -1797,6 +1849,7 @@ class CryptoDeskMixin:
             trend15=trend,
             arm_px=float(state.get("arm_px") or 0),
             peak=peak,
+            entry_low=float(state.get("low") or 0),
         )
         if not reason:
             return
@@ -1826,6 +1879,7 @@ class CryptoDeskMixin:
                 shelf=float(state.get("shelf") or 0),
                 arm_px=float(state.get("arm_px") or 0),
                 peak=float(state.get("peak") or 0),
+                low=float(state.get("low") or 0),
             )
             logger.info("[Крипта] щуп %s ещё %.6g монет после неполной продажи", ticker, left)
             return
@@ -1877,9 +1931,22 @@ class CryptoDeskMixin:
                 trend,
             )
             return
-        self._probe_buy(ticker, shelf, price, arm_px=float(state.get("arm_px") or price))
+        self._probe_buy(
+            ticker,
+            shelf,
+            price,
+            arm_px=float(state.get("arm_px") or price),
+            entry_low=float(bars[-1].get("low") or 0) if bars else 0.0,
+        )
 
-    def _probe_buy(self, ticker: str, shelf: float, price: float, arm_px: float = 0.0) -> None:
+    def _probe_buy(
+        self,
+        ticker: str,
+        shelf: float,
+        price: float,
+        arm_px: float = 0.0,
+        entry_low: float = 0.0,
+    ) -> None:
         free_cash, held_now = self._cash_and_held()
         quote = min(probe_quote(), free_cash * common._BUY_CASH_BUFFER)
         if quote < probe_quote() * 0.9:
@@ -1899,6 +1966,7 @@ class CryptoDeskMixin:
             shelf=shelf,
             arm_px=arm_px or price,
             peak=price,
+            low=entry_low,
         )
         logger.info("[Крипта] щуп %s: купил на %.0f$ над полкой %.4g", ticker, quote, shelf)
 

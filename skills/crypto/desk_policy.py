@@ -385,6 +385,7 @@ def probe_exit_reason(
     trend15: str,
     arm_px: float = 0.0,
     peak: float = 0.0,
+    entry_low: float = 0.0,
 ) -> str | None:
     """Маленький ход режется возвратом к цене ожидания. Уехавший — медвежьим 15м."""
     px = float(price or 0)
@@ -399,6 +400,8 @@ def probe_exit_reason(
         return "полка"
     high = max(float(peak or 0), px)
     run = high >= ent * (1.0 + PROBE_RUN_PCT / 100.0)
+    if not run and float(entry_low or 0) > 0 and px <= float(entry_low):
+        return "дно"
     scratch = float(arm_px or 0) or ent
     if not run and scratch > 0 and px <= scratch:
         return "ожидание"
@@ -715,8 +718,9 @@ def alt_exit_reason(
     exit_arm: dict[str, Any] | None = None,
     now: float | None = None,
     ma: float | None = None,
+    swing_low: float = 0.0,
 ) -> str | None:
-    """Выход альта целиком: стоп −7% сразу или откат от вершины. Средняя не продаёт."""
+    """Выход альта: стоп −7% на дыре, обычный срыв — возврат под дно входа, плюс — откат от вершины."""
     del ma
     px = float(price or 0)
     ent = float(entry or 0)
@@ -726,6 +730,8 @@ def alt_exit_reason(
     # Ровно −7% в float чуть больше порога — иначе стоп молчит.
     if gain <= -cfg().sleeve_stop_pct + 1e-6:
         return "стоп"
+    if float(swing_low or 0) > 0 and px <= float(swing_low):
+        return "дно"
     if alt_exit_ready(exit_arm, price=px, entry=ent, now=now):
         return "вершина"
     return None

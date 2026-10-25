@@ -327,7 +327,7 @@ QSpinBox, QDoubleSpinBox {{
         self._add_spin(col, "sleeve_max_names", "Слоты", "", 1, 6, 1, 0, "Не больше стольких ног сразу. Список монет стол считает сам.")
         self._add_spin(col, "sleeve_entry_z", "Вход, z", "", -4, -1, 0.1, 1, "Покупка у нижней полосы, когда z не выше этого порога.")
         self._add_spin(col, "sleeve_bounce_pct", "Отскок входа", "%", 0.3, 5, 0.1, 1, "Отскок от дна. Пауза, z ещё не у средней.")
-        self._add_spin(col, "sleeve_stop_pct", "Стоп", "%", 3, 20, 0.5, 1, "Стоп ноги рукава от цены входа.")
+        self._add_spin(col, "sleeve_stop_pct", "Стоп", "%", 3, 20, 0.5, 1, "Запасной стоп на дыре. Обычный срыв рукава — возврат под дно входа.")
         col.addStretch(1)
         return card
 
@@ -353,7 +353,7 @@ QSpinBox, QDoubleSpinBox {{
         fields.setContentsMargins(0, 0, 0, 0)
         fields.setSpacing(0)
         self._add_spin(fields, "probe_usd", "Размер", "$", 10, 100, 5, 0, "Фиксированные доллары. Не слот рукава и не карман.")
-        self._add_spin(fields, "probe_max_loss_pct", "Макс. убыток", "%", 3, 20, 0.5, 1, "Выход, если минус от входа достиг порога.")
+        self._add_spin(fields, "probe_max_loss_pct", "Макс. убыток", "%", 3, 20, 0.5, 1, "Запасной стоп на дыре. До хода +6% щуп также выходит под минимум свечи входа.")
         self._add_spin(fields, "probe_shelf_range_pct", "Полка, ширина", "%", 4, 25, 1, 0, "Диапазон полки не шире этого, иначе сетап не считается.")
         self._add_spin(fields, "probe_break_min_pct", "Пробой от", "%", 1, 10, 0.5, 1, "Цена должна выйти из полки хотя бы на этот процент.")
         self._add_spin(fields, "probe_break_max_pct", "Пробой до", "%", 6, 25, 0.5, 1, "Выше этого — уже не полка, а разогнанный памп.")
