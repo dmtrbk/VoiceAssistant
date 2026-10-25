@@ -13,11 +13,15 @@ _ID_PATH = os.path.join(_PROJECT_DIR, "cursor_telegram_agent.json")
 _MODEL = (os.getenv("CURSOR_MODEL") or "composer-2.5").strip() or "composer-2.5"
 _MAX_CHARS = 4000
 
-_FIRST = (
-    "Ты отвечаешь хозяину в Telegram. Пиши по-русски, коротко, как сообщение в чат. "
-    "Репозиторий — этот проект. Если просят изменить код — меняй. "
-    "Если это вопрос или разговор — ответь текстом и не трогай файлы.\n\n"
-)
+def _first_prompt() -> str:
+    from robotics_laws import prompt_block
+
+    return (
+        f"{prompt_block()}\n\n"
+        "Ты отвечаешь хозяину в Telegram. Пиши по-русски, коротко, как сообщение в чат. "
+        "Репозиторий — этот проект. Если просят изменить код — меняй. "
+        "Если это вопрос или разговор — ответь текстом и не трогай файлы.\n\n"
+    )
 
 
 def _api_key() -> str:
@@ -101,7 +105,8 @@ def ask_cursor(text: str) -> str:
     from cursor_sdk import CursorAgentError
 
     agent_id = _load_agent_id()
-    prompt = (_FIRST + clean) if not agent_id else clean
+    first = _first_prompt()
+    prompt = (first + clean) if not agent_id else clean
     try:
         reply = _once(prompt, key, agent_id)
     except CursorAgentError as exc:
@@ -110,7 +115,7 @@ def ask_cursor(text: str) -> str:
             return "Cursor не ответил."
         _forget_agent_id()
         try:
-            reply = _once(_FIRST + clean, key, "")
+            reply = _once(first + clean, key, "")
         except CursorAgentError:
             return "Cursor не ответил."
         except Exception as exc:

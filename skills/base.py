@@ -1,4 +1,5 @@
 # skills/base.py
+# Навыки подчиняются robotics_laws.py (0 > 1 > 2 > 3): хозяин и его приказы, без вреда человеку.
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional

@@ -112,7 +112,10 @@ class TestPersona(unittest.TestCase):
             tmp_path = f.name
         try:
             prompt = get_preset_prompt(PERSONA_CUSTOM, custom_file_path=tmp_path)
-            self.assertEqual(prompt, "Специальный тестовый промпт пользователя.")
+            self.assertIn("Специальный тестовый промпт пользователя.", prompt)
+            from robotics_laws import LAW_0
+
+            self.assertIn(LAW_0, prompt)
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)

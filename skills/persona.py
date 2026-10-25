@@ -259,6 +259,8 @@ def get_persona_hint(preset_id: str) -> str:
 
 def get_preset_prompt(preset_id: str, custom_file_path: str | None = None) -> str:
     """Генерирует полный системный промпт для указанного пресета."""
+    from robotics_laws import prepend_to_prompt
+
     pid = normalize_persona_preset(preset_id)
 
     if pid == PERSONA_CUSTOM and custom_file_path and os.path.exists(custom_file_path):
@@ -267,13 +269,13 @@ def get_preset_prompt(preset_id: str, custom_file_path: str | None = None) -> st
                 data = json.load(f)
                 custom_prompt = (data.get("persona_prompt") or "").strip()
                 if custom_prompt:
-                    return custom_prompt
+                    return prepend_to_prompt(custom_prompt)
         except Exception as exc:
             logging.warning("[Persona] Ошибка чтения пользовательского промпта %s: %s", custom_file_path, exc)
 
     core = _CORE_MAP.get(pid, _JARVIS_CORE)
     env = _BASE_ENVIRONMENT_AND_CAPS.replace("{self_lore}", self_lore_for_prompt())
-    return f"{core}\n\n{_BASE_GENDER_AND_AUDIO}\n\n{env}"
+    return prepend_to_prompt(f"{core}\n\n{_BASE_GENDER_AND_AUDIO}\n\n{env}")
 
 
 def get_effective_persona_prompt(custom_file_path: str | None = None) -> str:

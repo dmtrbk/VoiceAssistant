@@ -1,5 +1,6 @@
 # skills/crypto/desk_policy.py
 # Правила автостола: режим рынка, скоринг, коридор, фильтры. Без сети и Groq.
+# Каркас этики: robotics_laws.py — приказы хозяина (настройки/.env), без вреда человеку, беречь стол.
 
 from __future__ import annotations
 

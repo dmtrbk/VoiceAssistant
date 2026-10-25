@@ -239,7 +239,9 @@ class AIChatSkill(BaseSkill):
             self.persona_prompt = get_effective_persona_prompt(self.persona_config_path)
         except Exception as exc:
             logging.warning("[Groq] Ошибка загрузки пресета характера: %s", exc)
-            default_persona = (
+            from robotics_laws import prepend_to_prompt
+
+            default_persona = prepend_to_prompt(
                 "Ты — Джарвис, мужчина, голосовой помощник. О себе только мужской род: "
                 "понял, рад, сделал, готов, согласен, уверен, должен. "
                 "Никогда не говори о себе в женском роде: не поняла, не рада, не готова, не сделала.\n\n"
