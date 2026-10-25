@@ -429,9 +429,13 @@ class TestDeskPolicy(unittest.TestCase):
             {"ticker": "RLUSD", "turnover": 20_000_000},
             {"ticker": "BTCUP", "turnover": 20_000_000},
             {"ticker": "PUMP", "turnover": 8_000_000},
+            {"ticker": "SUI", "turnover": 20_000_000},
             {"ticker": "SOL", "turnover": 1_000_000},
         ])
         self.assertIn("HYPE", names)
+        self.assertIn("SUI", names)
+        self.assertIn("AVA", policy.DESK_ALT_SLEEVE)
+        self.assertIn("SUI", policy.DESK_ALT_SLEEVE)
         self.assertIn("DOOD", names)
         self.assertIn("PUMP", names)
         self.assertIn("SOL", names)
@@ -1183,7 +1187,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(
                 self.skill,
                 "_cash_and_held",
-                return_value=(80.0, {"SUI": {"qty": 40.0, "value": 50.0, "price": 1.01}}),
+                return_value=(80.0, {"AVA": {"qty": 40.0, "value": 50.0, "price": 1.01}}),
             ),
         ):
             phrase = self.skill._trade_btc_dip(
@@ -1195,11 +1199,11 @@ class TestDeskAutoUsesScore(unittest.TestCase):
                 ticker=policy.SUI_DIP_TICKER,
             )
         self.assertIn("ok", phrase or "")
-        self.assertEqual(placed, [("SUI", "Buy", 50.0)])
+        self.assertEqual(placed, [("AVA", "Buy", 50.0)])
         self.assertAlmostEqual(read_sui_dip()["qty"], 40.0)
         self.assertAlmostEqual(read_btc_dip()["qty"], 0.2)
         arms = read_entry_arms()
-        self.assertIsNone(arms.get("sui"))
+        self.assertIsNone(arms.get("ava"))
         self.assertIsNotNone(arms.get("pocket"))
 
     def test_rebalance_sells_sui_sleeve_keeps_pocket(self):
@@ -1218,7 +1222,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
                 "_wallet",
                 return_value=(
                     200.0,
-                    [{"ticker": "SUI", "qty": 90.0, "value": 90.0, "price": 1.0, "name": "Суи"}],
+                    [{"ticker": "AVA", "qty": 90.0, "value": 90.0, "price": 1.0, "name": "Ава"}],
                 ),
             ),
             patch.object(self.skill, "_cash_and_held", return_value=(200.0, {})),
@@ -1228,9 +1232,9 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch("skills.crypto.desk.time.sleep"),
         ):
             self.skill._desk_bought_ready = True
-            self.skill._desk_bought = {"SUI"}
+            self.skill._desk_bought = {"AVA"}
             self.skill._rebalance({}, respect_hold=False)
-        self.assertEqual(placed, [("SUI", "Sell", 50.0)])
+        self.assertEqual(placed, [("AVA", "Sell", 50.0)])
         self.assertAlmostEqual(read_sui_dip()["qty"], 40.0)
 
     def test_probe_buys_thirty_then_exits_under_shelf(self):

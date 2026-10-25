@@ -52,7 +52,7 @@ _ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_alloc.json")
 _TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trail.json")
 _EARN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_earn.json")
 _BTC_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_btc_dip.json")
-_SUI_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_sui_dip.json")
+_SUI_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_ava_dip.json")
 _PROBE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe.json")
 _ENTRY_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_entry_arm.json")
 _ANCHOR_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_anchor.json")
@@ -698,7 +698,7 @@ def write_sui_dip(
 def read_entry_arms(path: str | None = None) -> dict[str, Any]:
     """Ожидание отскока: дно альта или кармана, пока заявку не ставим."""
     path = path or _ENTRY_ARM_PATH
-    empty: dict[str, Any] = {"alts": {}, "pocket": None, "sui": None}
+    empty: dict[str, Any] = {"alts": {}, "pocket": None, "ava": None}
     if not os.path.isfile(path):
         return empty
     try:
@@ -722,8 +722,8 @@ def read_entry_arms(path: str | None = None) -> dict[str, Any]:
             continue
         alts[ticker] = {"low": low, "ts": ts}
     pocket = _parse_low_arm(raw.get("pocket"))
-    sui = _parse_low_arm(raw.get("sui"))
-    return {"alts": alts, "pocket": pocket, "sui": sui}
+    ava = _parse_low_arm(raw.get("ava"))
+    return {"alts": alts, "pocket": pocket, "ava": ava}
 
 
 _KEEP_SUI = object()
@@ -744,7 +744,7 @@ def write_entry_arms(
                 prev = json.load(handle)
         except Exception:
             prev = {}
-        sui = _parse_low_arm(prev.get("sui") if isinstance(prev, dict) else None)
+        sui = _parse_low_arm(prev.get("ava") if isinstance(prev, dict) else None)
     elif not sui:
         sui = None
     clean: dict[str, dict[str, float]] = {}
@@ -763,7 +763,7 @@ def write_entry_arms(
     if pocket and float(pocket.get("low") or 0) > 0:
         payload["pocket"] = {"low": float(pocket["low"]), "ts": float(pocket.get("ts") or 0)}
     if isinstance(sui, dict) and float(sui.get("low") or 0) > 0:
-        payload["sui"] = {"low": float(sui["low"]), "ts": float(sui.get("ts") or 0)}
+        payload["ava"] = {"low": float(sui["low"]), "ts": float(sui.get("ts") or 0)}
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:

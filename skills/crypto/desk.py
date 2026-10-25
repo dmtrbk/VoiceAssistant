@@ -624,7 +624,7 @@ class CryptoDeskMixin:
                 bounce = min(bounce, float(prev["bounce"]))
                 hold = max(hold, float(prev.get("hold") or 0))
             triggers[BTC_DIP_TICKER] = {"low": low, "bounce": bounce, "hold": hold, "ts": ts}
-        sui_arm = arms.get("sui")
+        sui_arm = arms.get("ava")
         if sui_arm:
             symbols.add(SUI_DIP_TICKER)
             prev = triggers.get(SUI_DIP_TICKER)
@@ -788,7 +788,7 @@ class CryptoDeskMixin:
                 sol_px,
                 need,
             )
-        sui_state = stored.get("sui")
+        sui_state = stored.get("ava")
         sui_px = float(prices.get(SUI_DIP_TICKER) or 0)
         if sui_state and taped.get(SUI_DIP_TICKER):
             sui_state = {
@@ -801,7 +801,7 @@ class CryptoDeskMixin:
             day_chg=day_chgs.get(SUI_DIP_TICKER),
             now=now,
         )
-        if sui and stored.get("sui") is None:
+        if sui and stored.get("ava") is None:
             logger.info(
                 "[Крипта] карман %s сутки в просадке — жду отскок %.1f%% от %.4g",
                 SUI_DIP_TICKER,
@@ -818,7 +818,7 @@ class CryptoDeskMixin:
                 need,
             )
         write_entry_arms(alts, pocket, sui=sui)
-        return {"alts": alts, "pocket": pocket, "sui": sui}
+        return {"alts": alts, "pocket": pocket, "ava": sui}
 
     def _alt_entry_ready(self, ticker: str, price: float) -> bool:
         """Полный стол не открывает альт, пока нет отскока от нижней полосы."""
@@ -1452,7 +1452,7 @@ class CryptoDeskMixin:
         if blocked or not allow_entry or not btc_dip_should_buy(day_chg=day_chg, qty=0):
             return None
         arms_now = read_entry_arms()
-        arm = arms_now.get("sui" if sui else "pocket")
+        arm = arms_now.get("ava" if sui else "pocket")
         if not pocket_bounce_ready(arm, price=price, now=time.time()):
             return None
         budget = sui_dip_quote() if sui else btc_dip_quote(equity)

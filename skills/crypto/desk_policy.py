@@ -10,7 +10,7 @@ from typing import Any
 # Берём только на провале у нижней полосы.
 DESK_ALT_SLEEVE = frozenset({
     "BTC", "ETH",
-    "SOL", "XRP", "DOGE", "LINK", "AVAX", "SUI", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
+    "SOL", "XRP", "DOGE", "LINK", "AVAX", "SUI", "AVA", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
 })
 ALT_SLEEVE_MAX_PCT = 75.0
 ALT_MAX_NAMES = 3
@@ -86,7 +86,7 @@ BTC_DIP_PCT = 25.0
 BTC_DIP_DAY_PCT = -3.0
 BTC_DIP_EXIT_PCT = 1.1
 # Второй карман: те же сутки и отскок, фиксированные 50$ вместо доли счёта.
-SUI_DIP_TICKER = "SUI"
+SUI_DIP_TICKER = "AVA"
 SUI_DIP_USD = 50.0
 # Плюс +1,1% только взводит вершину. Продажа — откат от неё, пауза короче входа.
 POCKET_EXIT_PULLBACK_PCT = 0.5
@@ -225,7 +225,7 @@ def btc_dip_quote(equity: float) -> float:
 
 
 def sui_dip_quote() -> float:
-    """Карман SUI: фиксированная сумма, не доля счёта."""
+    """Второй карман AVA: фиксированная сумма, не доля счёта."""
     return float(cfg().sui_usd)
 
 
