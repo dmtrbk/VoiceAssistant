@@ -57,6 +57,39 @@ class ThemePalette:
     on_knob: str
     scroll: str
     submenu: str
+    popover: str
+
+    def menu_stylesheet(self) -> str:
+        """Контекстное меню как в adw-gtk3: hover — 10% текста, не синий Qt."""
+        p = self
+        hover = mix_hex(p.popover, p.fg, 0.10)
+        # Чуть компактнее системного: k=0.85 от отступов и радиусов adw.
+        return f"""
+QMenu {{
+    background: {p.popover};
+    color: {p.fg};
+    border: none;
+    border-radius: 8px;
+    padding: 5px;
+    font-size: 12px;
+}}
+QMenu::item {{
+    background: transparent;
+    color: {p.fg};
+    padding: 5px 14px;
+    border-radius: 8px;
+    margin: 0;
+}}
+QMenu::item:selected {{
+    background: {hover};
+    color: {p.fg};
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {p.divider};
+    margin: 5px 3px;
+}}
+"""
 
     def stylesheet(self) -> str:
         p = self
@@ -340,6 +373,7 @@ def _from_base(window: str, fg: str, accent: str, *, dark: bool) -> ThemePalette
         off_knob = mix_hex("#ffffff", fg, 0.12)
         on_knob = "#ffffff"
         submenu = mix_hex(card, "#000000", 0.04)
+    popover = mix_hex(window, "#ffffff" if dark else "#000000", 0.14)
     return ThemePalette(
         window=window,
         card=card,
@@ -353,6 +387,7 @@ def _from_base(window: str, fg: str, accent: str, *, dark: bool) -> ThemePalette
         on_knob=on_knob,
         scroll=off_track,
         submenu=submenu,
+        popover=popover,
     )
 
 
@@ -427,6 +462,7 @@ def load_palette(
         card = header or mix_hex(window, "#ffffff" if dark else "#000000", 0.08)
 
     palette = _from_base(window, fg, accent, dark=dark)
+    popover = resolve_color(defines.get("popover_bg_color", ""), onto=window) or palette.popover
     palette = ThemePalette(
         window=window,
         card=card,
@@ -440,6 +476,7 @@ def load_palette(
         on_knob=palette.on_knob,
         scroll=palette.scroll,
         submenu=mix_hex(card, "#000000" if dark else "#ffffff", 0.08),
+        popover=popover,
     )
     result = set_active_palette(palette)
     if live:

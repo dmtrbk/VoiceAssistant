@@ -40,8 +40,12 @@ class TestThemeColors(unittest.TestCase):
         self.assertEqual(palette.accent.lower(), ADW_ACCENTS["slate"])
         self.assertRegex(palette.window.lower(), r"^#[0-9a-f]{6}$")
         self.assertNotEqual(palette.window.lower(), ADW_ACCENTS["blue"])
-        self.assertIn(palette.window, palette.stylesheet())
-        self.assertIn(palette.accent, palette.stylesheet())
+        sheet = palette.stylesheet()
+        self.assertIn(palette.window, sheet)
+        self.assertIn(palette.accent, sheet)
+        menu = palette.menu_stylesheet()
+        self.assertIn(palette.popover, menu)
+        self.assertNotIn("#3584e4", menu.lower())
 
     def test_light_fallback(self):
         palette = fallback_palette(dark=False, accent="#3584e4")

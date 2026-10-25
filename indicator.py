@@ -16,9 +16,9 @@ from PySide6.QtGui import (
     QFont,
     QFontInfo,
     QFontMetrics,
+    QGuiApplication,
     QPainter,
     QRadialGradient,
-    QGuiApplication,
 )
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
@@ -368,7 +368,11 @@ class OrbWidget(QWidget):
         request_gui_quit()
 
     def _show_context_menu(self):
+        from theme_colors import load_palette
+
+        # Как context-menu в adw-gtk3: серый hover, не синий Fusion.
         menu = QMenu(self)
+        menu.setStyleSheet(load_palette().menu_stylesheet())
         settings_action = QAction("Настройки", menu)
         settings_action.triggered.connect(self.open_settings)
         quit_action = QAction("Выход", menu)
