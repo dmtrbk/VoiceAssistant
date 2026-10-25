@@ -566,10 +566,18 @@ def read_btc_dip(path: str | None = None) -> dict[str, float]:
     try:
         exit_high = float(raw.get("exit_high") or 0)
         exit_ts = float(raw.get("exit_ts") or 0)
+        low = float(raw.get("low") or 0)
     except (TypeError, ValueError):
         exit_high = 0.0
         exit_ts = 0.0
-    return {"qty": qty, "entry": entry, "exit_high": max(exit_high, 0.0), "exit_ts": exit_ts}
+        low = 0.0
+    return {
+        "qty": qty,
+        "entry": entry,
+        "exit_high": max(exit_high, 0.0),
+        "exit_ts": exit_ts,
+        "low": max(low, 0.0),
+    }
 
 
 def _parse_low_arm(raw: Any) -> dict[str, float] | None:
@@ -691,8 +699,16 @@ def write_sui_dip(
     *,
     exit_high: float = 0.0,
     exit_ts: float = 0.0,
+    low: float = 0.0,
 ) -> None:
-    write_btc_dip(qty, entry, path or _SUI_DIP_PATH, exit_high=exit_high, exit_ts=exit_ts)
+    write_btc_dip(
+        qty,
+        entry,
+        path or _SUI_DIP_PATH,
+        exit_high=exit_high,
+        exit_ts=exit_ts,
+        low=low,
+    )
 
 
 def read_entry_arms(path: str | None = None) -> dict[str, Any]:
@@ -780,6 +796,7 @@ def write_btc_dip(
     *,
     exit_high: float = 0.0,
     exit_ts: float = 0.0,
+    low: float = 0.0,
 ) -> None:
     path = path or _BTC_DIP_PATH
     if qty <= 0 or entry <= 0:
@@ -793,6 +810,8 @@ def write_btc_dip(
     if float(exit_high or 0) > 0:
         payload["exit_high"] = float(exit_high)
         payload["exit_ts"] = float(exit_ts or 0)
+    if float(low or 0) > 0:
+        payload["low"] = float(low)
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:

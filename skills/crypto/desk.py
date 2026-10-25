@@ -65,6 +65,9 @@ from .desk_policy import (
     probe_quote,
     probe_shelf_setup,
     probe_trends_ok,
+    pocket_swing,
+    update_pocket_swing_arm,
+    POCKET_SWING_BARS,
     sui_dip_quote,
     ma_trend,
     position_basis,
@@ -73,7 +76,6 @@ from .desk_policy import (
     update_alt_exit_arm,
     alt_sleeve_qty_for_exit,
     btc_dip_exit_reason,
-    btc_dip_should_buy,
     alt_slot_pct,
     band_pct_for,
     cash_floor_pct,
@@ -87,7 +89,6 @@ from .desk_policy import (
     update_trail_leg,
     update_alt_arm,
     update_exclusions,
-    update_pocket_arm,
     update_pocket_exit_arm,
     pocket_bounce_ready,
     cfg,
@@ -520,10 +521,8 @@ class CryptoDeskMixin:
         self._bybit_tape = tape
         state = read_alloc_state() or {}
         seed = {t for t in (state.get("alloc") or {}) if t in sleeve_names()}
-        if float(read_btc_dip().get("qty") or 0) > 0:
-            seed.add(BTC_DIP_TICKER)
-        if float(read_sui_dip().get("qty") or 0) > 0:
-            seed.add(SUI_DIP_TICKER)
+        seed.add(BTC_DIP_TICKER)
+        seed.add(SUI_DIP_TICKER)
         probe = read_probe()
         if probe.get("ticker"):
             seed.add(str(probe["ticker"]))
@@ -599,6 +598,8 @@ class CryptoDeskMixin:
         pocket_open = float(read_btc_dip().get("qty") or 0) > 0
         arms = read_entry_arms()
         symbols = watch_stream_tickers(held_values=held_values, pocket_open=pocket_open)
+        symbols.add(BTC_DIP_TICKER)
+        symbols.add(SUI_DIP_TICKER)
         symbols |= set(arms["alts"])
         triggers: dict[str, dict[str, float]] = {
             ticker: {
@@ -677,6 +678,51 @@ class CryptoDeskMixin:
                 exits[SUI_DIP_TICKER] = sui_exit
         tape.set_exit_arms(exits)
         tape.set_legs([leg for leg in legs if str(leg.get("ticker") or "").upper() in symbols])
+
+    def _pocket_swing_low(self, ticker: str, day_chg: float | None) -> tuple[bool, float | None]:
+        """(False, None) — свечей нет, дно не трогаем. (True, low|None) — откат известен."""
+        if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
+            return True, None
+        try:
+            bars = self._probe_bars(ticker, "15", POCKET_SWING_BARS + 2)
+        except Exception as exc:
+            logger.info("[Крипта] карман %s свечи: %s", ticker, exc)
+            return False, None
+        if len(bars) < 4:
+            return False, None
+        return True, pocket_swing(bars)
+
+    def _swing_pocket_arm(
+        self,
+        ticker: str,
+        state: dict[str, Any] | None,
+        *,
+        price: float,
+        day_chg: float | None,
+        now: float,
+        taped: dict[str, float],
+    ) -> dict[str, float] | None:
+        if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
+            return None
+        known, swing_low = self._pocket_swing_low(ticker, day_chg)
+        if not known:
+            return state
+        if state and taped.get(ticker):
+            taped_low = float(taped[ticker])
+            if taped_low < float(state["low"]) - 1e-12:
+                state = {**state, "low": taped_low, "ts": now}
+        updated = update_pocket_swing_arm(state, price=price, swing_low=swing_low, now=now)
+        fresh = state is None or (
+            updated is not None and float(updated["low"]) < float(state.get("low") or 0) - 1e-12
+        )
+        if updated and fresh:
+            logger.info(
+                "[Крипта] карман %s откат от верха — жду отскок %.1f%% от %.4g",
+                ticker,
+                cfg().pocket_bounce_pct,
+                updated["low"],
+            )
+        return updated
 
     def _refresh_entry_arms(
         self,
@@ -759,64 +805,24 @@ class CryptoDeskMixin:
                     need,
                     float(z or 0),
                 )
-        pocket_state = stored.get("pocket")
         sol_px = float(prices.get(BTC_DIP_TICKER) or 0)
-        if pocket_state and taped.get(BTC_DIP_TICKER):
-            pocket_state = {
-                **pocket_state,
-                "low": min(float(pocket_state["low"]), float(taped[BTC_DIP_TICKER])),
-            }
-        pocket = update_pocket_arm(
-            pocket_state,
+        sui_px = float(prices.get(SUI_DIP_TICKER) or 0)
+        pocket = self._swing_pocket_arm(
+            BTC_DIP_TICKER,
+            stored.get("pocket"),
             price=sol_px,
             day_chg=day_chgs.get(BTC_DIP_TICKER),
             now=now,
+            taped=taped,
         )
-        if pocket and stored.get("pocket") is None:
-            logger.info(
-                "[Крипта] карман %s сутки в просадке — жду отскок %.1f%% от %.4g",
-                BTC_DIP_TICKER,
-                cfg().pocket_bounce_pct,
-                pocket["low"],
-            )
-        elif pocket and sol_px > 0 and not pocket_bounce_ready(pocket, price=sol_px, now=now):
-            need = pocket["low"] * (1.0 + cfg().pocket_bounce_pct / 100.0)
-            logger.info(
-                "[Крипта] карман %s жду отскок: дно %.4g сейчас %.4g нужно %.4g",
-                BTC_DIP_TICKER,
-                pocket["low"],
-                sol_px,
-                need,
-            )
-        sui_state = stored.get("ava")
-        sui_px = float(prices.get(SUI_DIP_TICKER) or 0)
-        if sui_state and taped.get(SUI_DIP_TICKER):
-            sui_state = {
-                **sui_state,
-                "low": min(float(sui_state["low"]), float(taped[SUI_DIP_TICKER])),
-            }
-        sui = update_pocket_arm(
-            sui_state,
+        sui = self._swing_pocket_arm(
+            SUI_DIP_TICKER,
+            stored.get("ava"),
             price=sui_px,
             day_chg=day_chgs.get(SUI_DIP_TICKER),
             now=now,
+            taped=taped,
         )
-        if sui and stored.get("ava") is None:
-            logger.info(
-                "[Крипта] карман %s сутки в просадке — жду отскок %.1f%% от %.4g",
-                SUI_DIP_TICKER,
-                cfg().pocket_bounce_pct,
-                sui["low"],
-            )
-        elif sui and sui_px > 0 and not pocket_bounce_ready(sui, price=sui_px, now=now):
-            need = sui["low"] * (1.0 + cfg().pocket_bounce_pct / 100.0)
-            logger.info(
-                "[Крипта] карман %s жду отскок: дно %.4g сейчас %.4g нужно %.4g",
-                SUI_DIP_TICKER,
-                sui["low"],
-                sui_px,
-                need,
-            )
         write_entry_arms(alts, pocket, sui=sui)
         return {"alts": alts, "pocket": pocket, "ava": sui}
 
@@ -1391,7 +1397,7 @@ class CryptoDeskMixin:
         allow_entry: bool = True,
         ticker: str | None = None,
     ) -> str | None:
-        """Карман SOL на долю счёта или SUI на 50$. Уже открытый не добираем."""
+        """Карман SOL на долю счёта или AVA на 50$. Уже открытый не добираем."""
         ticker = ticker or BTC_DIP_TICKER
         sui = ticker == SUI_DIP_TICKER
         load = read_sui_dip if sui else read_btc_dip
@@ -1419,8 +1425,15 @@ class CryptoDeskMixin:
                     book_entry,
                     exit_high=float(exit_state["high"]),
                     exit_ts=float(exit_state["ts"]),
+                    low=float(dip.get("low") or 0),
                 )
-            reason = btc_dip_exit_reason(price=price, entry=entry, exit_arm=exit_state, now=now)
+            reason = btc_dip_exit_reason(
+                price=price,
+                entry=entry,
+                exit_arm=exit_state,
+                now=now,
+                swing_low=float(dip.get("low") or 0),
+            )
             if not reason or price <= 0:
                 if exit_state and price > 0:
                     need = float(exit_state["high"]) * (1.0 - cfg().pocket_exit_pullback_pct / 100.0)
@@ -1449,7 +1462,9 @@ class CryptoDeskMixin:
                 price,
             )
             return phrase
-        if blocked or not allow_entry or not btc_dip_should_buy(day_chg=day_chg, qty=0):
+        if blocked or not allow_entry:
+            return None
+        if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
             return None
         arms_now = read_entry_arms()
         arm = arms_now.get("ava" if sui else "pocket")
@@ -1466,7 +1481,7 @@ class CryptoDeskMixin:
         after = float((held.get(ticker) or {}).get("qty") or 0)
         bought = after - before
         if bought > 0:
-            store(bought, quote / bought)
+            store(bought, quote / bought, low=float(arm["low"]))
             arms_now = read_entry_arms()
             if sui:
                 write_entry_arms(arms_now["alts"], arms_now.get("pocket"), sui=False)
@@ -1893,6 +1908,52 @@ class CryptoDeskMixin:
             )
             return
 
+    def _pockets_tick(self) -> None:
+        """Раз в минуту SOL и AVA: локальный откат и выход под это дно."""
+        if not getattr(self, "_api_key", ""):
+            return
+        with common._TRADE_LOCK:
+            try:
+                cash, positions_list = self._wallet()
+            except Exception as exc:
+                logger.info("[Крипта] карманы кошелёк: %s", exc)
+                return
+            positions = {item["ticker"]: item for item in positions_list}
+            equity = max(cash + sum(float(item.get("value") or 0) for item in positions_list), 1.0)
+            for ticker in (BTC_DIP_TICKER, SUI_DIP_TICKER):
+                try:
+                    quote = self._ticker(ticker)
+                except Exception as exc:
+                    logger.info("[Крипта] карман %s цена: %s", ticker, exc)
+                    continue
+                price = float(quote.get("price") or 0)
+                day = quote.get("chg")
+                arms = read_entry_arms()
+                key = "ava" if ticker == SUI_DIP_TICKER else "pocket"
+                tape = getattr(self, "_bybit_tape", None)
+                taped = tape.entry_lows() if tape is not None else {}
+                updated = self._swing_pocket_arm(
+                    ticker,
+                    arms.get(key),
+                    price=price,
+                    day_chg=None if day is None else float(day),
+                    now=time.time(),
+                    taped=taped,
+                )
+                if ticker == SUI_DIP_TICKER:
+                    write_entry_arms(arms["alts"], arms.get("pocket"), sui=updated)
+                else:
+                    write_entry_arms(arms["alts"], updated)
+                self._trade_btc_dip(
+                    day_chg=None if day is None else float(day),
+                    positions=positions,
+                    price=price,
+                    blocked=False,
+                    equity=equity,
+                    allow_entry=True,
+                    ticker=ticker,
+                )
+
     def _maybe_daily_report(self) -> None:
         if not common.telegram_configured():
             return
@@ -1979,6 +2040,10 @@ class CryptoDeskMixin:
                     self._probe_cycle()
                 except Exception as exc:
                     logger.warning("[Крипта] щуп: %s", exc)
+                try:
+                    self._pockets_tick()
+                except Exception as exc:
+                    logger.warning("[Крипта] карманы: %s", exc)
                 next_probe = time.time() + PROBE_PERIOD_SEC
         tape = getattr(self, "_bybit_tape", None)
         if tape is not None:

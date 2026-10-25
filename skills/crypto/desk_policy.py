@@ -36,6 +36,9 @@ ALT_ENTRY_STILL_Z = -1.2
 ALT_ENTRY_CANCEL_Z = -0.5
 POCKET_ENTRY_BOUNCE_PCT = 1.0
 POCKET_ENTRY_HOLD_SEC = 10 * 60
+# Карман SOL и AVA: откат от верха последних 4 часов, не только сутки −3%.
+POCKET_SWING_PCT = 3.0
+POCKET_SWING_BARS = 16
 # Живой выход рукава — ловушка вершины, не касание средней.
 # +3% взводит верх. Продажа на откате −0,5% после 5 минут, и только если плюс ещё ≥ +3%.
 # Прогон выше +8% не режем: это верх рабочей зоны, не потолок.
@@ -150,8 +153,9 @@ def btc_dip_exit_reason(
     entry: float,
     exit_arm: dict[str, Any] | None = None,
     now: float | None = None,
+    swing_low: float = 0.0,
 ) -> str | None:
-    """Стоп −15% сразу. Плюс не закрываем на пороге — только откат от вершины."""
+    """Стоп −15% на дыре. Обычный срыв — возврат под локальное дно. Плюс закрываем откатом от вершины."""
     px = float(price or 0)
     ent = float(entry or 0)
     if px <= 0 or ent <= 0:
@@ -159,6 +163,8 @@ def btc_dip_exit_reason(
     gain = (px / ent - 1.0) * 100.0
     if gain <= -cfg().pocket_stop_pct:
         return "стоп"
+    if float(swing_low or 0) > 0 and px <= float(swing_low):
+        return "дно"
     if pocket_exit_ready(exit_arm, price=px, now=now):
         return "вершина"
     return None
@@ -517,6 +523,60 @@ def pocket_bounce_ready(
     if low <= 0 or px <= 0:
         return False
     return px >= low * (1.0 + limits.pocket_bounce_pct / 100.0) - 1e-12
+
+
+def pocket_swing(bars: list[dict[str, Any]], *, pullback_pct: float = POCKET_SWING_PCT) -> float | None:
+    """Дно отката, если цена хотя бы на pullback_pct ниже верха последних 4 часов.
+
+    bars — от старых к новым, последняя свеча может быть открытой.
+    """
+    if len(bars) < 4:
+        return None
+    closed = bars[:-1]
+    window = closed[-POCKET_SWING_BARS:]
+    if len(window) < 4:
+        return None
+    try:
+        high = max(float(bar["high"]) for bar in window)
+        peak_at = max(range(len(window)), key=lambda i: float(window[i]["high"]))
+        tail = list(window[peak_at:]) + [bars[-1]]
+        low = min(float(bar["low"]) for bar in tail)
+        price = float(bars[-1]["close"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if high <= 0 or low <= 0 or price <= 0:
+        return None
+    if (high - price) / high * 100.0 < float(pullback_pct):
+        return None
+    return low
+
+
+def update_pocket_swing_arm(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    swing_low: float | None,
+    now: float,
+) -> dict[str, float] | None:
+    """Откат ≥3% запоминает дно. Отскок +1% ещё покупаем, даже если откат уже меньше 3%.
+
+    Сигнал снимается, когда цена ушла выше входа больше чем на 1 п.п.:
+    окно отскока пропущено.
+    """
+    px = float(price or 0)
+    if swing_low is not None and float(swing_low) > 0:
+        if px <= 0:
+            return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+        seeded = state
+        if seeded is None or float(swing_low) < float(seeded.get("low") or 0) - 1e-12:
+            seeded = {"low": float(swing_low), "ts": float(now)}
+        return _arm_low(seeded, px, now)
+    if state is None or px <= 0:
+        return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+    ceiling = float(state["low"]) * (1.0 + (cfg().pocket_bounce_pct + 1.0) / 100.0)
+    if px > ceiling:
+        return None
+    return {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
 
 
 def update_pocket_exit_arm(

@@ -176,8 +176,12 @@ def build_crypto_brief(skill) -> str:
         parts.append(f"Пыль: {dust[0]}.")
     elif dust:
         parts.append("Ещё пыль по нескольким монетам.")
-    if dip_qty <= 0:
-        parts.append("Карман пуст. Ждёт, когда солана просядет за сутки.")
+    if dip_qty <= 0 and sui_qty <= 0:
+        parts.append("Карманы пусты. Ждут откат от верха последних четырёх часов.")
+    elif dip_qty <= 0:
+        parts.append("Карман соланы пуст. Ждёт откат от верха последних четырёх часов.")
+    elif sui_qty <= 0:
+        parts.append("Карман авы пуст. Ждёт откат от верха последних четырёх часов.")
     if excluded:
         names = ", ".join(_name(ticker) for ticker in sorted(excluded))
         parts.append(f"Новые покупки закрыты для: {names}.")

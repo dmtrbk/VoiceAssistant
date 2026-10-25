@@ -554,6 +554,22 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-3.0, qty=0.01))
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-2.0, qty=0))
+        bars = [{"high": 1.05, "low": 1.00, "close": 1.02, "volume": 1.0} for _ in range(16)]
+        dip = bars + [{"high": 1.01, "low": 0.99, "close": 1.00, "volume": 1.0}]
+        self.assertAlmostEqual(policy.pocket_swing(dip), 0.99)
+        shallow = [{"high": 1.05, "low": 1.03, "close": 1.04, "volume": 1.0} for _ in range(16)]
+        shallow.append({"high": 1.05, "low": 1.03, "close": 1.04, "volume": 1.0})
+        self.assertIsNone(policy.pocket_swing(shallow))
+        armed = policy.update_pocket_swing_arm(None, price=1.0, swing_low=0.99, now=1.0)
+        self.assertAlmostEqual(armed["low"], 0.99)
+        kept = policy.update_pocket_swing_arm(armed, price=1.0, swing_low=None, now=2.0)
+        self.assertAlmostEqual(kept["low"], 0.99)
+        self.assertIsNone(policy.update_pocket_swing_arm(armed, price=1.04, swing_low=None, now=2.0))
+        self.assertEqual(
+            policy.btc_dip_exit_reason(price=0.98, entry=1.0, swing_low=0.99),
+            "дно",
+        )
+        self.assertIsNone(policy.btc_dip_exit_reason(price=1.02, entry=1.0, swing_low=0.99))
         self.assertEqual(policy.alt_slot_pct(), 25.0)
         self.assertAlmostEqual(policy.btc_dip_quote(1000.0), 250.0)
         self.assertEqual(policy.sui_dip_quote(), 50.0)
@@ -785,6 +801,9 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         bands_patch = patch.object(self.skill, "_alt_bands", side_effect=lambda t: self.bands.get(t))
         bands_patch.start()
         self.addCleanup(bands_patch.stop)
+        bars_patch = patch.object(self.skill, "_probe_bars", return_value=[])
+        bars_patch.start()
+        self.addCleanup(bars_patch.stop)
         cool_patch = patch("skills.crypto.journal.cooldown_tickers", return_value=set())
         cool_patch.start()
         self.addCleanup(cool_patch.stop)
