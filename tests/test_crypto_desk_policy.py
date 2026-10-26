@@ -1027,7 +1027,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_alt_entry_ready", return_value=True),
             patch("skills.crypto.desk.time.sleep"),
         ):
-            # цели: LINK 60, AVAX 40 при equity≈800. Резерв SOL 200$, SUI 50$ и щуп 30$.
+            # цели: LINK 60, AVAX 40 при equity≈800. Резерв SOL 25%, второй карман если включён, щуп 30$.
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"LINK", "AVAX"}
             self.skill._rebalance({"LINK": 60.0, "AVAX": 40.0})
@@ -1035,8 +1035,13 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertIn("LINK", by_ticker)
         self.assertIn("AVAX", by_ticker)
         self.assertGreater(by_ticker["LINK"], by_ticker["AVAX"])
-        # 25% счёта — карман SOL, 50$ — SUI, 30$ — щуп. В рукав это не уходит.
-        self.assertAlmostEqual(sum(by_ticker.values()), 800.0 * 0.998 - 200.0 - 50.0 - 30.0, places=1)
+        second = policy.cfg().sui_usd if policy.cfg().second_on else 0.0
+        probe = policy.cfg().probe_usd if policy.cfg().probe_on else 0.0
+        self.assertAlmostEqual(
+            sum(by_ticker.values()),
+            800.0 * 0.998 - 200.0 - second - probe,
+            places=1,
+        )
 
     def test_buy_resets_stale_trail_leg(self):
         from skills.crypto import common as crypto_common

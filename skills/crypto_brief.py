@@ -21,7 +21,6 @@ from skills.crypto.desk_policy import (
     BTC_DIP_TICKER,
     cfg,
     sleeve_names,
-    SUI_DIP_TICKER,
 )
 from skills.crypto.journal import open_avg_costs, read_lifetime_pnl
 from skills.text_utils import norm as _norm
@@ -127,11 +126,12 @@ def build_crypto_brief(skill) -> str:
             dust.append(name)
             continue
         entry = float(costs.get(ticker) or 0)
+        second_ticker = str(sui.get("ticker") or "AVA").upper()
         pocket = (
             (ticker == BTC_DIP_TICKER and dip_qty > 0 and dip_entry > 0)
-            or (ticker == SUI_DIP_TICKER and sui_qty > 0 and sui_entry > 0)
+            or (ticker == second_ticker and sui_qty > 0 and sui_entry > 0)
         )
-        if ticker == SUI_DIP_TICKER and sui_qty > 0 and sui_entry > 0:
+        if ticker == second_ticker and sui_qty > 0 and sui_entry > 0:
             entry = sui_entry
         elif ticker == BTC_DIP_TICKER and dip_qty > 0 and dip_entry > 0:
             entry = dip_entry
@@ -176,12 +176,16 @@ def build_crypto_brief(skill) -> str:
         parts.append(f"Пыль: {dust[0]}.")
     elif dust:
         parts.append("Ещё пыль по нескольким монетам.")
-    if dip_qty <= 0 and sui_qty <= 0:
+    second_name = "суи" if str(sui.get("ticker") or "").upper() == "SUI" else "авы"
+    if not cfg().second_on and sui_qty <= 0:
+        if dip_qty <= 0:
+            parts.append("Карман соланы пуст. Ждёт откат от верха последних четырёх часов.")
+    elif dip_qty <= 0 and sui_qty <= 0:
         parts.append("Карманы пусты. Ждут откат от верха последних четырёх часов.")
     elif dip_qty <= 0:
         parts.append("Карман соланы пуст. Ждёт откат от верха последних четырёх часов.")
     elif sui_qty <= 0:
-        parts.append("Карман авы пуст. Ждёт откат от верха последних четырёх часов.")
+        parts.append(f"Карман {second_name} пуст. Ждёт откат от верха последних четырёх часов.")
     if excluded:
         names = ", ".join(_name(ticker) for ticker in sorted(excluded))
         parts.append(f"Новые покупки закрыты для: {names}.")

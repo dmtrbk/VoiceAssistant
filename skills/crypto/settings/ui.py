@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
@@ -124,6 +125,8 @@ class DeskSettingsWindow(QWidget):
         self._spins: dict[str, QAbstractSpinBox] = {}
         self._hints: dict[str, str] = {}
         self._probe_box: ToggleSwitch | None = None
+        self._second_box: ToggleSwitch | None = None
+        self._second_combo = None
         self._syncing = False
         self._apply_theme()
 
@@ -254,6 +257,10 @@ QSpinBox, QDoubleSpinBox {{
             self._set_spin("pocket_bounce_pct", data.pocket_bounce_pct)
             self._set_spin("pocket_stop_pct", data.pocket_stop_pct)
             self._set_spin("sui_usd", data.sui_usd)
+            if self._second_box is not None:
+                self._second_box.setChecked(data.second_on)
+            if self._second_combo is not None:
+                self._second_combo.setCurrentText(data.second_ticker)
             self._set_spin("sleeve_max_pct", data.sleeve_max_pct)
             self._set_spin("sleeve_max_names", data.sleeve_max_names)
             self._set_spin("sleeve_entry_z", data.sleeve_entry_z)
@@ -317,7 +324,30 @@ QSpinBox, QDoubleSpinBox {{
         self._add_spin(col, "pocket_day_pct", "Просадка дня", "%", -15, -1, 0.5, 1, "Старый порог суток. Вход кармана сейчас — откат 3% от верха 4 часов.")
         self._add_spin(col, "pocket_bounce_pct", "Отскок входа", "%", 0.3, 5, 0.1, 1, "+1% от локального дна. Покупка после закрытия следующей 15м выше этого дна.")
         self._add_spin(col, "pocket_stop_pct", "Стоп", "%", 5, 30, 1, 0, "Запасной стоп на дыре. Обычный срыв кармана — возврат под локальное дно.")
-        self._add_spin(col, "sui_usd", "Второй, AVA", "$", 10, 200, 5, 0, "Тот же откат от верха 4 часов, фиксированная сумма вместо доли.")
+        switch = QHBoxLayout()
+        switch.setContentsMargins(0, 8, 0, 0)
+        name = QLabel("Второй карман")
+        name.setObjectName("rowTitle")
+        box = ToggleSwitch()
+        box.setChecked(False)
+        box.toggled.connect(self._on_second_toggled)
+        self._second_box = box
+        switch.addWidget(name, 1)
+        switch.addWidget(box, 0)
+        col.addLayout(switch)
+        pick = QHBoxLayout()
+        pick.setContentsMargins(0, 6, 0, 0)
+        coin = QLabel("Монета")
+        coin.setObjectName("rowTitle")
+        combo = QComboBox()
+        combo.addItems(["SUI", "AVA"])
+        combo.setCurrentText("AVA")
+        combo.currentTextChanged.connect(self._on_second_ticker)
+        self._second_combo = combo
+        pick.addWidget(coin, 1)
+        pick.addWidget(combo, 0)
+        col.addLayout(pick)
+        self._add_spin(col, "sui_usd", "Сумма", "$", 10, 200, 5, 0, "Фиксированная сумма второго кармана. Выключенный карман деньги не резервирует.")
         col.addStretch(1)
         return card
 
@@ -469,6 +499,32 @@ QSpinBox, QDoubleSpinBox {{
         finally:
             self._syncing = False
         self._refresh_alloc(data)
+
+    def _on_second_toggled(self, checked: bool) -> None:
+        if self._syncing:
+            return
+        update(second_on=checked)
+        if not checked:
+            self._clear_second_arm_if_flat()
+        self._status.setText(status_line())
+        self._hint.setText(
+            "Второй карман ищет откат." if checked else "Второй карман выключен."
+        )
+
+    def _on_second_ticker(self, text: str) -> None:
+        if self._syncing or not text:
+            return
+        update(second_ticker=text)
+        self._clear_second_arm_if_flat()
+        self._hint.setText(f"Второй карман: {text}.")
+
+    def _clear_second_arm_if_flat(self) -> None:
+        from skills.crypto.common import read_entry_arms, read_sui_dip, write_entry_arms
+
+        if float(read_sui_dip().get("qty") or 0) > 0:
+            return
+        arms = read_entry_arms()
+        write_entry_arms(arms["alts"], arms.get("pocket"), sui=False)
 
     def _on_probe_toggled(self, checked: bool) -> None:
         if self._syncing:

@@ -16,6 +16,8 @@ class DeskSettings:
     pocket_exit_pullback_pct: float = 0.5
     pocket_exit_hold_sec: float = 5 * 60
     sui_usd: float = 50.0
+    second_on: bool = False
+    second_ticker: str = "AVA"
     sleeve_max_pct: float = 75.0
     sleeve_max_names: int = 3
     sleeve_entry_z: float = -2.5
@@ -69,7 +71,8 @@ _LIMITS: dict[str, tuple[float, float]] = {
 }
 
 _INT_FIELDS = frozenset({"sleeve_max_names"})
-_BOOL_FIELDS = frozenset({"probe_on"})
+_BOOL_FIELDS = frozenset({"probe_on", "second_on"})
+_CHOICES: dict[str, tuple[str, ...]] = {"second_ticker": ("SUI", "AVA")}
 _KEYS = {item.name for item in fields(DeskSettings)}
 
 
@@ -78,6 +81,10 @@ def clamp_field(key: str, value: object) -> object:
         raise KeyError(key)
     if key in _BOOL_FIELDS:
         return bool(value)
+    if key in _CHOICES:
+        raw = str(value or "").upper()
+        allowed = _CHOICES[key]
+        return raw if raw in allowed else allowed[-1]
     number = float(value)
     low, high = _LIMITS[key]
     number = max(low, min(high, number))
@@ -120,7 +127,7 @@ def to_payload(data: DeskSettings) -> dict[str, object]:
             "exit_pullback_pct": data.pocket_exit_pullback_pct,
             "exit_hold_sec": data.pocket_exit_hold_sec,
         },
-        "sui": {"usd": data.sui_usd},
+        "sui": {"usd": data.sui_usd, "on": data.second_on, "ticker": data.second_ticker},
         "sleeve": {
             "max_pct": data.sleeve_max_pct,
             "max_names": data.sleeve_max_names,
@@ -169,6 +176,8 @@ def from_payload(raw: object) -> DeskSettings:
         "pocket_exit_pullback_pct": pocket.get("exit_pullback_pct"),
         "pocket_exit_hold_sec": pocket.get("exit_hold_sec"),
         "sui_usd": sui.get("usd"),
+        "second_on": sui.get("on"),
+        "second_ticker": sui.get("ticker"),
         "sleeve_max_pct": sleeve.get("max_pct"),
         "sleeve_max_names": sleeve.get("max_names"),
         "sleeve_entry_z": sleeve.get("entry_z"),

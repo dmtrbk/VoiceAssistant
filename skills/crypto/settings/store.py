@@ -70,7 +70,9 @@ def status_line() -> str:
     sleeve = len(alloc)
     parts = ["Карман открыт" if float(pocket.get("qty") or 0) > 0 else "Карман закрыт"]
     if float(sui.get("qty") or 0) > 0:
-        parts.append("AVA открыт")
+        parts.append(f"{str(sui.get('ticker') or 'AVA')} открыт")
+    elif not data.second_on:
+        parts.append("Второй выключен")
     parts.append(f"Рукав {sleeve} из {int(data.sleeve_max_names)}")
     if not data.probe_on:
         parts.append("Щуп выключен")

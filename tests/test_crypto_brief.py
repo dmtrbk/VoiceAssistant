@@ -47,7 +47,7 @@ class TestCryptoBrief(unittest.TestCase):
         self.assertIn("Дож", text)
         self.assertIn("от входа", text)
         self.assertIn("До средней осталось", text)
-        self.assertIn("Карманы пусты", text)
+        self.assertIn("четырёх часов", text)
         self.assertIn("Новые покупки закрыты", text)
         self.assertIn("Кардано", text)
         self.assertIn("Закрыто по журналу", text)

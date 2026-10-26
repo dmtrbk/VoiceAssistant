@@ -29,6 +29,8 @@ class TestDeskSettings(unittest.TestCase):
         self.assertEqual(data.pocket_pct, DEFAULTS.pocket_pct)
         self.assertEqual(data.sleeve_max_pct, DEFAULTS.sleeve_max_pct)
         self.assertTrue(data.probe_on)
+        self.assertFalse(data.second_on)
+        self.assertEqual(data.second_ticker, "AVA")
         self.assertEqual(policy.btc_dip_quote(1000.0), 250.0)
         self.assertEqual(policy.probe_quote(), 30.0)
 
@@ -69,6 +71,9 @@ class TestDeskSettings(unittest.TestCase):
         self.assertEqual(data.sleeve_max_names, 2)
         self.assertEqual(data.sleeve_entry_z, -3.0)
         self.assertEqual(data.probe_usd, 40.0)
+        self.assertFalse(data.second_on)
+        self.assertEqual(from_payload({"sui": {"ticker": "DOGE", "on": True}}).second_ticker, "AVA")
+        self.assertTrue(from_payload({"sui": {"ticker": "SUI", "on": True}}).second_on)
 
     def test_merge_sleeve_updates_pocket(self):
         data = merge_settings(DEFAULTS, sleeve_max_pct=80)

@@ -615,16 +615,19 @@ def read_btc_dip(path: str | None = None) -> dict[str, float]:
         exit_high = float(raw.get("exit_high") or 0)
         exit_ts = float(raw.get("exit_ts") or 0)
         low = float(raw.get("low") or 0)
+        ticker = str(raw.get("ticker") or "").upper()
     except (TypeError, ValueError):
         exit_high = 0.0
         exit_ts = 0.0
         low = 0.0
+        ticker = ""
     return {
         "qty": qty,
         "entry": entry,
         "exit_high": max(exit_high, 0.0),
         "exit_ts": exit_ts,
         "low": max(low, 0.0),
+        "ticker": ticker if ticker in {"SUI", "AVA"} else "",
     }
 
 
@@ -753,6 +756,7 @@ def write_sui_dip(
     exit_high: float = 0.0,
     exit_ts: float = 0.0,
     low: float = 0.0,
+    ticker: str = "",
 ) -> None:
     write_btc_dip(
         qty,
@@ -761,6 +765,7 @@ def write_sui_dip(
         exit_high=exit_high,
         exit_ts=exit_ts,
         low=low,
+        ticker=ticker,
     )
 
 
@@ -850,6 +855,7 @@ def write_btc_dip(
     exit_high: float = 0.0,
     exit_ts: float = 0.0,
     low: float = 0.0,
+    ticker: str = "",
 ) -> None:
     path = path or _BTC_DIP_PATH
     if qty <= 0 or entry <= 0:
@@ -865,6 +871,9 @@ def write_btc_dip(
         payload["exit_ts"] = float(exit_ts or 0)
     if float(low or 0) > 0:
         payload["low"] = float(low)
+    coin = str(ticker or "").upper()
+    if coin in {"SUI", "AVA"}:
+        payload["ticker"] = coin
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:

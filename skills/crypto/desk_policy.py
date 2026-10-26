@@ -232,8 +232,14 @@ def btc_dip_quote(equity: float) -> float:
 
 
 def sui_dip_quote() -> float:
-    """Второй карман AVA: фиксированная сумма, не доля счёта."""
+    """Второй карман: фиксированная сумма, не доля счёта."""
     return float(cfg().sui_usd)
+
+
+def second_pocket_choice() -> str:
+    """SUI или AVA. Чужое значение остаётся AVA."""
+    raw = str(cfg().second_ticker or "AVA").upper()
+    return raw if raw in {"SUI", "AVA"} else "AVA"
 
 
 def probe_quote() -> float:
