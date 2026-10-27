@@ -127,7 +127,7 @@ class TestDeskPolicy(unittest.TestCase):
         alloc, why = policy.score_alloc(rows)
         alts = {k: v for k, v in alloc.items() if k in policy.DESK_ALT_SLEEVE}
         self.assertNotIn("SOL", alloc)
-        self.assertEqual(set(alts), {"MNT", "AVAX", "NEAR"})
+        self.assertEqual(set(alts), {"MNT", "AVAX"})
         self.assertTrue(all(v == policy.alt_slot_pct() for v in alts.values()))
         self.assertLessEqual(sum(alts.values()), policy.ALT_SLEEVE_MAX_PCT + 0.5)
         self.assertLessEqual(sum(alloc.values()), 100.0 - policy.DESK_CASH_FLOOR_PCT + 0.5)
@@ -191,9 +191,9 @@ class TestDeskPolicy(unittest.TestCase):
             for t in ("XRP", "DOGE", "ADA")
         ] + [{"ticker": "LINK", "turnover": 1e9, "bb_z": -3.5}]
         alts = policy.pick_alts(rows)
-        self.assertEqual(set(alts), {"XRP", "DOGE", "ADA"})
+        self.assertEqual(set(alts), {"XRP", "DOGE"})
 
-    def test_blacklist_frees_held_slot_weekly_exclusion_does_not(self):
+    def test_blacklist_occupies_slot_until_sold(self):
         rows = [
             {"ticker": "DOGE", "turnover": 1e9, "bb_z": 0.2, "held_value": 40.0},
             {"ticker": "XRP", "turnover": 1e9, "bb_z": 0.1, "held_value": 40.0},
@@ -201,9 +201,12 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         weekly = policy.pick_alts(rows, excluded={"DOGE"})
         self.assertIn("DOGE", weekly)
-        banned = policy.pick_alts(rows, blacklist={"DOGE"})
-        self.assertNotIn("DOGE", banned)
-        self.assertEqual(set(banned), {"XRP", "LINK"})
+        tight = policy.pick_alts(rows, blacklist={"DOGE"})
+        self.assertNotIn("DOGE", tight)
+        self.assertEqual(set(tight), {"XRP"})
+        room = policy.pick_alts(rows, blacklist={"DOGE"}, max_names=3)
+        self.assertNotIn("DOGE", room)
+        self.assertEqual(set(room), {"XRP", "LINK"})
         _alloc, why = policy.score_alloc(rows, blacklist={"DOGE"})
         self.assertIn("чёрный список DOGE", why)
 
@@ -292,7 +295,11 @@ class TestDeskPolicy(unittest.TestCase):
             "PEPE": {"z": -4.0, "ma": 1.0},
         }
         picked = policy.pick_watch_alt_entries(
-            bands, target_alloc={"BTC": 40.0, "XRP": 11.7}, held_alts=set(), blocked={"DOT"}
+            bands,
+            target_alloc={"BTC": 40.0, "XRP": 11.7},
+            held_alts=set(),
+            blocked={"DOT"},
+            max_names=3,
         )
         self.assertEqual(picked, ["LINK"])
         none = policy.pick_watch_alt_entries(
@@ -1430,6 +1437,32 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertEqual(placed, [("DOOD", "Sell", None, 20.0)])
         self.assertEqual(read_probe()["qty"], 0.0)
         self.assertEqual(read_probe()["ticker"], "")
+
+    def test_probe_second_leg_keeps_first(self):
+        from skills.crypto.common import probe_legs, write_probe, read_probe
+
+        write_probe(ticker="DOOD", qty=20.0, entry=1.5, shelf=1.0, peak=1.5, arm_px=1.4)
+        write_probe(arm_ticker="CAP", arm_shelf=0.09, arm_ts=1.0, arm_px=0.1)
+        write_probe(ticker="DOOD", qty=20.0, entry=1.5, shelf=1.0, peak=1.6, arm_px=1.4)
+        armed = read_probe()
+        self.assertEqual(armed["arm_ticker"], "CAP")
+        self.assertAlmostEqual(armed["arm_px"], 0.1)
+        self.assertAlmostEqual(armed["peak"], 1.6)
+        write_probe(ticker="CAP", qty=10.0, entry=0.1, shelf=0.09, peak=0.1)
+        legs = {leg["ticker"]: leg for leg in probe_legs()}
+        self.assertEqual(set(legs), {"DOOD", "CAP"})
+        write_probe(drop="DOOD")
+        left = probe_legs()
+        self.assertEqual([leg["ticker"] for leg in left], ["CAP"])
+        write_probe(clear_arm=True)
+        self.assertEqual(read_probe()["ticker"], "CAP")
+        write_probe()
+        self.assertEqual(probe_legs(), [])
+
+    def test_probe_reserve_second_only_when_open(self):
+        self.assertEqual(policy.probe_reserve_quote(open_legs=0), 30.0)
+        self.assertEqual(policy.probe_reserve_quote(open_legs=1), 30.0)
+        self.assertEqual(policy.probe_reserve_quote(open_legs=2), 0.0)
 
     def test_risk_off_sells_core_keeps_alt(self):
         placed: list[tuple[str, str]] = []

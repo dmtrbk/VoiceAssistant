@@ -68,7 +68,7 @@ class AllocBar(QWidget):
         super().__init__(parent)
         self.setFixedHeight(10)
         self._pocket = 25.0
-        self._sleeve = 75.0
+        self._sleeve = 50.0
         self._probe_on = True
 
     def set_shares(self, pocket: float, sleeve: float, probe_on: bool) -> None:
@@ -79,7 +79,8 @@ class AllocBar(QWidget):
         self.update()
 
     def _label(self) -> str:
-        text = f"Карман {self._pocket:.0f}%, рукав {self._sleeve:.0f}%"
+        cash = max(0.0, 100.0 - self._pocket - self._sleeve)
+        text = f"Карман {self._pocket:.0f}%, рукав {self._sleeve:.0f}%, кэш {cash:.0f}%"
         if self._probe_on:
             return text + ", щуп"
         return text
@@ -91,10 +92,13 @@ class AllocBar(QWidget):
         gap = 3
         height = self.height()
         width = self.width()
+        cash = max(0.0, 100.0 - self._pocket - self._sleeve)
         parts = [("pocket", self._pocket, QColor(palette.accent))]
         parts.append(("sleeve", self._sleeve, QColor(palette.off_track)))
+        if cash > 0.5:
+            parts.append(("cash", cash, QColor(palette.divider)))
         if self._probe_on:
-            parts.append(("probe", 8.0, QColor(palette.accent)))
+            parts.append(("probe", 6.0, QColor(palette.accent)))
         total = sum(share for _name, share, _color in parts) or 1.0
         gaps = gap * (len(parts) - 1)
         usable = max(0, width - gaps)
@@ -353,8 +357,8 @@ QSpinBox, QDoubleSpinBox {{
 
     def _sleeve_card(self) -> QFrame:
         card, col = self._card("Рукав", "Нижняя полоса 4ч, равные слоты")
-        self._add_spin(col, "sleeve_max_pct", "Потолок", "%", 50, 92, 1, 0, "Доля счёта на альты. Остальное — резерв кармана.")
-        self._add_spin(col, "sleeve_max_names", "Слоты", "", 1, 6, 1, 0, "Не больше стольких ног сразу. Список монет стол считает сам.")
+        self._add_spin(col, "sleeve_max_pct", "Потолок", "%", 50, 92, 1, 0, "Доля счёта на альты. Карман отдельно, остаток — кэш и щупы.")
+        self._add_spin(col, "sleeve_max_names", "Слоты", "", 1, 6, 1, 0, "Не больше стольких ног сразу. Чёрный список занимает слот, пока нога жива.")
         self._add_spin(col, "sleeve_entry_z", "Вход, z", "", -4, -1, 0.1, 1, "Покупка у нижней полосы, когда z не выше этого порога.")
         self._add_spin(col, "sleeve_bounce_pct", "Отскок входа", "%", 0.3, 5, 0.1, 1, "Отскок от дна. Пауза, z ещё не у средней.")
         self._add_spin(col, "sleeve_stop_pct", "Стоп", "%", 3, 20, 0.5, 1, "Запасной стоп на дыре. Обычный срыв рукава — возврат под дно входа.")

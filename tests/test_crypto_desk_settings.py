@@ -37,7 +37,7 @@ class TestDeskSettings(unittest.TestCase):
     def test_update_links_pocket_and_sleeve(self):
         data = settings_store.update(pocket_pct=30)
         self.assertEqual(data.pocket_pct, 30.0)
-        self.assertEqual(data.sleeve_max_pct, 70.0)
+        self.assertEqual(data.sleeve_max_pct, 50.0)
         self.assertTrue(os.path.isfile(self.path))
         settings_store.reset_cache()
         loaded = settings_store.current()
@@ -67,7 +67,7 @@ class TestDeskSettings(unittest.TestCase):
         }
         data = from_payload(raw)
         self.assertEqual(data.pocket_pct, 20.0)
-        self.assertEqual(data.sleeve_max_pct, 80.0)
+        self.assertEqual(data.sleeve_max_pct, 50.0)
         self.assertEqual(data.sleeve_max_names, 2)
         self.assertEqual(data.sleeve_entry_z, -3.0)
         self.assertEqual(data.probe_usd, 40.0)

@@ -18,8 +18,8 @@ class DeskSettings:
     sui_usd: float = 50.0
     second_on: bool = False
     second_ticker: str = "AVA"
-    sleeve_max_pct: float = 75.0
-    sleeve_max_names: int = 3
+    sleeve_max_pct: float = 50.0
+    sleeve_max_names: int = 2
     sleeve_entry_z: float = -2.5
     sleeve_bounce_pct: float = 1.5
     sleeve_hold_sec: float = 20 * 60
@@ -97,7 +97,7 @@ def clamp_settings(data: DeskSettings) -> DeskSettings:
     values = {key: clamp_field(key, getattr(data, key)) for key in _KEYS}
     pocket = float(values["pocket_pct"])
     sleeve = float(values["sleeve_max_pct"])
-    if abs(pocket + sleeve - 100.0) > 1e-6:
+    if pocket + sleeve > 100.0 + 1e-6:
         values["sleeve_max_pct"] = clamp_field("sleeve_max_pct", 100.0 - pocket)
     low = float(values["probe_break_min_pct"])
     high = float(values["probe_break_max_pct"])
@@ -107,12 +107,14 @@ def clamp_settings(data: DeskSettings) -> DeskSettings:
 
 
 def merge_settings(base: DeskSettings, **changes: object) -> DeskSettings:
-    if "pocket_pct" in changes and "sleeve_max_pct" not in changes:
-        pocket = float(clamp_field("pocket_pct", changes["pocket_pct"]))
-        changes = {**changes, "sleeve_max_pct": 100.0 - pocket}
-    elif "sleeve_max_pct" in changes and "pocket_pct" not in changes:
-        sleeve = float(clamp_field("sleeve_max_pct", changes["sleeve_max_pct"]))
-        changes = {**changes, "pocket_pct": 100.0 - sleeve}
+    merged = replace(base, **changes)
+    pocket = float(clamp_field("pocket_pct", merged.pocket_pct))
+    sleeve = float(clamp_field("sleeve_max_pct", merged.sleeve_max_pct))
+    if pocket + sleeve > 100.0 + 1e-6:
+        if "sleeve_max_pct" in changes and "pocket_pct" not in changes:
+            changes = {**changes, "pocket_pct": 100.0 - sleeve}
+        else:
+            changes = {**changes, "sleeve_max_pct": 100.0 - pocket}
     return clamp_settings(replace(base, **changes))
 
 

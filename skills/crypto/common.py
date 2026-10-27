@@ -666,11 +666,60 @@ def _empty_probe() -> dict[str, Any]:
         "arm_px": 0.0,
         "peak": 0.0,
         "low": 0.0,
+        "legs": [],
     }
 
 
+def _probe_leg_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
+    ticker = _normalize_ticker(str(raw.get("ticker") or ""))
+    try:
+        qty = float(raw.get("qty") or 0)
+        entry = float(raw.get("entry") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not ticker or qty <= 0 or entry <= 0:
+        return None
+    def _num(key: str) -> float:
+        try:
+            return float(raw.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    return {
+        "ticker": ticker,
+        "qty": qty,
+        "entry": entry,
+        "shelf": _num("shelf"),
+        "arm_px": _num("arm_px"),
+        "peak": _num("peak"),
+        "low": _num("low"),
+    }
+
+
+def probe_legs(state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    if state is None:
+        state = read_probe()
+    return [dict(leg) for leg in (state.get("legs") or []) if float(leg.get("qty") or 0) > 0]
+
+
+def probe_tickers(state: dict[str, Any] | None = None) -> set[str]:
+    return {str(leg.get("ticker") or "") for leg in probe_legs(state) if leg.get("ticker")}
+
+
+def _flatten_probe(out: dict[str, Any]) -> dict[str, Any]:
+    first = (out.get("legs") or [{}])[0] if out.get("legs") else {}
+    out["ticker"] = str(first.get("ticker") or "")
+    out["qty"] = float(first.get("qty") or 0)
+    out["entry"] = float(first.get("entry") or 0)
+    out["shelf"] = float(first.get("shelf") or 0)
+    out["peak"] = float(first.get("peak") or 0)
+    out["low"] = float(first.get("low") or 0)
+    if not out.get("arm_ticker") and float(first.get("arm_px") or 0) > 0:
+        out["arm_px"] = float(first["arm_px"])
+    return out
+
+
 def read_probe(path: str | None = None) -> dict[str, Any]:
-    """Щуп: открытая монета и ожидание над полкой."""
+    """Щуп: открытые ноги и ожидание над полкой."""
     path = path or _PROBE_PATH
     empty = _empty_probe()
     if not os.path.isfile(path):
@@ -683,20 +732,27 @@ def read_probe(path: str | None = None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return empty
     out = _empty_probe()
-    out["ticker"] = _normalize_ticker(str(raw.get("ticker") or ""))
     out["arm_ticker"] = _normalize_ticker(str(raw.get("arm_ticker") or ""))
-    for key in ("qty", "entry", "shelf", "arm_shelf", "arm_ts", "arm_px", "peak", "low"):
+    for key in ("arm_shelf", "arm_ts", "arm_px"):
         try:
             out[key] = float(raw.get(key) or 0)
         except (TypeError, ValueError):
             out[key] = 0.0
-    if out["qty"] <= 0 or out["entry"] <= 0:
-        out["ticker"] = ""
-        out["qty"] = 0.0
-        out["entry"] = 0.0
-        out["shelf"] = 0.0
-        out["peak"] = 0.0
-        out["low"] = 0.0
+    legs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    raw_legs = raw.get("legs")
+    if isinstance(raw_legs, list):
+        source = [item for item in raw_legs if isinstance(item, dict)]
+    else:
+        source = [raw]
+    for item in source:
+        leg = _probe_leg_from_raw(item)
+        if not leg or leg["ticker"] in seen:
+            continue
+        seen.add(leg["ticker"])
+        legs.append(leg)
+    out["legs"] = legs
+    _flatten_probe(out)
     if out["arm_shelf"] <= 0:
         out["arm_ticker"] = ""
         out["arm_shelf"] = 0.0
@@ -718,27 +774,77 @@ def write_probe(
     arm_px: float = 0.0,
     peak: float = 0.0,
     low: float = 0.0,
+    drop: str = "",
+    clear_arm: bool = False,
     path: str | None = None,
 ) -> None:
     path = path or _PROBE_PATH
-    payload: dict[str, Any] = {}
-    if float(qty) > 0 and float(entry) > 0 and _normalize_ticker(ticker):
-        payload["ticker"] = _normalize_ticker(ticker)
-        payload["qty"] = float(qty)
-        payload["entry"] = float(entry)
-        payload["shelf"] = float(shelf or 0)
-        payload["peak"] = float(peak or 0)
+    empty_call = (
+        not _normalize_ticker(ticker)
+        and float(qty or 0) <= 0
+        and not _normalize_ticker(arm_ticker)
+        and float(arm_shelf or 0) <= 0
+        and not _normalize_ticker(drop)
+        and not clear_arm
+    )
+    if empty_call:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("[Крипта] не стёр щуп: %s", exc)
+        return
+    current = read_probe(path)
+    legs = probe_legs(current)
+    gone = _normalize_ticker(drop)
+    if gone:
+        legs = [leg for leg in legs if leg["ticker"] != gone]
+    name = _normalize_ticker(ticker)
+    if name and float(qty) > 0 and float(entry) > 0:
+        legs = [leg for leg in legs if leg["ticker"] != name]
+        legs.append({
+            "ticker": name,
+            "qty": float(qty),
+            "entry": float(entry),
+            "shelf": float(shelf or 0),
+            "arm_px": float(arm_px or 0),
+            "peak": float(peak or 0),
+            "low": float(low or 0),
+        })
+    arm_name = _normalize_ticker(arm_ticker)
+    keep_arm = float(arm_shelf or 0) > 0 and arm_name
+    armed = str(current.get("arm_ticker") or "")
+    if keep_arm:
+        current["arm_ticker"] = arm_name
+        current["arm_shelf"] = float(arm_shelf)
+        current["arm_ts"] = float(arm_ts or 0)
         if float(arm_px or 0) > 0:
-            payload["arm_px"] = float(arm_px)
-        if float(low or 0) > 0:
-            payload["low"] = float(low)
-    if float(arm_shelf) > 0 and _normalize_ticker(arm_ticker):
-        payload["arm_ticker"] = _normalize_ticker(arm_ticker)
-        payload["arm_shelf"] = float(arm_shelf)
-        payload["arm_ts"] = float(arm_ts or 0)
-        if float(arm_px or 0) > 0:
-            payload["arm_px"] = float(arm_px)
-    if not payload:
+            current["arm_px"] = float(arm_px)
+    elif clear_arm or (gone and gone == armed) or (name and name == armed):
+        current["arm_ticker"] = ""
+        current["arm_shelf"] = 0.0
+        current["arm_ts"] = 0.0
+        if not legs:
+            current["arm_px"] = 0.0
+    payload: dict[str, Any] = {"legs": legs}
+    if current.get("arm_shelf") and current.get("arm_ticker"):
+        payload["arm_ticker"] = current["arm_ticker"]
+        payload["arm_shelf"] = float(current["arm_shelf"])
+        payload["arm_ts"] = float(current.get("arm_ts") or 0)
+        if float(current.get("arm_px") or 0) > 0:
+            payload["arm_px"] = float(current["arm_px"])
+    if legs:
+        first = legs[0]
+        payload["ticker"] = first["ticker"]
+        payload["qty"] = first["qty"]
+        payload["entry"] = first["entry"]
+        payload["shelf"] = first["shelf"]
+        payload["peak"] = first["peak"]
+        if float(first.get("arm_px") or 0) > 0 and not payload.get("arm_ticker"):
+            payload["arm_px"] = float(first["arm_px"])
+        if float(first.get("low") or 0) > 0:
+            payload["low"] = float(first["low"])
+    if not payload.get("legs") and not payload.get("arm_ticker"):
         try:
             if os.path.isfile(path):
                 os.remove(path)

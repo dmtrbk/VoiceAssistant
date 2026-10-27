@@ -27,6 +27,8 @@ from .common import (
     read_blacklist,
     read_btc_dip,
     read_entry_arms,
+    probe_legs,
+    probe_tickers,
     read_probe,
     read_sleeve_exits,
     read_sleeve_lows,
@@ -63,7 +65,9 @@ from .desk_policy import (
     pocket_cash_reserve,
     probe_arm_action,
     probe_exit_reason,
+    PROBE_MAX_LEGS,
     probe_quote,
+    probe_reserve_quote,
     probe_scan_rank,
     probe_shelf_setup,
     probe_trends_ok,
@@ -253,8 +257,7 @@ class CryptoDeskMixin:
         held: dict[str, float] = {}
         held_values: dict[str, float] = {}
         probe = read_probe()
-        probe_ticker = str(probe.get("ticker") or "")
-        probe_qty = float(probe.get("qty") or 0)
+        probe_qty_by = {str(leg["ticker"]): float(leg["qty"]) for leg in probe_legs(probe)}
         if self._api_key:
             try:
                 _cash, positions = self._wallet()
@@ -285,9 +288,9 @@ class CryptoDeskMixin:
                 dip = read_btc_dip()
                 px = float(row.get("price") or 0)
                 held_value = max(0.0, held_value - float(dip.get("qty") or 0) * px)
-            if ticker == probe_ticker and probe_qty > 0:
+            if ticker in probe_qty_by:
                 px = float(row.get("price") or 0)
-                held_value = max(0.0, held_value - probe_qty * px)
+                held_value = max(0.0, held_value - probe_qty_by[ticker] * px)
             chosen.append({
                 **row,
                 "held": held.get(ticker, 0),
@@ -365,32 +368,33 @@ class CryptoDeskMixin:
             _cash, positions = self._wallet()
         except Exception:
             return {}
-        probe = read_probe()
-        probe_ticker = str(probe.get("ticker") or "")
-        probe_qty = float(probe.get("qty") or 0)
+        probe_qty_by = {str(leg["ticker"]): float(leg["qty"]) for leg in probe_legs()}
         banned = read_blacklist()
         held = []
+        banned_held = 0
         for item in positions:
             ticker = item["ticker"]
-            if ticker in banned or ticker not in sleeve_names() or self._is_owner_position(ticker):
+            if ticker not in sleeve_names() or self._is_owner_position(ticker):
                 continue
             value = float(item.get("value") or 0)
-            if ticker == probe_ticker and probe_qty > 0:
-                value = max(0.0, value - probe_qty * float(item.get("price") or 0))
+            if ticker in probe_qty_by:
+                value = max(0.0, value - probe_qty_by[ticker] * float(item.get("price") or 0))
             if value < ALT_HELD_MIN_USD:
+                continue
+            if ticker in banned:
+                banned_held += 1
                 continue
             held.append((value, item))
         held.sort(key=lambda pair: pair[0], reverse=True)
-        return {item["ticker"]: alt_slot_pct() for _value, item in held[:cfg().sleeve_max_names]}
+        room = max(0, cfg().sleeve_max_names - banned_held)
+        return {item["ticker"]: alt_slot_pct() for _value, item in held[:room]}
 
     def desk_score_alloc(self, candidates: list[dict[str, Any]] | None = None) -> tuple[dict[str, float], str]:
         btc7, btc_day = self._btc_regime()
         rows = candidates if candidates is not None else self.desk_auto_candidates()
         excluded = set(self._sync_exclusions(rows))
         banned = read_blacklist()
-        probe_ticker = str(read_probe().get("ticker") or "")
-        if probe_ticker:
-            excluded.add(probe_ticker)
+        excluded |= probe_tickers()
         if is_risk_off(btc_chg_7=btc7, btc_chg_day=btc_day):
             why = (
                 f"Риск-офф по BTC (7д {btc7:+.1f}%, сутки {btc_day:+.1f}%) — новые альты не беру."
@@ -531,9 +535,8 @@ class CryptoDeskMixin:
         if second:
             seed.add(second)
         probe = read_probe()
-        if probe.get("ticker"):
-            seed.add(str(probe["ticker"]))
-        elif probe.get("arm_ticker"):
+        seed |= probe_tickers(probe)
+        if probe.get("arm_ticker"):
             seed.add(str(probe["arm_ticker"]))
         tape.set_symbols(seed)
         tape.start()
@@ -545,21 +548,21 @@ class CryptoDeskMixin:
         second = self._second_ticker()
         if second and ticker == second:
             qty += float(read_sui_dip().get("qty") or 0)
-        probe = read_probe()
-        if ticker == str(probe.get("ticker") or ""):
-            qty += float(probe.get("qty") or 0)
+        for leg in probe_legs():
+            if ticker == str(leg.get("ticker") or ""):
+                qty += float(leg.get("qty") or 0)
         return qty
 
     def _shield_probe(self, current_values: dict[str, float], prices: dict[str, float]) -> None:
         """Монеты щупа рукав не докупает и не продаёт как свой слот."""
-        probe = read_probe()
-        ticker = str(probe.get("ticker") or "")
-        qty = float(probe.get("qty") or 0)
-        px = float(prices.get(ticker) or 0)
-        if not ticker or qty <= 0:
-            return
-        if ticker in current_values and px > 0:
-            current_values[ticker] = max(0.0, current_values[ticker] - qty * px)
+        for leg in probe_legs():
+            ticker = str(leg.get("ticker") or "")
+            qty = float(leg.get("qty") or 0)
+            px = float(prices.get(ticker) or 0)
+            if not ticker or qty <= 0:
+                continue
+            if ticker in current_values and px > 0:
+                current_values[ticker] = max(0.0, current_values[ticker] - qty * px)
 
     def _idle_special_reserve(self, equity: float) -> float:
         reserve = pocket_cash_reserve(
@@ -567,8 +570,7 @@ class CryptoDeskMixin:
         )
         if float(read_sui_dip().get("qty") or 0) <= 0 and cfg().second_on:
             reserve += sui_dip_quote()
-        if float(read_probe().get("qty") or 0) <= 0:
-            reserve += probe_quote()
+        reserve += probe_reserve_quote(open_legs=len(probe_legs()))
         return reserve
 
     def _second_ticker(self) -> str | None:
@@ -1076,8 +1078,8 @@ class CryptoDeskMixin:
                 0.0, current_values[second] - sui_qty_watch * sui_px_watch
             )
         self._shield_probe(current_values, prices)
-        probe_ticker = str(read_probe().get("ticker") or "")
-        if probe_ticker:
+        probe_held = probe_tickers()
+        for probe_ticker in probe_held:
             excluded.add(probe_ticker)
             target_alloc.pop(probe_ticker, None)
             target_values.pop(probe_ticker, None)
@@ -1156,9 +1158,9 @@ class CryptoDeskMixin:
         sleeve_exits = read_sleeve_exits()
         kept_exits: dict[str, dict[str, float]] = {}
         exit_now = time.time()
-        probe_ticker = str(read_probe().get("ticker") or "")
+        probe_held = probe_tickers()
         for ticker, pos in positions.items():
-            if ticker == probe_ticker:
+            if ticker in probe_held:
                 continue
             if ticker not in sleeve_names() or ticker in trail_sold:
                 continue
@@ -1254,7 +1256,7 @@ class CryptoDeskMixin:
             t for t in positions
             if t in sleeve_names()
             and t not in trail_sold
-            and t not in banned
+            and not self._is_owner_position(t)
             and current_values.get(t, 0.0) >= ALT_HELD_MIN_USD
         }
         try:
@@ -1379,7 +1381,7 @@ class CryptoDeskMixin:
         legs: list[dict[str, Any]] = []
         snap: list[str] = []
         for ticker, pos in positions.items():
-            if ticker == probe_ticker:
+            if ticker in probe_held:
                 continue
             if ticker not in sleeve_names() or self._is_owner_position(ticker):
                 continue
@@ -1656,8 +1658,7 @@ class CryptoDeskMixin:
                 0.0, current_values[second] - sui_qty * sui_px
             )
         self._shield_probe(current_values, prices)
-        probe_ticker = str(read_probe().get("ticker") or "")
-        if probe_ticker:
+        for probe_ticker in probe_tickers():
             target_alloc.pop(probe_ticker, None)
             target_values.pop(probe_ticker, None)
         parts: list[str] = []
@@ -1853,15 +1854,16 @@ class CryptoDeskMixin:
 
     def _probe_locked(self) -> None:
         state = read_probe()
-        if float(state.get("qty") or 0) > 0:
-            self._probe_exit(state)
-            return
+        for leg in probe_legs(state):
+            self._probe_exit(leg)
         if not cfg().probe_on:
             return
+        state = read_probe()
         if state.get("arm_ticker"):
             self._probe_arm(state)
             return
-        self._probe_scan()
+        if len(probe_legs(state)) < PROBE_MAX_LEGS:
+            self._probe_scan()
 
     def _probe_exit(self, state: dict[str, Any]) -> None:
         ticker = str(state.get("ticker") or "")
@@ -1907,7 +1909,7 @@ class CryptoDeskMixin:
             wallet_qty = float(state.get("qty") or 0)
         sell_qty = min(float(state.get("qty") or 0), wallet_qty)
         if sell_qty <= 0:
-            write_probe()
+            write_probe(drop=ticker)
             return
         seen = getattr(self, "_last_fill", None)
         try:
@@ -1930,7 +1932,7 @@ class CryptoDeskMixin:
             )
             logger.info("[Крипта] щуп %s ещё %.6g монет после неполной продажи", ticker, left)
             return
-        write_probe()
+        write_probe(drop=ticker)
         logger.info(
             "[Крипта] щуп %s: выход (%s) %.6g по %.4g",
             ticker,
@@ -1969,7 +1971,7 @@ class CryptoDeskMixin:
         if action == "wait":
             return
         if action == "drop":
-            write_probe()
+            write_probe(clear_arm=True)
             logger.info(
                 "[Крипта] щуп %s снят: полка %.4g сейчас %.4g тренд %s",
                 ticker,
@@ -2015,15 +2017,23 @@ class CryptoDeskMixin:
             peak=price,
             low=entry_low,
         )
-        logger.info("[Крипта] щуп %s: купил на %.0f$ над полкой %.4g", ticker, quote, shelf)
+        logger.info(
+            "[Крипта] щуп %s: купил на %.0f$ над полкой %.4g%s",
+            ticker,
+            quote,
+            shelf,
+            " (второй)" if len(probe_legs()) > 1 else "",
+        )
 
     def _probe_scan(self) -> None:
+        if len(probe_legs()) >= PROBE_MAX_LEGS:
+            return
         try:
             tape = self._tape()
         except Exception as exc:
             logger.info("[Крипта] щуп лента: %s", exc)
             return
-        blocked = self._probe_blocked()
+        blocked = self._probe_blocked() | probe_tickers()
         ranked: list[tuple[float, dict[str, Any]]] = []
         for row in tape:
             ticker = str(row.get("ticker") or "")

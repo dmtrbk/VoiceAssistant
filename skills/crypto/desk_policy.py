@@ -7,14 +7,15 @@ from __future__ import annotations
 import time
 from typing import Any
 
-# Рукав альтов: до 75% счёта. Остальные 25% — резерв кармана SOL.
+# Рукав альтов: до 50% счёта, 2 слота. Карман SOL 25%. Остаток — кэш и щупы.
 # Берём только на провале у нижней полосы.
 DESK_ALT_SLEEVE = frozenset({
     "BTC", "ETH",
     "SOL", "XRP", "DOGE", "LINK", "AVAX", "SUI", "AVA", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
 })
-ALT_SLEEVE_MAX_PCT = 75.0
-ALT_MAX_NAMES = 3
+ALT_SLEEVE_MAX_PCT = 50.0
+ALT_MAX_NAMES = 2
+PROBE_MAX_LEGS = 2
 DESK_CASH_FLOOR_PCT = 25.0
 DESK_CASH_FLOOR_BULL_PCT = 8.0
 REBALANCE_BAND_PCT = 6.0
@@ -270,6 +271,15 @@ def probe_scan_rank(row: dict[str, Any]) -> float:
 def probe_quote() -> float:
     """Щуп: фиксированные 30$, не доля счёта."""
     return float(cfg().probe_usd)
+
+
+def probe_reserve_quote(*, open_legs: int) -> float:
+    """Пустой щуп резервирует один слот. Второй — только когда первый уже куплен."""
+    if not cfg().probe_on:
+        return 0.0
+    opened = max(0, int(open_legs))
+    want = PROBE_MAX_LEGS if opened >= 1 else 1
+    return probe_quote() * max(0, want - opened)
 
 
 def ema_last(values: list[float], period: int) -> float | None:
@@ -893,7 +903,7 @@ def pick_alts(
 ) -> dict[str, float]:
     """Рукав: держанные до выхода + новые у нижней полосы, кроме исключений.
 
-    Чёрный список снимает и слот уже открытой ноги. Исключение по неделе держанное не трогает.
+    Чёрный список не даёт новой покупки, но живая нога занимает слот. Исключение по неделе держанное не трогает.
     """
     limits = cfg()
     sleeve_pct = limits.sleeve_max_pct if sleeve_pct is None else float(sleeve_pct)
@@ -904,16 +914,17 @@ def pick_alts(
     blocked = {str(t).upper() for t in (excluded or set())}
     banned = {str(t).upper() for t in (blacklist or set())}
     alts = [r for r in rows if str(r.get("ticker") or "").upper() in sleeve_names()]
+    held_all = [
+        r for r in alts
+        if _held_value(r) >= ALT_HELD_MIN_USD
+    ]
+    banned_held = [r for r in held_all if str(r["ticker"]).upper() in banned]
     held = sorted(
-        (
-            r for r in alts
-            if _held_value(r) >= ALT_HELD_MIN_USD
-            and str(r["ticker"]).upper() not in banned
-        ),
+        (r for r in held_all if str(r["ticker"]).upper() not in banned),
         key=_held_value,
         reverse=True,
     )
-    held_t = {str(r["ticker"]).upper() for r in held}
+    held_t = {str(r["ticker"]).upper() for r in held_all}
     fresh = sorted(
         (
             r for r in alts
@@ -924,7 +935,8 @@ def pick_alts(
         ),
         key=lambda r: float(r["bb_z"]),
     )
-    picked = (held + fresh)[: max(0, int(max_names))]
+    room = max(0, int(max_names) - len(banned_held))
+    picked = (held + fresh)[:room]
     return {str(r["ticker"]).upper(): slot for r in picked}
 
 
