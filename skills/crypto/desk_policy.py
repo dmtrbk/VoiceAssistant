@@ -62,12 +62,17 @@ PROBE_USD = 30.0
 PROBE_MIN_TURNOVER_USD = 1_000_000.0
 PROBE_DAY_MIN_PCT = 3.0
 PROBE_NEAR_HIGH = 0.99
+PROBE_BOUNCE_MIN_PCT = 8.0
+PROBE_BOUNCE_NEAR_HIGH = 0.92
 PROBE_SHELF_MAX_RANGE_PCT = 12.0
 PROBE_BREAK_MIN_PCT = 4.0
 PROBE_BREAK_MAX_PCT = 12.0
 PROBE_VOL_MULT = 3.0
+PROBE_LOCAL_BARS = 8
+PROBE_LOCAL_VOL_MULT = 2.0
+PROBE_LOCAL_DRIFT_PCT = 2.5
 PROBE_ENTRY_HOLD_SEC = 4 * 60
-PROBE_CHASE_PCT = 1.5
+PROBE_CHASE_PCT = 3.0
 PROBE_SHELF_DRIFT_PCT = 1.5
 PROBE_SHELF_DRIFT_BARS = 8
 PROBE_RUN_PCT = 6.0
@@ -242,6 +247,26 @@ def second_pocket_choice() -> str:
     return raw if raw in {"SUI", "AVA"} else "AVA"
 
 
+def probe_scan_rank(row: dict[str, Any]) -> float:
+    """Кого смотреть: зелёный день или отскок от суточного дна, ещё не уехавший от хая."""
+    try:
+        chg = float(row.get("chg") or 0)
+        price = float(row.get("price") or 0)
+        low = float(row.get("low") or 0)
+        high = float(row.get("high") or 0)
+        turn = float(row.get("turnover") or 0)
+    except (TypeError, ValueError):
+        return -1.0
+    if turn < PROBE_MIN_TURNOVER_USD or price <= 0 or chg >= MAX_DAY_PUMP_PCT:
+        return -1.0
+    if chg >= PROBE_DAY_MIN_PCT:
+        return chg
+    bounce = (price / low - 1.0) * 100.0 if low > 0 else 0.0
+    if bounce >= PROBE_BOUNCE_MIN_PCT and high > 0 and price >= high * PROBE_BOUNCE_NEAR_HIGH:
+        return bounce
+    return -1.0
+
+
 def probe_quote() -> float:
     """Щуп: фиксированные 30$, не доля счёта."""
     return float(cfg().probe_usd)
@@ -288,20 +313,21 @@ def _median(values: list[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
-def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
-    """Живая цена на 4–12% выше узкой полки, объём импульса ≥ 3× медианы полки.
-
-    bars — от старых к новым, последняя свеча может быть ещё открытой.
-    Полка — до двух последних 15-минутных свечей.
-    """
-    if len(bars) < PROBE_EMA_SLOW + 2:
-        return None
+def _probe_window_setup(
+    bars: list[dict[str, Any]],
+    *,
+    shelf_bars: int,
+    vol_mult: float,
+    min_len: int,
+    drift_pct: float = 0.0,
+) -> dict[str, float] | None:
+    """Одна полка: тихий коридор и живой пробой с объёмом."""
     forming = bars[-1]
     closed = bars[:-1]
-    if len(closed) < 21:
+    if len(closed) < min_len + 1:
         return None
-    shelf = closed[:-1][-PROBE_SHELF_BARS:]
-    if len(shelf) < 20:
+    shelf = closed[:-1][-int(shelf_bars):]
+    if len(shelf) < min_len:
         return None
     try:
         high = max(float(bar["high"]) for bar in shelf)
@@ -321,24 +347,48 @@ def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     if price < floor or price > ceiling:
         return None
     typical = _median(vols)
-    if typical <= 0 or impulse < typical * PROBE_VOL_MULT:
+    if typical <= 0 or impulse < typical * float(vol_mult):
         return None
     prev_high = float(closed[-1].get("high") or 0)
     if prev_high >= high * (1.0 + limits.probe_break_min_pct / 100.0):
         return None
-    tail = shelf[-PROBE_SHELF_DRIFT_BARS:]
-    if len(tail) >= 2:
-        old = float(tail[0].get("close") or 0)
-        new = float(tail[-1].get("close") or 0)
-        if old > 0 and abs(new / old - 1.0) * 100.0 > PROBE_SHELF_DRIFT_PCT:
-            return None
+    if drift_pct > 0:
+        tail = shelf[-min(PROBE_SHELF_DRIFT_BARS, len(shelf)):]
+        if len(tail) >= 2:
+            old = float(tail[0].get("close") or 0)
+            new = float(tail[-1].get("close") or 0)
+            if old > 0 and abs(new / old - 1.0) * 100.0 > drift_pct:
+                return None
     quiet = [float(bar.get("volume") or 0) for bar in shelf[:-2] if float(bar.get("volume") or 0) > 0]
     base = _median(quiet) if quiet else typical
     if base > 0:
         for bar in shelf[-2:]:
-            if float(bar.get("volume") or 0) >= base * PROBE_VOL_MULT:
+            if float(bar.get("volume") or 0) >= base * float(vol_mult):
                 return None
     return {"shelf": high, "price": price}
+
+
+def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Пробой узкой полки: сутки 3× или локальные 2 часа 2×.
+
+    bars — от старых к новым, последняя свеча может быть ещё открытой.
+    Полка — до двух последних 15-минутных свечей.
+    """
+    if len(bars) < PROBE_EMA_SLOW + 2:
+        return None
+    return _probe_window_setup(
+        bars,
+        shelf_bars=PROBE_SHELF_BARS,
+        vol_mult=PROBE_VOL_MULT,
+        min_len=20,
+        drift_pct=PROBE_SHELF_DRIFT_PCT,
+    ) or _probe_window_setup(
+        bars,
+        shelf_bars=PROBE_LOCAL_BARS,
+        vol_mult=PROBE_LOCAL_VOL_MULT,
+        min_len=PROBE_LOCAL_BARS,
+        drift_pct=PROBE_LOCAL_DRIFT_PCT,
+    )
 
 
 def probe_trends_ok(
@@ -839,8 +889,12 @@ def pick_alts(
     sleeve_pct: float | None = None,
     max_names: int | None = None,
     excluded: set[str] | None = None,
+    blacklist: set[str] | None = None,
 ) -> dict[str, float]:
-    """Рукав: держанные до выхода + новые у нижней полосы, кроме исключений."""
+    """Рукав: держанные до выхода + новые у нижней полосы, кроме исключений.
+
+    Чёрный список снимает и слот уже открытой ноги. Исключение по неделе держанное не трогает.
+    """
     limits = cfg()
     sleeve_pct = limits.sleeve_max_pct if sleeve_pct is None else float(sleeve_pct)
     max_names = limits.sleeve_max_names if max_names is None else int(max_names)
@@ -848,9 +902,14 @@ def pick_alts(
     if slot <= 0:
         return {}
     blocked = {str(t).upper() for t in (excluded or set())}
+    banned = {str(t).upper() for t in (blacklist or set())}
     alts = [r for r in rows if str(r.get("ticker") or "").upper() in sleeve_names()]
     held = sorted(
-        (r for r in alts if _held_value(r) >= ALT_HELD_MIN_USD),
+        (
+            r for r in alts
+            if _held_value(r) >= ALT_HELD_MIN_USD
+            and str(r["ticker"]).upper() not in banned
+        ),
         key=_held_value,
         reverse=True,
     )
@@ -860,6 +919,7 @@ def pick_alts(
             r for r in alts
             if str(r["ticker"]).upper() not in held_t
             and str(r["ticker"]).upper() not in blocked
+            and str(r["ticker"]).upper() not in banned
             and alt_entry_ok(r.get("bb_z"))
         ),
         key=lambda r: float(r["bb_z"]),
@@ -875,6 +935,7 @@ def score_alloc(
     alt_sleeve_pct: float | None = None,
     alt_max_names: int | None = None,
     excluded: set[str] | None = None,
+    blacklist: set[str] | None = None,
 ) -> tuple[dict[str, float], str]:
     """Рукав альтов (Боллинджер 4h). Недобор и исключения остаются кэшем."""
     limits = cfg()
@@ -892,11 +953,13 @@ def score_alloc(
         row for row in candidates
         if str(row.get("ticker") or "").upper() in sleeve_names()
     ]
+    banned = {str(t).upper() for t in (blacklist or set())}
     alt_alloc = pick_alts(
         alt_rows,
         sleeve_pct=sleeve,
         max_names=alt_max_names,
         excluded=excluded,
+        blacklist=banned,
     )
     if not alt_alloc:
         return {}, "Держу кэш: нет альтов у нижней полосы."
@@ -904,6 +967,8 @@ def score_alloc(
     blocked = {str(t).upper() for t in (excluded or set())}
     if blocked:
         body += "; исключения " + ", ".join(sorted(blocked))
+    if banned:
+        body += "; чёрный список " + ", ".join(sorted(banned))
     return alt_alloc, f"Скор-стол: {body}, кэш ≥ {int(floor)}%."
 
 

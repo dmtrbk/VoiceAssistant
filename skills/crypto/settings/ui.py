@@ -362,7 +362,7 @@ QSpinBox, QDoubleSpinBox {{
         return card
 
     def _probe_card(self) -> QFrame:
-        card, col = self._card("Щуп", "Пробой тихой полки, не слот рукава")
+        card, col = self._card("Щуп", "Пробой полки суток или локальный подскок 2ч, не слот рукава")
         top = card.layout()
         assert isinstance(top, QVBoxLayout)
         heading = top.itemAt(0).widget()

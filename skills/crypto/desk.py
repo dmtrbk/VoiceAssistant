@@ -24,6 +24,7 @@ from .common import (
     parse_ai_alloc,
     read_alloc_state,
     read_anchors,
+    read_blacklist,
     read_btc_dip,
     read_entry_arms,
     read_probe,
@@ -49,7 +50,6 @@ from .desk_policy import (
     MAX_DAY_PUMP_PCT,
     PROBE_DAY_MIN_PCT,
     PROBE_MIN_TURNOVER_USD,
-    PROBE_NEAR_HIGH,
     PROBE_ENTRY_HOLD_SEC,
     PROBE_PERIOD_SEC,
     PROBE_SCAN_LIMIT,
@@ -64,6 +64,7 @@ from .desk_policy import (
     probe_arm_action,
     probe_exit_reason,
     probe_quote,
+    probe_scan_rank,
     probe_shelf_setup,
     probe_trends_ok,
     pocket_dip_held,
@@ -367,10 +368,11 @@ class CryptoDeskMixin:
         probe = read_probe()
         probe_ticker = str(probe.get("ticker") or "")
         probe_qty = float(probe.get("qty") or 0)
+        banned = read_blacklist()
         held = []
         for item in positions:
             ticker = item["ticker"]
-            if ticker not in sleeve_names() or self._is_owner_position(ticker):
+            if ticker in banned or ticker not in sleeve_names() or self._is_owner_position(ticker):
                 continue
             value = float(item.get("value") or 0)
             if ticker == probe_ticker and probe_qty > 0:
@@ -385,6 +387,7 @@ class CryptoDeskMixin:
         btc7, btc_day = self._btc_regime()
         rows = candidates if candidates is not None else self.desk_auto_candidates()
         excluded = set(self._sync_exclusions(rows))
+        banned = read_blacklist()
         probe_ticker = str(read_probe().get("ticker") or "")
         if probe_ticker:
             excluded.add(probe_ticker)
@@ -398,7 +401,7 @@ class CryptoDeskMixin:
         if not rows:
             return {}, "Нет кандидатов для автостола."
         floor = cash_floor_pct(btc_chg_7=btc7, btc_chg_day=btc_day)
-        return score_alloc(rows, cash_floor_pct=floor, excluded=excluded)
+        return score_alloc(rows, cash_floor_pct=floor, excluded=excluded, blacklist=banned)
 
     def ai_pick_alloc(self, candidates: list[dict[str, Any]]) -> tuple[dict[str, float], str]:
         """Только для советника / голоса «посоветуй». Автостол сюда не ходит."""
@@ -1001,6 +1004,11 @@ class CryptoDeskMixin:
             if ticker not in sleeve_names():
                 target_alloc.pop(ticker, None)
         excluded = _read_ticker_set(common._EXCLUDED_PATH) or set()
+        banned = read_blacklist()
+        excluded |= banned
+        for ticker in list(target_alloc):
+            if ticker in banned:
+                target_alloc.pop(ticker, None)
         try:
             cash, positions_list = self._wallet()
         except Exception as exc:
@@ -1246,6 +1254,7 @@ class CryptoDeskMixin:
             t for t in positions
             if t in sleeve_names()
             and t not in trail_sold
+            and t not in banned
             and current_values.get(t, 0.0) >= ALT_HELD_MIN_USD
         }
         try:
@@ -1483,6 +1492,8 @@ class CryptoDeskMixin:
     ) -> str | None:
         """Карман SOL на долю счёта или AVA на 50$. Уже открытый не добираем."""
         ticker = ticker or BTC_DIP_TICKER
+        if ticker in read_blacklist():
+            allow_entry = False
         sui = ticker in {"SUI", "AVA"}
         load = read_sui_dip if sui else read_btc_dip
         store = write_sui_dip if sui else write_btc_dip
@@ -1672,8 +1683,12 @@ class CryptoDeskMixin:
             except Exception:
                 fresh = set()
         kept_alt_value = 0.0
+        banned = read_blacklist()
         for ticker, excess in sells:
             if ticker not in sleeve_names():
+                continue
+            if ticker in banned:
+                logger.info("[Крипта] %s в чёрном списке — слот не держу, ногу не сбрасываю", ticker)
                 continue
             if target_alloc.get(ticker, 0.0) <= 0 and self._is_owner_position(ticker):
                 continue
@@ -1731,7 +1746,7 @@ class CryptoDeskMixin:
         buys.sort(key=lambda item: item[1], reverse=True)
         need_sum = sum(need for _ticker, need in buys)
         for ticker, need in buys:
-            if ticker not in sleeve_names():
+            if ticker not in sleeve_names() or ticker in banned:
                 continue
             if cash < _MIN_QUOTE:
                 break
@@ -1812,11 +1827,11 @@ class CryptoDeskMixin:
             _cash, positions = self._wallet()
         except Exception as exc:
             logger.info("[Крипта] щуп кошелёк: %s", exc)
-            return blocked
+            return blocked | read_blacklist()
         for item in positions:
             if float(item.get("value") or 0) >= ALT_HELD_MIN_USD:
                 blocked.add(str(item["ticker"]))
-        return blocked
+        return blocked | read_blacklist()
 
     def _probe_week(self, ticker: str) -> float | None:
         try:
@@ -2009,22 +2024,17 @@ class CryptoDeskMixin:
             logger.info("[Крипта] щуп лента: %s", exc)
             return
         blocked = self._probe_blocked()
-        rows: list[dict[str, Any]] = []
+        ranked: list[tuple[float, dict[str, Any]]] = []
         for row in tape:
             ticker = str(row.get("ticker") or "")
             if not ticker or ticker in blocked or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
                 continue
-            turn = float(row.get("turnover") or 0)
-            chg = float(row.get("chg") or 0)
-            price = float(row.get("price") or 0)
-            high = float(row.get("high") or 0)
-            if turn < PROBE_MIN_TURNOVER_USD or chg < PROBE_DAY_MIN_PCT or chg >= MAX_DAY_PUMP_PCT:
+            rank = probe_scan_rank(row)
+            if rank < 0:
                 continue
-            if high > 0 and price < high * PROBE_NEAR_HIGH:
-                continue
-            rows.append(row)
-        rows.sort(key=lambda item: float(item.get("chg") or 0), reverse=True)
-        for row in rows[:PROBE_SCAN_LIMIT]:
+            ranked.append((rank, row))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        for _rank, row in ranked[:PROBE_SCAN_LIMIT]:
             ticker = str(row["ticker"])
             try:
                 bars = self._probe_bars(ticker, "15", 120)

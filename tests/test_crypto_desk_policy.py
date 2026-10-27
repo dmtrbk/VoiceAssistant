@@ -193,6 +193,20 @@ class TestDeskPolicy(unittest.TestCase):
         alts = policy.pick_alts(rows)
         self.assertEqual(set(alts), {"XRP", "DOGE", "ADA"})
 
+    def test_blacklist_frees_held_slot_weekly_exclusion_does_not(self):
+        rows = [
+            {"ticker": "DOGE", "turnover": 1e9, "bb_z": 0.2, "held_value": 40.0},
+            {"ticker": "XRP", "turnover": 1e9, "bb_z": 0.1, "held_value": 40.0},
+            {"ticker": "LINK", "turnover": 1e9, "bb_z": -3.2},
+        ]
+        weekly = policy.pick_alts(rows, excluded={"DOGE"})
+        self.assertIn("DOGE", weekly)
+        banned = policy.pick_alts(rows, blacklist={"DOGE"})
+        self.assertNotIn("DOGE", banned)
+        self.assertEqual(set(banned), {"XRP", "LINK"})
+        _alloc, why = policy.score_alloc(rows, blacklist={"DOGE"})
+        self.assertIn("чёрный список DOGE", why)
+
     def test_alt_exit_reason(self):
         self.assertEqual(policy.alt_exit_reason(price=93.0, entry=100.0), "стоп")
         self.assertIsNone(policy.alt_exit_reason(price=95.0, entry=100.0))
@@ -487,6 +501,21 @@ class TestDeskPolicy(unittest.TestCase):
         loud[-1]["volume"] = 40.0
         loud[-2]["volume"] = 40.0
         self.assertIsNone(policy.probe_shelf_setup(loud + [prev, live]))
+        wide_then_quiet = (
+            [{"high": 1.25, "low": 0.90, "close": 1.0, "volume": 10.0} for _ in range(50)]
+            + [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(8)]
+        )
+        local = policy.probe_shelf_setup(
+            wide_then_quiet + [prev, {"high": 1.08, "low": 1.0, "close": 1.07, "volume": 22.0}]
+        )
+        self.assertIsNotNone(local)
+        assert local is not None
+        self.assertAlmostEqual(local["shelf"], 1.01)
+        self.assertIsNone(
+            policy.probe_shelf_setup(
+                wide_then_quiet + [prev, {"high": 1.08, "low": 1.0, "close": 1.07, "volume": 15.0}]
+            )
+        )
 
         up = [float(i) for i in range(1, 80)]
         self.assertEqual(policy.ma_trend(up), "bull")
@@ -498,6 +527,30 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.probe_trends_ok("bull", "bull", 30.0))
         self.assertFalse(policy.probe_trends_ok("bull", "neutral", 8.0, week_chg=-6.0))
         self.assertTrue(policy.probe_trends_ok("bull", "neutral", 8.0, week_chg=-4.0))
+        self.assertGreater(
+            policy.probe_scan_rank({
+                "chg": -18.0, "price": 0.108, "low": 0.071, "high": 0.111, "turnover": 5_000_000,
+            }),
+            0,
+        )
+        self.assertGreater(
+            policy.probe_scan_rank({
+                "chg": 7.6, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
+            }),
+            0,
+        )
+        self.assertLess(
+            policy.probe_scan_rank({
+                "chg": -2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
+            }),
+            0,
+        )
+        self.assertLess(
+            policy.probe_scan_rank({
+                "chg": 40.0, "price": 0.026, "low": 0.017, "high": 0.027, "turnover": 2_000_000,
+            }),
+            0,
+        )
 
         base = dict(armed_ts=100.0, price=1.06, shelf=1.01, trend15="bull", day_chg=8.0, arm_px=1.05)
         self.assertEqual(policy.probe_arm_action(now=160.0, **base), "wait")
@@ -510,7 +563,7 @@ class TestDeskPolicy(unittest.TestCase):
             "drop",
         )
         self.assertEqual(
-            policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **{**base, "price": 1.08}),
+            policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **{**base, "price": 1.09}),
             "drop",
         )
         self.assertEqual(
@@ -828,6 +881,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ("probe.json", "_PROBE_PATH"),
             ("entry_arm.json", "_ENTRY_ARM_PATH"),
             ("excluded.json", "_EXCLUDED_PATH"),
+            ("blacklist.json", "_BLACKLIST_PATH"),
             ("anchor.json", "_ANCHOR_PATH"),
         ):
             path = os.path.join(self.tmp.name, name)
@@ -1132,6 +1186,14 @@ class TestDeskAutoUsesScore(unittest.TestCase):
 
     def test_rebalance_keeps_fresh_alt(self):
         placed = self._rebalance_with_fresh_alt(respect_hold=True)
+        self.assertNotIn(("DOGE", "Sell"), placed)
+        self.assertIn(("LINK", "Buy"), placed)
+
+    def test_rebalance_does_not_dump_blacklist(self):
+        from skills.crypto.common import _BLACKLIST_PATH, _write_ticker_set
+
+        _write_ticker_set(_BLACKLIST_PATH, {"DOGE"})
+        placed = self._rebalance_with_fresh_alt(respect_hold=False, target={"LINK": 40.0})
         self.assertNotIn(("DOGE", "Sell"), placed)
         self.assertIn(("LINK", "Buy"), placed)
 

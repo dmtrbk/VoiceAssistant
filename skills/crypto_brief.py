@@ -12,6 +12,7 @@ from skills.crypto.common import (
     _format_usd,
     _read_ticker_set,
     _spoken,
+    read_blacklist,
     read_btc_dip,
     read_probe,
     read_sui_dip,
@@ -115,6 +116,7 @@ def build_crypto_brief(skill) -> str:
     probe = read_probe()
     holds = {str(ticker).upper() for ticker in getattr(skill, "_manual_holds", set())}
     excluded = _read_ticker_set(_EXCLUDED_PATH) or set()
+    banned = read_blacklist()
     dust: list[str] = []
 
     for item in positions:
@@ -155,7 +157,9 @@ def build_crypto_brief(skill) -> str:
         elif ticker == str(probe.get("ticker") or "") and float(probe.get("qty") or 0) > 0:
             sentence += ". Щуп над полкой, выход по медвежьему тренду 15 минут"
         elif ticker in sleeve_names():
-            if ticker in excluded:
+            if ticker in banned:
+                sentence += ". В чёрном списке: новую покупку не открою, эта нога ещё под вершиной и стопом"
+            elif ticker in excluded:
                 sentence += ". Новая покупка закрыта, эта позиция ещё держится"
             bands = None
             try:
@@ -189,6 +193,9 @@ def build_crypto_brief(skill) -> str:
     if excluded:
         names = ", ".join(_name(ticker) for ticker in sorted(excluded))
         parts.append(f"Новые покупки закрыты для: {names}.")
+    if banned:
+        names = ", ".join(_name(ticker) for ticker in sorted(banned))
+        parts.append(f"Чёрный список: {names}.")
     life = read_lifetime_pnl()
     if life is not None:
         parts.append(f"Закрыто по журналу {_format_usd(life, signed=True)}.")

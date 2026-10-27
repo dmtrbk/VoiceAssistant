@@ -45,6 +45,7 @@ _TRADE_HISTORY_KEEP = 5000
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_holds.json")
 _EXCLUDED_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_excluded.json")
+_BLACKLIST_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_blacklist.json")
 _BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_bought.json")
 _TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trades.json")
 _DAILY_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_daily.json")
@@ -314,6 +315,11 @@ def _read_ticker_set(path: str) -> set[str] | None:
     if not isinstance(raw, list):
         return set()
     return {_normalize_ticker(str(item)) for item in raw if str(item).strip()}
+
+
+def read_blacklist(path: str | None = None) -> set[str]:
+    """Постоянный чёрный список. Недельные исключения его не снимают."""
+    return _read_ticker_set(path or _BLACKLIST_PATH) or set()
 
 
 def _write_ticker_set(path: str, tickers: set[str]) -> None:
