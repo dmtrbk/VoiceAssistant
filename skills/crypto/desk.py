@@ -49,7 +49,6 @@ from .desk_policy import (
     ALT_HELD_MIN_USD,
     ALT_MIN_HOLD_HOURS,
     DESK_ALT_SLEEVE,
-    MAX_DAY_PUMP_PCT,
     PROBE_DAY_MIN_PCT,
     PROBE_MIN_TURNOVER_USD,
     PROBE_ENTRY_HOLD_SEC,
@@ -74,6 +73,7 @@ from .desk_policy import (
     probe_scan_rank,
     probe_trends_ok,
     pocket_dip_held,
+    pocket_dip_pending,
     pocket_swing,
     update_pocket_swing_arm,
     POCKET_SWING_BARS,
@@ -706,8 +706,7 @@ class CryptoDeskMixin:
 
     def _pocket_swing_low(self, ticker: str, day_chg: float | None) -> tuple[bool, float | None]:
         """(False, None) — свечей нет, дно не трогаем. (True, low|None) — откат известен."""
-        if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
-            return True, None
+        del day_chg
         try:
             bars = self._probe_bars(ticker, "15", POCKET_SWING_BARS + 2)
         except Exception as exc:
@@ -735,8 +734,6 @@ class CryptoDeskMixin:
         now: float,
         taped: dict[str, float],
     ) -> dict[str, float] | None:
-        if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
-            return None
         known, swing_low = self._pocket_swing_low(ticker, day_chg)
         if not known:
             return state
@@ -744,7 +741,16 @@ class CryptoDeskMixin:
             taped_low = float(taped[ticker])
             if taped_low < float(state["low"]) - 1e-12:
                 state = {**state, "low": taped_low, "ts": now}
-        updated = update_pocket_swing_arm(state, price=price, swing_low=swing_low, now=now)
+        keep = False
+        if state and float(state.get("low") or 0) > 0:
+            try:
+                bars = self._probe_bars(ticker, "15", POCKET_SWING_BARS + 2)
+                keep = pocket_dip_pending(bars, float(state["low"]))
+            except Exception:
+                keep = False
+        updated = update_pocket_swing_arm(
+            state, price=price, swing_low=swing_low, now=now, keep=keep
+        )
         fresh = state is None or (
             updated is not None and float(updated["low"]) < float(state.get("low") or 0) - 1e-12
         )
@@ -799,9 +805,6 @@ class CryptoDeskMixin:
             band = bands.get(ticker) or {}
             z = band.get("z") if band else None
             if z is None and ticker not in alts:
-                continue
-            day = day_chgs.get(ticker)
-            if day is not None and float(day) >= MAX_DAY_PUMP_PCT and ticker not in alts:
                 continue
             state = alts.get(ticker)
             if state and taped.get(ticker):
@@ -1583,8 +1586,6 @@ class CryptoDeskMixin:
             )
             return phrase
         if blocked or not allow_entry:
-            return None
-        if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
             return None
         arms_now = read_entry_arms()
         arm = arms_now.get("ava" if sui else "pocket")

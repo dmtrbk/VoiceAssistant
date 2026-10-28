@@ -46,7 +46,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.band_pct_for("BTC"), policy.REBALANCE_BAND_ALT_PCT)
         self.assertEqual(policy.band_pct_for("DOGE"), policy.REBALANCE_BAND_ALT_PCT)
 
-    def test_filter_drops_pump_and_cooldown(self):
+    def test_filter_keeps_pump_drops_cooldown(self):
         rows = [
             {"ticker": "BTC", "turnover": 1e9, "chg": 1.0, "chg_7": 2.0},
             {"ticker": "DOGE", "turnover": 1e9, "chg": 40.0, "chg_7": 5.0},
@@ -60,7 +60,7 @@ class TestDeskPolicy(unittest.TestCase):
         )
         tickers = {r["ticker"] for r in filtered}
         self.assertIn("BTC", tickers)
-        self.assertNotIn("DOGE", tickers)
+        self.assertIn("DOGE", tickers)
         self.assertNotIn("SOL", tickers)
 
     def test_score_alloc_keeps_cash_floor(self):
@@ -472,7 +472,7 @@ class TestDeskPolicy(unittest.TestCase):
                 {"ticker": "HYPE", "bb_z": -3.2, "held_value": 0},
             ])
             self.assertEqual(alloc.get("HYPE"), policy.alt_slot_pct())
-            self.assertFalse(policy.should_watch_dip_buy(
+            self.assertTrue(policy.should_watch_dip_buy(
                 ticker="DOOD",
                 day_chg=200.0,
                 current_value=0,
@@ -772,6 +772,30 @@ class TestDeskPolicy(unittest.TestCase):
             {"high": 1.03, "low": 1.00, "close": 1.01, "volume": 1.0},
         ]
         self.assertFalse(policy.pocket_dip_held(undercut, 0.99))
+        # Тик ленты чуть ниже low свечи — это та же свеча.
+        tape = [
+            {"high": 1.05, "low": 0.994, "close": 1.00, "volume": 1.0},
+            {"high": 1.04, "low": 1.00, "close": 1.02, "volume": 1.0},
+            {"high": 1.05, "low": 1.02, "close": 1.04, "volume": 1.0},
+        ]
+        self.assertTrue(policy.pocket_dip_held(tape, 0.99))
+        self.assertFalse(policy.pocket_dip_pending(tape, 0.99))
+        waiting_tape = [
+            {"high": 1.08, "low": 1.05, "close": 1.06, "volume": 1.0},
+            {"high": 1.05, "low": 0.994, "close": 1.00, "volume": 1.0},
+            {"high": 1.04, "low": 1.01, "close": 1.03, "volume": 1.0},
+        ]
+        self.assertTrue(policy.pocket_dip_pending(waiting_tape, 0.99))
+        self.assertFalse(policy.pocket_dip_held(waiting_tape, 0.99))
+        far = [
+            {"high": 1.10, "low": 1.05, "close": 1.06, "volume": 1.0},
+            {"high": 1.08, "low": 1.04, "close": 1.05, "volume": 1.0},
+            {"high": 1.07, "low": 1.04, "close": 1.05, "volume": 1.0},
+        ]
+        self.assertFalse(policy.pocket_dip_held(far, 0.99))
+        self.assertIsNotNone(
+            policy.update_pocket_swing_arm(armed, price=1.04, swing_low=None, now=2.0, keep=True)
+        )
         self.assertEqual(policy.alt_slot_pct(), 25.0)
         self.assertAlmostEqual(policy.btc_dip_quote(1000.0), 250.0)
         self.assertEqual(policy.sui_dip_quote(), 50.0)

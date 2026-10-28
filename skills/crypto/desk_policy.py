@@ -51,7 +51,8 @@ ALT_EXIT_MIN_GAIN_PCT = 1.0  # старый порог у средней; его
 ALT_STOP_LOSS_PCT = 7.0
 ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
-MAX_DAY_PUMP_PCT = 25.0
+# Суточный потолок +25% с входов снят: щуп, карман и рукав его больше не режут.
+
 # Стейблы не рукав, даже если оборот большой. Базовый список остаётся всегда.
 SLEEVE_SKIP = frozenset({
     "USDT", "USDC", "DAI", "FDUSD", "USDE", "USDS", "USD1", "RLUSD",
@@ -785,23 +786,51 @@ def pocket_bounce_ready(
     return px >= low * (1.0 + limits.pocket_bounce_pct / 100.0) - 1e-12
 
 
+# Лента видит минимум чуть ниже low свечи Bybit. 0,5% — та же свеча, не другой откат.
+POCKET_DIP_LOW_SLACK_PCT = 0.5
+
+
+def _dip_candle(bar_low: float, floor: float) -> bool:
+    """Свеча напечатала это дно, с допуском на тик ленты ниже kline."""
+    if bar_low <= 0 or floor <= 0:
+        return False
+    return bar_low <= floor * (1.0 + POCKET_DIP_LOW_SLACK_PCT / 100.0) + 1e-12
+
+
+def _pocket_dip_index(bars: list[dict[str, Any]], low: float) -> int | None:
+    """Индекс свечи дна среди закрытых. None — дна в закрытых нет или открытая его обновляет."""
+    if len(bars) < 3 or float(low or 0) <= 0:
+        return None
+    floor = float(low)
+    if float(bars[-1].get("low") or 0) <= floor:
+        return None
+    closed = bars[:-1]
+    for i in range(len(closed) - 1, -1, -1):
+        if _dip_candle(float(closed[i].get("low") or 0), floor):
+            return i
+    return None
+
+
+def pocket_dip_pending(bars: list[dict[str, Any]], low: float) -> bool:
+    """Дно в последней закрытой свече, следующая ещё не закрылась. Взвод не снимать."""
+    idx = _pocket_dip_index(bars, low)
+    if idx is None:
+        return False
+    return idx == len(bars) - 2
+
+
 def pocket_dip_held(bars: list[dict[str, Any]], low: float) -> bool:
     """Дно уже в закрытой свече, и следующая 15м закрылась, не обновив его.
 
     bars — от старых к новым, последняя свеча может быть открытой.
+    Тик ленты чуть ниже low свечи считается тем же дном.
     """
     if len(bars) < 3 or float(low or 0) <= 0:
         return False
     try:
         floor = float(low)
-        if float(bars[-1].get("low") or 0) <= floor:
-            return False
+        idx = _pocket_dip_index(bars, low)
         closed = bars[:-1]
-        idx = None
-        for i in range(len(closed) - 1, -1, -1):
-            if float(closed[i].get("low") or 0) <= floor:
-                idx = i
-                break
         # Подтверждение — именно последняя закрытая свеча. Часовой давности откат уже отыгран.
         if idx is None or idx + 1 != len(closed) - 1:
             return False
@@ -842,11 +871,12 @@ def update_pocket_swing_arm(
     price: float,
     swing_low: float | None,
     now: float,
+    keep: bool = False,
 ) -> dict[str, float] | None:
     """Откат ≥3% запоминает дно. Отскок +1% ещё покупаем, даже если откат уже меньше 3%.
 
     Сигнал снимается, когда цена ушла выше входа больше чем на 1 п.п.:
-    окно отскока пропущено.
+    окно отскока пропущено. Пока ждём закрытие следующей свечи — не снимаем.
     """
     px = float(price or 0)
     if swing_low is not None and float(swing_low) > 0:
@@ -859,7 +889,7 @@ def update_pocket_swing_arm(
     if state is None or px <= 0:
         return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
     ceiling = float(state["low"]) * (1.0 + (cfg().pocket_bounce_pct + 1.0) / 100.0)
-    if px > ceiling:
+    if px > ceiling and not keep:
         return None
     return {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
 
@@ -1071,12 +1101,9 @@ def filter_auto_candidates(
         if ticker in cool and ticker not in held_u:
             continue
         turnover = float(row.get("turnover") or 0)
-        chg = float(row.get("chg") or 0)
-        # Уже держанное не режем по обороту/пампу — иначе не сможем довести ребаланс.
+        # Уже держанное не режем по обороту — иначе не сможем довести ребаланс.
         if ticker not in held_u:
             if turnover > 0 and turnover < MIN_TURNOVER_USD:
-                continue
-            if chg >= MAX_DAY_PUMP_PCT:
                 continue
         seen.add(ticker)
         out.append(row)
@@ -1347,13 +1374,12 @@ def should_watch_dip_buy(
     bb_z: float | None = None,
     excluded: set[str] | None = None,
 ) -> bool:
-    """Новый альт у нижней полосы. Держанный не усредняем, исключённый и памп суток не берём."""
+    """Новый альт у нижней полосы. Держанный не усредняем, исключённый не берём."""
     del dip_pct
     t = str(ticker or "").upper()
     if t not in sleeve_names() or t in {str(x).upper() for x in (excluded or set())}:
         return False
-    if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
-        return False
+    del day_chg
     gap = float(target_value) - float(current_value)
     if gap < float(min_trade_usd):
         return False
