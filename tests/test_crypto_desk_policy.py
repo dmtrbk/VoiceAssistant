@@ -577,6 +577,42 @@ class TestDeskPolicy(unittest.TestCase):
             policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **base, week_chg=-6.0),
             "drop",
         )
+        sprint = dict(base, algo=policy.PROBE_ALGO_SPRINT)
+        self.assertEqual(policy.probe_arm_action(now=130.0, **sprint), "wait")
+        self.assertEqual(
+            policy.probe_arm_action(now=100.0 + policy.PROBE_SPRINT_HOLD_SEC, **sprint),
+            "buy",
+        )
+        # Спринт терпит больший chase, чем классика.
+        self.assertEqual(
+            policy.probe_arm_action(
+                now=100.0 + policy.PROBE_SPRINT_HOLD_SEC,
+                **{**sprint, "price": 1.05 * 1.04},
+            ),
+            "buy",
+        )
+
+        quiet5 = [{"high": 1.0, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(14)]
+        boom = {"high": 1.08, "low": 1.0, "close": 1.06, "volume": 40.0}
+        live5 = {"high": 1.07, "low": 1.04, "close": 1.055, "volume": 30.0}
+        impulse = policy.probe_impulse_setup(quiet5 + [boom, live5])
+        self.assertIsNotNone(impulse)
+        assert impulse is not None
+        self.assertAlmostEqual(impulse["shelf"], 1.0)
+        self.assertIsNone(
+            policy.probe_impulse_setup(
+                quiet5 + [boom, {**live5, "close": 1.20, "high": 1.21}]
+            )
+        )
+        picked = policy.probe_pick_setup(
+            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(60)]
+            + [{"high": 1.02, "low": 0.99, "close": 1.0, "volume": 10.0},
+               {"high": 1.08, "low": 1.0, "close": 1.06, "volume": 40.0}],
+            quiet5 + [boom, live5],
+        )
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked["algo"], policy.PROBE_ALGO_IMPULSE)
         self.assertEqual(
             policy.probe_exit_reason(price=1.02, entry=1.05, shelf=1.0, trend15="bull"),
             "ожидание",
@@ -620,6 +656,38 @@ class TestDeskPolicy(unittest.TestCase):
                 price=1.06, entry=1.05, shelf=1.0, trend15="bull", arm_px=1.07, peak=1.08,
             ),
             "ожидание",
+        )
+        # Подножка: до +6% пика не режем ожидание/дно — только стоп и полка.
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.02,
+                entry=1.05,
+                shelf=1.0,
+                trend15="bull",
+                arm_px=1.07,
+                peak=1.06,
+                algo=policy.PROBE_ALGO_SPRINT,
+            )
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.04,
+                entry=1.05,
+                shelf=1.0,
+                trend15="bull",
+                entry_low=1.04,
+                algo=policy.PROBE_ALGO_IMPULSE,
+            )
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=1.0,
+                entry=1.05,
+                shelf=1.0,
+                trend15="bull",
+                algo=policy.PROBE_ALGO_SPRINT,
+            ),
+            "полка",
         )
         self.assertEqual(policy.probe_quote(), 30.0)
 

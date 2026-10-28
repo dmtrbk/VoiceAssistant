@@ -80,9 +80,23 @@ PROBE_RUN_PCT = 6.0
 PROBE_MAX_LOSS_PCT = 8.0
 PROBE_SCAN_LIMIT = 10
 PROBE_PERIOD_SEC = 60
+PROBE_ARMED_PERIOD_SEC = 15
 PROBE_EMA_FAST = 20
 PROBE_EMA_SLOW = 50
 PROBE_SHELF_BARS = 96
+# Несколько реакций щупа: импульс (подножка) → спринт по полке → классика 4 мин.
+PROBE_ALGO_IMPULSE = "impulse"
+PROBE_ALGO_SPRINT = "sprint"
+PROBE_ALGO_SHELF = "shelf"
+PROBE_ALGO_ORDER = (PROBE_ALGO_IMPULSE, PROBE_ALGO_SPRINT, PROBE_ALGO_SHELF)
+PROBE_SPRINT_HOLD_SEC = 45
+PROBE_SPRINT_CHASE_PCT = 5.0
+PROBE_IMPULSE_HOLD_SEC = 20
+PROBE_IMPULSE_CHASE_PCT = 7.0
+PROBE_IMPULSE_LOOKBACK = 12
+PROBE_IMPULSE_VOL_MULT = 2.5
+PROBE_IMPULSE_BREAK_MIN_PCT = 3.0
+PROBE_IMPULSE_BREAK_MAX_PCT = 15.0
 # Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
 TAKE_PROFIT_DAY_PCT = 18.0
 TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем на подъёме
@@ -378,12 +392,8 @@ def _probe_window_setup(
     return {"shelf": high, "price": price}
 
 
-def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
-    """Пробой узкой полки: сутки 3× или локальные 2 часа 2×.
-
-    bars — от старых к новым, последняя свеча может быть ещё открытой.
-    Полка — до двух последних 15-минутных свечей.
-    """
+def probe_shelf_setup_daily(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Суточная тихая полка + объёмный пробой."""
     if len(bars) < PROBE_EMA_SLOW + 2:
         return None
     return _probe_window_setup(
@@ -392,13 +402,112 @@ def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         vol_mult=PROBE_VOL_MULT,
         min_len=20,
         drift_pct=PROBE_SHELF_DRIFT_PCT,
-    ) or _probe_window_setup(
+    )
+
+
+def probe_shelf_setup_local(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Локальная полка ~2ч — быстрее суточной, для спринта."""
+    if len(bars) < PROBE_LOCAL_BARS + 2:
+        return None
+    return _probe_window_setup(
         bars,
         shelf_bars=PROBE_LOCAL_BARS,
         vol_mult=PROBE_LOCAL_VOL_MULT,
         min_len=PROBE_LOCAL_BARS,
         drift_pct=PROBE_LOCAL_DRIFT_PCT,
     )
+
+
+def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Пробой узкой полки: сутки 3× или локальные 2 часа 2×.
+
+    bars — от старых к новым, последняя свеча может быть ещё открытой.
+    Полка — до двух последних 15-минутных свечей.
+    """
+    return probe_shelf_setup_daily(bars) or probe_shelf_setup_local(bars)
+
+
+def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """5м подножка: объёмный пробой локального хая без тихой суточной полки.
+
+    bars — от старых к новым, последняя может быть открытой.
+    """
+    need = PROBE_IMPULSE_LOOKBACK + 3
+    if len(bars) < need:
+        return None
+    forming = bars[-1]
+    closed = bars[:-1]
+    if len(closed) < PROBE_IMPULSE_LOOKBACK + 1:
+        return None
+    window = closed[-(PROBE_IMPULSE_LOOKBACK + 1):-1]
+    breakout = closed[-1]
+    try:
+        prior_high = max(float(bar["high"]) for bar in window)
+        vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
+        impulse_vol = max(float(breakout.get("volume") or 0), float(forming.get("volume") or 0))
+        price = float(forming.get("close") or 0)
+        break_close = float(breakout.get("close") or 0)
+        break_high = float(breakout.get("high") or 0)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if prior_high <= 0 or price <= 0 or not vols:
+        return None
+    typical = _median(vols)
+    if typical <= 0 or impulse_vol < typical * PROBE_IMPULSE_VOL_MULT:
+        return None
+    floor = prior_high * (1.0 + PROBE_IMPULSE_BREAK_MIN_PCT / 100.0)
+    ceiling = prior_high * (1.0 + PROBE_IMPULSE_BREAK_MAX_PCT / 100.0)
+    # Пробой уже на закрытой 5м или на живой свече.
+    tip = max(break_close, break_high, price)
+    if tip < floor or price > ceiling:
+        return None
+    if price < prior_high:
+        return None
+    return {"shelf": prior_high, "price": price}
+
+
+def probe_algo_params(algo: str) -> dict[str, float]:
+    """hold_sec / chase_pct для алгоритма щупа."""
+    name = str(algo or PROBE_ALGO_SHELF).strip().lower() or PROBE_ALGO_SHELF
+    if name == PROBE_ALGO_IMPULSE:
+        return {
+            "hold_sec": float(PROBE_IMPULSE_HOLD_SEC),
+            "chase_pct": float(PROBE_IMPULSE_CHASE_PCT),
+        }
+    if name == PROBE_ALGO_SPRINT:
+        return {
+            "hold_sec": float(PROBE_SPRINT_HOLD_SEC),
+            "chase_pct": float(PROBE_SPRINT_CHASE_PCT),
+        }
+    return {
+        "hold_sec": float(PROBE_ENTRY_HOLD_SEC),
+        "chase_pct": float(PROBE_CHASE_PCT),
+    }
+
+
+def probe_pick_setup(
+    bars15: list[dict[str, Any]],
+    bars5: list[dict[str, Any]] | None = None,
+    *,
+    order: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Первый сработавший алгоритм: impulse (5м) → sprint (локальная полка) → shelf (сутки)."""
+    seq = tuple(order or PROBE_ALGO_ORDER)
+    for algo in seq:
+        name = str(algo or "").strip().lower()
+        if name == PROBE_ALGO_IMPULSE:
+            setup = probe_impulse_setup(bars5 or [])
+        elif name == PROBE_ALGO_SPRINT:
+            setup = probe_shelf_setup_local(bars15)
+        elif name == PROBE_ALGO_SHELF:
+            setup = probe_shelf_setup_daily(bars15)
+        else:
+            continue
+        if not setup:
+            continue
+        params = probe_algo_params(name)
+        return {**setup, "algo": name, **params}
+    return None
 
 
 def probe_trends_ok(
@@ -429,6 +538,9 @@ def probe_arm_action(
     day_chg: float | None,
     arm_px: float = 0.0,
     week_chg: float | None = None,
+    algo: str = "",
+    hold_sec: float | None = None,
+    chase_pct: float | None = None,
 ) -> str:
     """buy — держится над полкой; drop — пробой погас или цена ушла; wait — ещё рано."""
     if shelf <= 0 or price <= shelf or trend15 != "bull":
@@ -437,9 +549,12 @@ def probe_arm_action(
         return "drop"
     if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
         return "drop"
-    if arm_px > 0 and price > arm_px * (1.0 + PROBE_CHASE_PCT / 100.0):
+    params = probe_algo_params(algo)
+    chase = float(params["chase_pct"] if chase_pct is None else chase_pct)
+    hold = float(params["hold_sec"] if hold_sec is None else hold_sec)
+    if arm_px > 0 and price > arm_px * (1.0 + chase / 100.0):
         return "drop"
-    if float(now) - float(armed_ts) < PROBE_ENTRY_HOLD_SEC:
+    if float(now) - float(armed_ts) < hold:
         return "wait"
     return "buy"
 
@@ -453,8 +568,13 @@ def probe_exit_reason(
     arm_px: float = 0.0,
     peak: float = 0.0,
     entry_low: float = 0.0,
+    algo: str = "",
 ) -> str | None:
-    """Маленький ход режется возвратом к цене ожидания. Уехавший — медвежьим 15м."""
+    """Маленький ход режется возвратом к цене ожидания. Уехавший — медвежьим 15м.
+
+    impulse/sprint — подножка: до пика +PROBE_RUN_PCT не режем «ожидание»/«дно»,
+    иначе импульс срезается на шуме. Стоп и полка остаются.
+    """
     px = float(price or 0)
     ent = float(entry or 0)
     level = float(shelf or 0)
@@ -467,11 +587,14 @@ def probe_exit_reason(
         return "полка"
     high = max(float(peak or 0), px)
     run = high >= ent * (1.0 + PROBE_RUN_PCT / 100.0)
-    if not run and float(entry_low or 0) > 0 and px <= float(entry_low):
-        return "дно"
-    scratch = float(arm_px or 0) or ent
-    if not run and scratch > 0 and px <= scratch:
-        return "ожидание"
+    name = str(algo or "").strip().lower()
+    footboard = name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPRINT}
+    if not run and not footboard:
+        if float(entry_low or 0) > 0 and px <= float(entry_low):
+            return "дно"
+        scratch = float(arm_px or 0) or ent
+        if scratch > 0 and px <= scratch:
+            return "ожидание"
     if run and trend15 == "bear":
         return "тренд"
     if not run and gain <= 0 and trend15 != "bull":

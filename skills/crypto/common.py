@@ -664,6 +664,7 @@ def _empty_probe() -> dict[str, Any]:
         "arm_shelf": 0.0,
         "arm_ts": 0.0,
         "arm_px": 0.0,
+        "arm_algo": "",
         "peak": 0.0,
         "low": 0.0,
         "legs": [],
@@ -692,6 +693,7 @@ def _probe_leg_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
         "arm_px": _num("arm_px"),
         "peak": _num("peak"),
         "low": _num("low"),
+        "algo": str(raw.get("algo") or "").strip().lower(),
     }
 
 
@@ -733,6 +735,7 @@ def read_probe(path: str | None = None) -> dict[str, Any]:
         return empty
     out = _empty_probe()
     out["arm_ticker"] = _normalize_ticker(str(raw.get("arm_ticker") or ""))
+    out["arm_algo"] = str(raw.get("arm_algo") or "").strip().lower()
     for key in ("arm_shelf", "arm_ts", "arm_px"):
         try:
             out[key] = float(raw.get(key) or 0)
@@ -757,6 +760,7 @@ def read_probe(path: str | None = None) -> dict[str, Any]:
         out["arm_ticker"] = ""
         out["arm_shelf"] = 0.0
         out["arm_ts"] = 0.0
+        out["arm_algo"] = ""
         if out["qty"] <= 0:
             out["arm_px"] = 0.0
     return out
@@ -772,8 +776,10 @@ def write_probe(
     arm_shelf: float = 0.0,
     arm_ts: float = 0.0,
     arm_px: float = 0.0,
+    arm_algo: str = "",
     peak: float = 0.0,
     low: float = 0.0,
+    algo: str = "",
     drop: str = "",
     clear_arm: bool = False,
     path: str | None = None,
@@ -801,6 +807,11 @@ def write_probe(
         legs = [leg for leg in legs if leg["ticker"] != gone]
     name = _normalize_ticker(ticker)
     if name and float(qty) > 0 and float(entry) > 0:
+        prev_algo = ""
+        for leg in legs:
+            if leg["ticker"] == name:
+                prev_algo = str(leg.get("algo") or "")
+                break
         legs = [leg for leg in legs if leg["ticker"] != name]
         legs.append({
             "ticker": name,
@@ -810,6 +821,7 @@ def write_probe(
             "arm_px": float(arm_px or 0),
             "peak": float(peak or 0),
             "low": float(low or 0),
+            "algo": str(algo or prev_algo or "").strip().lower(),
         })
     arm_name = _normalize_ticker(arm_ticker)
     keep_arm = float(arm_shelf or 0) > 0 and arm_name
@@ -820,10 +832,13 @@ def write_probe(
         current["arm_ts"] = float(arm_ts or 0)
         if float(arm_px or 0) > 0:
             current["arm_px"] = float(arm_px)
+        if arm_algo or not current.get("arm_algo"):
+            current["arm_algo"] = str(arm_algo or "").strip().lower()
     elif clear_arm or (gone and gone == armed) or (name and name == armed):
         current["arm_ticker"] = ""
         current["arm_shelf"] = 0.0
         current["arm_ts"] = 0.0
+        current["arm_algo"] = ""
         if not legs:
             current["arm_px"] = 0.0
     payload: dict[str, Any] = {"legs": legs}
@@ -833,6 +848,8 @@ def write_probe(
         payload["arm_ts"] = float(current.get("arm_ts") or 0)
         if float(current.get("arm_px") or 0) > 0:
             payload["arm_px"] = float(current["arm_px"])
+        if current.get("arm_algo"):
+            payload["arm_algo"] = str(current["arm_algo"])
     if legs:
         first = legs[0]
         payload["ticker"] = first["ticker"]
