@@ -51,7 +51,7 @@ ALT_EXIT_MIN_GAIN_PCT = 1.0  # старый порог у средней; его
 ALT_STOP_LOSS_PCT = 7.0
 ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
-# Суточный потолок +25% с входов снят: щуп, карман и рукав его больше не режут.
+# Суточный потолок +25% остался только у impulse: уже разогнанную свечу не догоняем.
 
 # Стейблы не рукав, даже если оборот большой. Базовый список остаётся всегда.
 SLEEVE_SKIP = frozenset({
@@ -104,6 +104,7 @@ PROBE_IMPULSE_LOOKBACK = 12
 PROBE_IMPULSE_VOL_MULT = 2.5
 PROBE_IMPULSE_BREAK_MIN_PCT = 3.0
 PROBE_IMPULSE_BREAK_MAX_PCT = 15.0
+PROBE_IMPULSE_MAX_DAY_PCT = 25.0
 # Лестница: цена у хая окна, ход есть, но свежего пробоя +4% нет — это не полка.
 PROBE_GRIND_BARS = 16
 PROBE_GRIND_NEAR_HIGH = 0.985
@@ -560,11 +561,21 @@ def probe_pick_setup(
     bars5: list[dict[str, Any]] | None = None,
     *,
     order: tuple[str, ...] | list[str] | None = None,
+    day_chg: float | None = None,
 ) -> dict[str, Any] | None:
-    """Первый сработавший: impulse → grind → sprint → shelf."""
+    """Первый сработавший: impulse → grind → sprint → shelf.
+
+    Impulse не берём, если сутки уже +25% и выше: это покупка у пика дня.
+    """
     seq = tuple(order or PROBE_ALGO_ORDER)
     for algo in seq:
         name = str(algo or "").strip().lower()
+        if (
+            name == PROBE_ALGO_IMPULSE
+            and day_chg is not None
+            and float(day_chg) >= PROBE_IMPULSE_MAX_DAY_PCT
+        ):
+            continue
         if name == PROBE_ALGO_IMPULSE:
             setup = probe_impulse_setup(bars5 or [])
         elif name == PROBE_ALGO_GRIND:
@@ -588,7 +599,7 @@ def probe_trends_ok(
     day_chg: float | None,
     week_chg: float | None = None,
 ) -> bool:
-    """15м бычий, час не медвежий, неделя не слабее −5%. Суточный потолок +25% у щупа снят."""
+    """15м бычий, час не медвежий, неделя не слабее −5%. Потолок суток только у impulse."""
     if trend15 != "bull" or trend1h == "bear":
         return False
     if day_chg is None:
@@ -614,6 +625,12 @@ def probe_arm_action(
 ) -> str:
     """buy — держится над полкой; drop — пробой погас или цена ушла; wait — ещё рано."""
     if shelf <= 0 or price <= shelf or trend15 != "bull":
+        return "drop"
+    if (
+        str(algo or "").strip().lower() == PROBE_ALGO_IMPULSE
+        and day_chg is not None
+        and float(day_chg) >= PROBE_IMPULSE_MAX_DAY_PCT
+    ):
         return "drop"
     if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
         return "drop"

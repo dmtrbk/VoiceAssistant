@@ -613,6 +613,26 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNotNone(picked)
         assert picked is not None
         self.assertEqual(picked["algo"], policy.PROBE_ALGO_IMPULSE)
+        late_day = policy.probe_pick_setup(
+            [],
+            quiet5 + [boom, live5],
+            order=(policy.PROBE_ALGO_IMPULSE,),
+            day_chg=40.0,
+        )
+        self.assertIsNone(late_day)
+        self.assertEqual(
+            policy.probe_arm_action(
+                now=100.0 + policy.PROBE_IMPULSE_HOLD_SEC,
+                armed_ts=100.0,
+                price=1.06,
+                shelf=1.01,
+                trend15="bull",
+                day_chg=40.0,
+                arm_px=1.05,
+                algo=policy.PROBE_ALGO_IMPULSE,
+            ),
+            "drop",
+        )
 
         stair = []
         px = 1.0

@@ -2074,7 +2074,7 @@ class CryptoDeskMixin:
             except Exception as exc:
                 logger.info("[Крипта] щуп %s 5м: %s", ticker, exc)
                 bars5 = []
-            setup = probe_pick_setup(bars, bars5)
+            setup = probe_pick_setup(bars, bars5, day_chg=float(row.get("chg") or 0))
             if not setup:
                 continue
             try:
