@@ -23,13 +23,14 @@ class DeskSettings:
     sleeve_max_names: int = 2
     sleeve_entry_z: float = -2.5
     sleeve_bounce_pct: float = 1.5
-    sleeve_hold_sec: float = 20 * 60
+    sleeve_hold_sec: float = 5 * 60
+    sleeve_chase_pct: float = 5.0
     sleeve_still_z: float = -1.2
     sleeve_cancel_z: float = -0.5
     sleeve_exit_arm_pct: float = 3.0
     sleeve_exit_pullback_pct: float = 0.5
-    sleeve_exit_hold_sec: float = 5 * 60
-    sleeve_stop_pct: float = 7.0
+    sleeve_exit_hold_sec: float = 2 * 60
+    sleeve_stop_pct: float = 4.0
     probe_on: bool = True
     probe_usd: float = 30.0
     probe_max_loss_pct: float = 8.0
@@ -55,13 +56,14 @@ _LIMITS: dict[str, tuple[float, float]] = {
     "sleeve_max_names": (1, 6),
     "sleeve_entry_z": (-4.0, -1.0),
     "sleeve_bounce_pct": (0.3, 5.0),
-    "sleeve_hold_sec": (5 * 60, 60 * 60),
+    "sleeve_hold_sec": (2 * 60, 40 * 60),
+    "sleeve_chase_pct": (2.0, 15.0),
     "sleeve_still_z": (-2.5, 0.0),
     "sleeve_cancel_z": (-2.0, 0.0),
     "sleeve_exit_arm_pct": (1.0, 10.0),
     "sleeve_exit_pullback_pct": (0.2, 3.0),
     "sleeve_exit_hold_sec": (60, 30 * 60),
-    "sleeve_stop_pct": (3.0, 20.0),
+    "sleeve_stop_pct": (2.0, 20.0),
     "probe_usd": (10.0, 100.0),
     "probe_max_loss_pct": (3.0, 20.0),
     "probe_shelf_range_pct": (4.0, 25.0),
@@ -104,6 +106,10 @@ def clamp_settings(data: DeskSettings) -> DeskSettings:
     high = float(values["probe_break_max_pct"])
     if low >= high:
         values["probe_break_max_pct"] = clamp_field("probe_break_max_pct", low + 0.5)
+    bounce = float(values["sleeve_bounce_pct"])
+    chase = float(values["sleeve_chase_pct"])
+    if bounce >= chase:
+        values["sleeve_chase_pct"] = clamp_field("sleeve_chase_pct", bounce + 0.5)
     return DeskSettings(**values)
 
 
@@ -138,6 +144,7 @@ def to_payload(data: DeskSettings) -> dict[str, object]:
             "entry_z": data.sleeve_entry_z,
             "bounce_pct": data.sleeve_bounce_pct,
             "hold_sec": data.sleeve_hold_sec,
+            "chase_pct": data.sleeve_chase_pct,
             "still_z": data.sleeve_still_z,
             "cancel_z": data.sleeve_cancel_z,
             "exit_arm_pct": data.sleeve_exit_arm_pct,
@@ -188,6 +195,7 @@ def from_payload(raw: object) -> DeskSettings:
         "sleeve_entry_z": sleeve.get("entry_z"),
         "sleeve_bounce_pct": sleeve.get("bounce_pct"),
         "sleeve_hold_sec": sleeve.get("hold_sec"),
+        "sleeve_chase_pct": sleeve.get("chase_pct"),
         "sleeve_still_z": sleeve.get("still_z"),
         "sleeve_cancel_z": sleeve.get("cancel_z"),
         "sleeve_exit_arm_pct": sleeve.get("exit_arm_pct"),

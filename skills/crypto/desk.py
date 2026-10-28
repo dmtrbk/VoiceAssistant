@@ -82,6 +82,7 @@ from .desk_policy import (
     ma_trend,
     position_basis,
     alt_bounce_ready,
+    alt_chase_too_far,
     alt_exit_reason,
     update_alt_exit_arm,
     alt_sleeve_qty_for_exit,
@@ -111,11 +112,21 @@ from .desk_policy import (
     WATCH_PERIOD_NEAR,
 )
 from . import journal as crypto_journal
+from .reconcile import (
+    ORPHAN_ORDER_AGE_SEC,
+    orphan_open_orders,
+    reconcile_pocket_qty,
+    reconcile_sleeve_alloc,
+    reconcile_sleeve_maps,
+    wallet_qty_map,
+    wallet_value_map,
+)
 
 logger = logging.getLogger(__name__)
 
 _WATCH_FETCH_WORKERS = 6
 _WATCH_ERROR_BACKOFF_SEC = 30.0
+_RECONCILE_MIN_GAP_SEC = 45.0
 
 
 def _wants_advice(text: str) -> bool:
@@ -496,6 +507,7 @@ class CryptoDeskMixin:
     def _trade_auto(self, silent: bool = False) -> str:
         with common._TRADE_LOCK:
             try:
+                self._reconcile_desk_state()
                 return self._trade_auto_locked(silent)
             finally:
                 self._earn_park_idle()
@@ -525,6 +537,121 @@ class CryptoDeskMixin:
     def _set_watch_tempo(self, period: int) -> None:
         self._watch_period_sec = int(period)
         self._quote_cache_sec = 0.0 if period <= WATCH_PERIOD_NEAR else common._CACHE_SEC
+
+    def _reconcile_desk_state(self, *, force: bool = False) -> list[str]:
+        """Сверить карман/рукав с биржей. Щуп не читаем на запись и не отменяем его заявки."""
+        if not self._api_key:
+            return []
+        now = time.time()
+        last = float(getattr(self, "_reconcile_ts", 0) or 0)
+        if not force and last > 0 and now - last < _RECONCILE_MIN_GAP_SEC:
+            return []
+        self._reconcile_ts = now
+        notes: list[str] = []
+        try:
+            _cash, positions = self._wallet(with_earn=False)
+        except Exception as exc:
+            logger.warning("[Крипта] reconcile кошелёк: %s", exc)
+            return notes
+        qtys = wallet_qty_map(positions)
+        values = wallet_value_map(positions)
+        prices = {
+            str(item.get("ticker") or "").upper(): float(item.get("price") or 0)
+            for item in positions
+            if item.get("ticker")
+        }
+        # Карман SOL / второй — qty файла не больше живого баланса.
+        for label, load, store, ticker in (
+            ("SOL", read_btc_dip, write_btc_dip, BTC_DIP_TICKER),
+            ("AVA", read_sui_dip, write_sui_dip, self._second_ticker() or "AVA"),
+        ):
+            if not ticker:
+                continue
+            dip = load()
+            local_qty = float(dip.get("qty") or 0)
+            if local_qty <= 0:
+                continue
+            coin = str(dip.get("ticker") or ticker).upper() if label == "AVA" else ticker
+            fixed = reconcile_pocket_qty(
+                local_qty=local_qty,
+                wallet_qty=float(qtys.get(coin) or 0),
+                price=float(prices.get(coin) or 0),
+            )
+            if abs(fixed - local_qty) <= 1e-12:
+                continue
+            if fixed <= 0:
+                store(0, 0)
+                self._drop_anchor(coin)
+                notes.append(f"{label} сброшен (нет на балансе)")
+            else:
+                store(
+                    fixed,
+                    float(dip.get("entry") or 0),
+                    exit_high=float(dip.get("exit_high") or 0),
+                    exit_ts=float(dip.get("exit_ts") or 0),
+                    low=float(dip.get("low") or 0),
+                    ticker=str(dip.get("ticker") or "") if label == "AVA" else "",
+                )
+                notes.append(f"{label} qty {local_qty:.6g}→{fixed:.6g}")
+
+        # Рукав: alloc / exit / low только для живых ног; щуп в skip.
+        probe_skip = set(probe_tickers())
+        state = read_alloc_state() or {}
+        alloc = dict(state.get("alloc") or {})
+        if isinstance(alloc, dict) and alloc:
+            self._ensure_desk_bought(set(qtys))
+            cleaned = reconcile_sleeve_alloc(
+                alloc,
+                held_values=values,
+                probe_tickers=probe_skip,
+                desk_bought=set(self._desk_bought),
+                min_held_usd=ALT_HELD_MIN_USD,
+            )
+            before = {str(k).upper(): float(v) for k, v in alloc.items() if str(k).strip()}
+            after = {str(k).upper(): float(v) for k, v in cleaned.items()}
+            if after != before:
+                write_alloc_state(
+                    cleaned,
+                    why=str(state.get("why") or "reconcile"),
+                    watch_trades=list(state.get("watch_trades") or []),
+                    desk_ts=float(state.get("desk_ts") or 0) or None,
+                )
+                dropped = sorted(set(before) - set(after))
+                if dropped:
+                    notes.append("рукав −" + ",".join(dropped))
+
+        exits = read_sleeve_exits()
+        lows = read_sleeve_lows()
+        new_exits, new_lows = reconcile_sleeve_maps(
+            exits,
+            lows,
+            held_values=values,
+            probe_tickers=probe_skip,
+            min_held_usd=ALT_HELD_MIN_USD,
+        )
+        if new_exits != exits:
+            write_sleeve_exits(new_exits)
+        if new_lows != lows:
+            write_sleeve_lows(new_lows)
+
+        # Зависшие лимитки (не щуп): отмена после orphan age.
+        try:
+            open_rows = self._open_spot_orders()
+        except Exception as exc:
+            logger.info("[Крипта] reconcile заявки: %s", exc)
+            open_rows = []
+        orphans = orphan_open_orders(
+            open_rows,
+            now=now,
+            skip_tickers=probe_skip,
+            max_age_sec=ORPHAN_ORDER_AGE_SEC,
+        )
+        for item in orphans:
+            self._cancel_order(item["ticker"], item["order_id"])
+            notes.append(f"отмена {item['ticker']}")
+        if notes:
+            logger.info("[Крипта] reconcile: %s", "; ".join(notes))
+        return notes
 
     def _ensure_tape(self) -> None:
         tape = getattr(self, "_bybit_tape", None)
@@ -819,18 +946,26 @@ class CryptoDeskMixin:
                 state = alts.get(ticker)
                 if state and taped.get(ticker):
                     state = {**state, "low": min(float(state["low"]), float(taped[ticker]))}
+                px = float(prices.get(ticker) or 0)
                 updated = update_alt_arm(
                     state,
-                    price=float(prices.get(ticker) or 0),
+                    price=px,
                     z=None if z is None else float(z),
                     now=now,
                 )
                 if updated is None:
+                    if state is not None and px > 0 and alt_chase_too_far(state, px):
+                        logger.info(
+                            "[Крипта] альт %s сброс: догон %.1f%% от дна %.4g (потолок %.1f%%)",
+                            ticker,
+                            (px / float(state["low"]) - 1.0) * 100.0,
+                            float(state["low"]),
+                            cfg().sleeve_chase_pct,
+                        )
                     alts.pop(ticker, None)
                     continue
                 was = stored["alts"].get(ticker)
                 alts[ticker] = updated
-                px = float(prices.get(ticker) or 0)
                 if was is None:
                     logger.info(
                         "[Крипта] альт %s у нижней полосы 4h (z %.2f) — жду отскок %.1f%% от %.4g",
@@ -892,20 +1027,13 @@ class CryptoDeskMixin:
         else:
             alts[ticker] = updated
         write_entry_arms(alts, arms.get("pocket"))
-        ready = alt_bounce_ready(
+        # Рукав: без ожидания закрытой свечи — иначе догоняем памп как CAP.
+        return alt_bounce_ready(
             updated,
             price=float(price or 0),
             z=None if z is None else float(z),
             now=time.time(),
         )
-        if not ready:
-            return False
-        low = float((updated or {}).get("low") or 0)
-        if low > 0 and self._pocket_dip_held(ticker, low):
-            return True
-        if low > 0:
-            logger.info("[Крипта] альт %s жду закрытую свечу после дна %.4g", ticker, low)
-        return False
 
     def _sleeve_dip_ready(
         self,
@@ -915,14 +1043,8 @@ class CryptoDeskMixin:
         z: float | None,
         now: float,
     ) -> bool:
-        if not alt_bounce_ready(state, price=price, z=z, now=now):
-            return False
-        low = float((state or {}).get("low") or 0)
-        if low > 0 and self._pocket_dip_held(ticker, low):
-            return True
-        if low > 0:
-            logger.info("[Крипта] альт %s жду закрытую свечу после дна %.4g", ticker, low)
-        return False
+        del ticker
+        return alt_bounce_ready(state, price=price, z=z, now=now)
 
     def _save_sleeve_low(self, ticker: str, low: float) -> None:
         if float(low or 0) <= 0:
@@ -963,6 +1085,7 @@ class CryptoDeskMixin:
     def _desk_watch(self, silent: bool = True) -> str:
         with common._TRADE_LOCK:
             try:
+                self._reconcile_desk_state()
                 return self._desk_watch_locked(silent)
             finally:
                 self._earn_park_idle()
@@ -2150,6 +2273,7 @@ class CryptoDeskMixin:
         if not getattr(self, "_api_key", ""):
             return
         with common._TRADE_LOCK:
+            self._reconcile_desk_state()
             try:
                 cash, positions_list = self._wallet()
             except Exception as exc:

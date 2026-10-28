@@ -307,19 +307,27 @@ def sell(book: Book, leg: Leg, *, ts: float, price: float, reason: str) -> None:
     book.legs = [item for item in book.legs if item is not leg]
 
 
-def free_cash(book: Book, equity: float) -> float:
+def free_cash(
+    book: Book,
+    equity: float,
+    *,
+    do_pocket: bool = True,
+    do_second: bool = False,
+    do_probe: bool = True,
+) -> float:
     """Кэш минус резервы под пустые карман/щуп — как idle_special_reserve."""
     pocket_open = bool(book.open_kinds("pocket"))
     second_open = bool(book.open_kinds("second"))
     reserve = 0.0
-    if not pocket_open:
+    if do_pocket and not pocket_open:
         reserve += btc_dip_quote(equity)
-    if not second_open and cfg().second_on:
+    if do_second and not second_open:
         reserve += sui_dip_quote()
-    reserve += probe_reserve_quote(
-        open_legs=len(book.open_kinds("probe")),
-        pending=len(book.probe_arms),
-    )
+    if do_probe:
+        reserve += probe_reserve_quote(
+            open_legs=len(book.open_kinds("probe")),
+            pending=len(book.probe_arms),
+        )
     return max(0.0, book.cash - reserve)
 
 
@@ -378,6 +386,11 @@ def main() -> int:
         default="",
         help="Второй карман: AVA/SUI. Пусто — из настроек, но для суток AVA если в сделках.",
     )
+    parser.add_argument(
+        "--only",
+        default="",
+        help="Только эти ноги: pocket,second,sleeve,probe через запятую. Пусто — по настройкам.",
+    )
     args = parser.parse_args()
 
     limits = cfg()
@@ -388,32 +401,54 @@ def main() -> int:
     start = end - timedelta(hours=args.hours)
     start_ts = start.timestamp()
     end_ts = end.timestamp()
-    second = (args.second or "AVA").upper()  # сутки шли на AVA, не на SUI из settings
+    second = (args.second or ("AVA" if not str(args.only or "").strip() else limits.second_ticker)).upper()
     if second not in {"AVA", "SUI"}:
         second = second_pocket_choice()
+    only = {part.strip().lower() for part in str(args.only or "").split(",") if part.strip()}
+    if only:
+        do_pocket = "pocket" in only or "second" in only
+        do_second = "second" in only or ("pocket" in only and bool(str(args.second or "").strip()))
+        do_sleeve = "sleeve" in only
+        do_probe = "probe" in only
+    else:
+        do_pocket = True
+        do_second = bool(limits.second_on)
+        do_sleeve = bool(limits.sleeve_on)
+        do_probe = bool(limits.probe_on)
     probe_usd = float(limits.probe_usd)
     slot_pct = alt_slot_pct()
 
+    modes = []
+    if do_pocket:
+        modes.append(f"SOL {limits.pocket_pct:.0f}%")
+    if do_second:
+        modes.append(f"{second} ${sui_dip_quote():.0f}")
+    if do_sleeve:
+        modes.append(f"рукав {limits.sleeve_max_pct:.0f}%/{limits.sleeve_max_names}")
+    if do_probe:
+        modes.append(f"щуп ${probe_usd:.0f}×{PROBE_MAX_LEGS}")
     print(
         f"Окно {start.strftime('%d.%m %H:%M')}–{end.strftime('%d.%m %H:%M')} YEKT | "
-        f"equity ${args.equity:.0f} | probe ${probe_usd:.0f}×{PROBE_MAX_LEGS} | "
-        f"карман SOL {limits.pocket_pct:.0f}% + {second} ${sui_dip_quote():.0f} | "
-        f"рукав {limits.sleeve_max_pct:.0f}%/{limits.sleeve_max_names}"
+        f"equity ${args.equity:.0f} | " + (" + ".join(modes) if modes else "пусто")
     )
 
-    scan = build_scan(["PONS", "PEPE", "GRASS", "DOOD", "ARX", "XAN", "HAEDAL", "GROVE"])
-    print("Щуп-лента:", ", ".join(f"{r['ticker']} {r['chg']:+.1f}%" for r in scan[:8]))
+    scan: list[dict[str, Any]] = []
+    if do_probe or do_sleeve:
+        scan = build_scan(["PONS", "PEPE", "GRASS", "DOOD", "ARX", "XAN", "HAEDAL", "GROVE"])
+        print("Щуп-лента:", ", ".join(f"{r['ticker']} {r['chg']:+.1f}%" for r in scan[:8]))
+    else:
+        print("Режим без щупа/рукава — свечи только под карман.")
 
     warm_ms = int((start - timedelta(days=10)).timestamp() * 1000)
     end_ms = int(end_ts * 1000)
 
-    need_bars = {
-        BTC_DIP_TICKER,
-        second,
-        "BTC",
-        *DESK_ALT_SLEEVE,
-        *[r["ticker"] for r in scan],
-    }
+    need_bars = {BTC_DIP_TICKER, "BTC"}
+    if do_second:
+        need_bars.add(second)
+    if do_sleeve:
+        need_bars |= set(DESK_ALT_SLEEVE)
+    if do_probe:
+        need_bars |= {r["ticker"] for r in scan}
     series: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for n, ticker in enumerate(sorted(need_bars), 1):
         sym = ticker + "USDT"
@@ -537,7 +572,7 @@ def main() -> int:
         equity = max(book.mtm(prices), 1.0)
 
         # --- карман SOL ---
-        if BTC_DIP_TICKER in series:
+        if do_pocket and BTC_DIP_TICKER in series:
             sol_px = prices.get(BTC_DIP_TICKER) or 0
             bars15 = window_upto(series[BTC_DIP_TICKER]["15"], ts, 40)
             if sol_px > 0 and bars15:
@@ -573,7 +608,7 @@ def main() -> int:
                         book.pocket_arm = None
 
         # --- второй карман ---
-        if second in series and cfg().second_on:
+        if do_second and second in series:
             px = prices.get(second) or 0
             bars15 = window_upto(series[second]["15"], ts, 40)
             if px > 0 and bars15:
@@ -610,7 +645,7 @@ def main() -> int:
         # --- рукав: взвод и вход ---
         sleeve_held = {leg.ticker for leg in book.open_kinds("sleeve")}
         room = max(0, int(limits.sleeve_max_names) - len(sleeve_held))
-        if limits.sleeve_on and not risk and room > 0:
+        if do_sleeve and not risk and room > 0:
             candidates: list[tuple[float, str, float]] = []
             for ticker in DESK_ALT_SLEEVE:
                 if ticker in sleeve_held or ticker in blacklist or ticker in excluded:
@@ -636,7 +671,9 @@ def main() -> int:
                     candidates.append((float(z), ticker, price))
             candidates.sort()
             equity = max(book.mtm(prices), 1.0)
-            avail = free_cash(book, equity)
+            avail = free_cash(
+                book, equity, do_pocket=do_pocket, do_second=do_second, do_probe=do_probe
+            )
             for _z, ticker, price in candidates[:room]:
                 target = equity * (slot_pct / 100.0)
                 quote = min(target, avail * 0.998)
@@ -652,79 +689,84 @@ def main() -> int:
                 ):
                     book.legs[-1].swing_low = float(arm.get("low") or 0)
                     book.sleeve_arms.pop(ticker, None)
-                    avail = free_cash(book, max(book.mtm(prices), 1.0))
+                    avail = free_cash(
+                        book,
+                        max(book.mtm(prices), 1.0),
+                        do_pocket=do_pocket,
+                        do_second=do_second,
+                        do_probe=do_probe,
+                    )
                     room -= 1
                     if room <= 0:
                         break
 
-        # --- щуп: ведём взводы ---
-        still_arms: list[Arm] = []
-        for arm in book.probe_arms:
-            if arm.ticker not in series:
-                continue
-            bars15 = window_upto(series[arm.ticker]["15"], ts, 130)
-            if len(bars15) < 50:
-                still_arms.append(arm)
-                continue
-            price = prices.get(arm.ticker) or 0
-            if price <= 0:
-                still_arms.append(arm)
-                continue
-            trend = P.ma_trend([b["close"] for b in bars15])
-            day = day_chg_at(series[arm.ticker]["15"], ts, price)
-            week = week_chg_at(series[arm.ticker]["60"], ts, price)
-            action = probe_arm_action(
-                armed_ts=arm.ts,
-                now=ts,
-                price=price,
-                shelf=arm.shelf,
-                trend15=trend,
-                day_chg=day,
-                arm_px=arm.px,
-                week_chg=week,
-                algo=arm.algo,
-            )
-            if action == "wait":
-                still_arms.append(arm)
-                continue
-            if action == "drop":
-                book.log(
-                    ts,
-                    "drop",
-                    arm.ticker,
-                    kind="probe",
-                    px=price,
-                    quote=0.0,
+        # --- щуп: ведём взводы и скан ---
+        if do_probe:
+            still_arms: list[Arm] = []
+            for arm in book.probe_arms:
+                if arm.ticker not in series:
+                    continue
+                bars15 = window_upto(series[arm.ticker]["15"], ts, 130)
+                if len(bars15) < 50:
+                    still_arms.append(arm)
+                    continue
+                price = prices.get(arm.ticker) or 0
+                if price <= 0:
+                    still_arms.append(arm)
+                    continue
+                trend = P.ma_trend([b["close"] for b in bars15])
+                day = day_chg_at(series[arm.ticker]["15"], ts, price)
+                week = week_chg_at(series[arm.ticker]["60"], ts, price)
+                action = probe_arm_action(
+                    armed_ts=arm.ts,
+                    now=ts,
+                    price=price,
+                    shelf=arm.shelf,
+                    trend15=trend,
+                    day_chg=day,
+                    arm_px=arm.px,
+                    week_chg=week,
                     algo=arm.algo,
-                    reason="срыв",
                 )
-                continue
-            # buy
-            if book.cash < probe_usd * 0.5:
+                if action == "wait":
+                    still_arms.append(arm)
+                    continue
+                if action == "drop":
+                    book.log(
+                        ts,
+                        "drop",
+                        arm.ticker,
+                        kind="probe",
+                        px=price,
+                        quote=0.0,
+                        algo=arm.algo,
+                        reason="срыв",
+                    )
+                    continue
+                if book.cash < probe_usd * 0.5:
+                    still_arms.append(arm)
+                    continue
+                if len(book.open_kinds("probe")) >= PROBE_MAX_LEGS:
+                    continue
+                bars5 = window_upto(series[arm.ticker]["5"], ts, 5)
+                low = float(bars5[-1]["low"]) if bars5 else price
+                if buy(
+                    book,
+                    ts=ts,
+                    kind="probe",
+                    ticker=arm.ticker,
+                    price=price,
+                    quote=min(probe_usd, book.cash * 0.998),
+                    algo=arm.algo,
+                    shelf=arm.shelf,
+                    arm_px=arm.px,
+                    low=low,
+                ):
+                    continue
                 still_arms.append(arm)
-                continue
-            if len(book.open_kinds("probe")) >= PROBE_MAX_LEGS:
-                continue
-            bars5 = window_upto(series[arm.ticker]["5"], ts, 5)
-            low = float(bars5[-1]["low"]) if bars5 else price
-            if buy(
-                book,
-                ts=ts,
-                kind="probe",
-                ticker=arm.ticker,
-                price=price,
-                quote=min(probe_usd, book.cash * 0.998),
-                algo=arm.algo,
-                shelf=arm.shelf,
-                arm_px=arm.px,
-                low=low,
-            ):
-                continue
-            still_arms.append(arm)
-        book.probe_arms = still_arms
+            book.probe_arms = still_arms
 
-        # --- щуп: скан новых ---
-        if book.probe_count() < PROBE_MAX_LEGS:
+        if do_probe and book.probe_count() < PROBE_MAX_LEGS:
             blocked = {
                 leg.ticker for leg in book.legs
             } | {arm.ticker for arm in book.probe_arms} | blacklist | set(DESK_ALT_SLEEVE)

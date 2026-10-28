@@ -179,6 +179,20 @@ class CryptoTradesMixin:
                 return rows[0]
         return {}
 
+    def _open_spot_orders(self) -> list[dict[str, Any]]:
+        """Открытые спот-заявки аккаунта (для reconcile кармана/рукава)."""
+        try:
+            data = self._signed(
+                "GET",
+                "/v5/order/realtime",
+                {"category": "spot", "settleCoin": "USDT", "limit": 50},
+            )
+        except Exception as exc:
+            logger.info("[Крипта] открытые заявки: %s", exc)
+            return []
+        rows = (data.get("result") or {}).get("list") or []
+        return [row for row in rows if isinstance(row, dict)]
+
     def _cancel_order(self, ticker: str, order_id: str) -> None:
         try:
             self._signed(

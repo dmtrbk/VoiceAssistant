@@ -211,8 +211,8 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIn("чёрный список DOGE", why)
 
     def test_alt_exit_reason(self):
-        self.assertEqual(policy.alt_exit_reason(price=93.0, entry=100.0), "стоп")
-        self.assertIsNone(policy.alt_exit_reason(price=95.0, entry=100.0))
+        self.assertEqual(policy.alt_exit_reason(price=95.0, entry=100.0), "стоп")
+        self.assertIsNone(policy.alt_exit_reason(price=97.0, entry=100.0))
         self.assertEqual(policy.alt_exit_reason(price=97.0, entry=100.0, swing_low=98.0), "дно")
         self.assertIsNone(policy.alt_exit_reason(price=99.0, entry=100.0, swing_low=98.0))
         self.assertIsNone(policy.alt_exit_reason(price=102.0, entry=100.0, ma=101.0))
@@ -255,7 +255,7 @@ class TestDeskPolicy(unittest.TestCase):
         line = policy.watch_snapshot_line("XRP", price=1.85, entry=2.0, kind="alt", basis=1.9)
         self.assertIn("avg=2", line)
         self.assertIn("отсчёт 1.9", line)
-        self.assertIn("до стопа 4.4пп", line)
+        self.assertIn("до стопа 1.4пп", line)
 
     def test_alt_sleeve_qty_for_exit_reserves_pocket(self):
         sol = policy.BTC_DIP_TICKER
@@ -954,6 +954,16 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.alt_bounce_ready(deeper, price=98.5, z=-2.4, now=held))
         self.assertTrue(policy.alt_bounce_ready(deeper, price=99.5, z=-1.6, now=held))
         self.assertIsNone(policy.update_alt_arm(deeper, price=102.0, z=-0.4, now=held))
+        # Догон выше chase% от дна — сетап сбрасываем, не покупаем.
+        chased = policy.update_alt_arm(None, price=100.0, z=-2.8, now=1.0)
+        self.assertIsNotNone(chased)
+        self.assertTrue(policy.alt_chase_too_far(chased, 100.0 * 1.06))
+        self.assertIsNone(
+            policy.update_alt_arm(chased, price=100.0 * 1.06, z=-2.0, now=held)
+        )
+        self.assertFalse(
+            policy.alt_bounce_ready(chased, price=100.0 * 1.06, z=-2.0, now=held)
+        )
         pocket = policy.update_pocket_arm(None, price=100.0, day_chg=-4.0, now=1.0)
         self.assertFalse(policy.pocket_bounce_ready(pocket, price=101.2, now=1.0 + 60))
         self.assertTrue(
@@ -1054,6 +1064,52 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.TRAIL_ARM_PCT, 5.0)
         self.assertIsNone(policy.trail_pct_for("BTC"))
         self.assertIsNone(policy.trail_pct_for("DOGE"))
+
+    def test_calculate_trailing_stop_freqtrade_examples(self):
+        # Docs: entry 100, stoploss −10%, peak 102 → stop 91.8
+        step = policy.calculate_trailing_stop(
+            price=102.0, entry=100.0, stoploss_pct=10.0
+        )
+        self.assertTrue(step["trailing"])
+        self.assertAlmostEqual(step["peak"], 102.0)
+        self.assertAlmostEqual(step["stop"], 91.8, places=4)
+        self.assertFalse(step["hit"])
+
+        # Docs: positive 2%, offset 3%, peak 103.5 → stop 101.43
+        tight = policy.calculate_trailing_stop(
+            price=103.5,
+            entry=100.0,
+            peak=103.5,
+            stoploss_pct=10.0,
+            positive_trail_pct=2.0,
+            offset_pct=3.0,
+        )
+        self.assertAlmostEqual(tight["stop"], 101.43, places=2)
+        self.assertAlmostEqual(tight["trail_pct"], 2.0)
+
+        # only_offset: до +3% стоп статичен от входа (90), не от пика 102
+        static = policy.calculate_trailing_stop(
+            price=102.0,
+            entry=100.0,
+            stoploss_pct=10.0,
+            offset_pct=3.0,
+            only_offset=True,
+        )
+        self.assertFalse(static["trailing"])
+        self.assertAlmostEqual(static["stop"], 90.0, places=4)
+
+        # Стоп не ослабевает при откате цены
+        held = policy.calculate_trailing_stop(
+            price=101.0,
+            entry=100.0,
+            peak=103.5,
+            prev_stop=101.43,
+            stoploss_pct=10.0,
+            positive_trail_pct=2.0,
+            offset_pct=3.0,
+        )
+        self.assertAlmostEqual(held["stop"], 101.43, places=2)
+        self.assertTrue(held["hit"])
 
 
 class TestJournalChurnAndDaily(unittest.TestCase):
@@ -1834,9 +1890,10 @@ class TestDeskAutoUsesScore(unittest.TestCase):
 
     def test_watch_holds_alt_between_bands(self):
         self.bands = {"XRP": {"z": -1.0, "ma": 2.2}}
-        pos = [{"ticker": "XRP", "qty": 20.0, "value": 38.0, "price": 1.9, "name": "XRP"}]
+        # −3%: ещё не стоп рукава (−4%), держим между полосами.
+        pos = [{"ticker": "XRP", "qty": 20.0, "value": 38.8, "price": 1.94, "name": "XRP"}]
         placed, _result, _state = self._watch_alt(
-            price=1.9, entry=2.0, alloc={"BTC": 40.0, "XRP": 11.7}, positions=pos
+            price=1.94, entry=2.0, alloc={"BTC": 40.0, "XRP": 11.7}, positions=pos
         )
         self.assertFalse(any(t == "XRP" for t, *_ in placed))
 
@@ -1932,11 +1989,11 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertNotIn("LINK", crypto_common.read_alloc_state()["alloc"])
 
     def test_watch_sets_hot_period_near_stop(self):
-        # −5% ещё не стоп (−7%), но уже горячая зона.
+        # −3% ещё не стоп (−4%), но уже горячая зона.
         self.bands = {"XRP": {"z": -2.0, "ma": 2.2}}
-        pos = [{"ticker": "XRP", "qty": 20.0, "value": 38.0, "price": 1.90, "name": "XRP"}]
+        pos = [{"ticker": "XRP", "qty": 20.0, "value": 38.8, "price": 1.94, "name": "XRP"}]
         placed, _result, _state = self._watch_alt(
-            price=1.90, entry=2.0, alloc={"XRP": 11.7}, positions=pos
+            price=1.94, entry=2.0, alloc={"XRP": 11.7}, positions=pos
         )
         self.assertFalse(any(t == "XRP" and side == "Sell" for t, side, *_ in placed))
         self.assertEqual(self.skill._watch_period_sec, policy.WATCH_PERIOD_HOT)

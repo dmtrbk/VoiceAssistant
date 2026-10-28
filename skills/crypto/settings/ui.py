@@ -272,7 +272,10 @@ QSpinBox, QDoubleSpinBox {{
             self._set_spin("sleeve_max_names", data.sleeve_max_names)
             self._set_spin("sleeve_entry_z", data.sleeve_entry_z)
             self._set_spin("sleeve_bounce_pct", data.sleeve_bounce_pct)
+            self._set_spin("sleeve_chase_pct", data.sleeve_chase_pct)
             self._set_spin("sleeve_stop_pct", data.sleeve_stop_pct)
+            self._set_spin("sleeve_hold_min", data.sleeve_hold_sec / 60.0)
+            self._set_spin("sleeve_exit_hold_min", data.sleeve_exit_hold_sec / 60.0)
             self._set_spin("probe_usd", data.probe_usd)
             self._set_spin("probe_max_loss_pct", data.probe_max_loss_pct)
             self._set_spin("probe_shelf_range_pct", data.probe_shelf_range_pct)
@@ -382,8 +385,10 @@ QSpinBox, QDoubleSpinBox {{
         self._add_spin(col, "sleeve_max_pct", "Потолок", "%", 20, 92, 1, 0, "Доля счёта на альты. Карман отдельно, остаток — кэш и щупы.")
         self._add_spin(col, "sleeve_max_names", "Слоты", "", 1, 6, 1, 0, "Не больше стольких ног сразу. Чёрный список занимает слот, пока нога жива.")
         self._add_spin(col, "sleeve_entry_z", "Вход, z", "", -4, -1, 0.1, 1, "Покупка у нижней полосы, когда z не выше этого порога.")
-        self._add_spin(col, "sleeve_bounce_pct", "Отскок входа", "%", 0.3, 5, 0.1, 1, "Отскок от дна. Пауза, z ещё не у средней.")
-        self._add_spin(col, "sleeve_stop_pct", "Стоп", "%", 3, 20, 0.5, 1, "Запасной стоп на дыре. Обычный срыв рукава — возврат под дно входа.")
+        self._add_spin(col, "sleeve_bounce_pct", "Отскок входа", "%", 0.3, 5, 0.1, 1, "Отскок от дна. Без ожидания закрытой свечи.")
+        self._add_spin(col, "sleeve_hold_min", "Пауза дна", "мин", 2, 40, 1, 0, "Сколько минут дно рукава должно держаться перед покупкой.")
+        self._add_spin(col, "sleeve_chase_pct", "Потолок догона", "%", 2, 15, 0.5, 1, "Выше этого % от дна сетап сбрасываем — не догоняем памп.")
+        self._add_spin(col, "sleeve_stop_pct", "Стоп", "%", 2, 20, 0.5, 1, "Запасной стоп на дыре. Обычный срыв рукава — возврат под дно входа.")
         col.addStretch(1)
         return card
 
@@ -429,6 +434,7 @@ QSpinBox, QDoubleSpinBox {{
         self._add_spin(col, "pocket_hold_min", "Карман, пауза входа", "мин", 2, 40, 1, 0, "Сколько минут дно кармана должно держаться перед покупкой.")
         self._add_spin(col, "pocket_exit_pullback_pct", "Карман, откат выхода", "%", 0.2, 3, 0.1, 1, "Продажа кармана: откат от вершины после короткой паузы.")
         self._add_spin(col, "sleeve_exit_arm_pct", "Рукав, трейл", "%", 1, 10, 0.5, 1, "Плюс от входа, который взводит вершину рукава.")
+        self._add_spin(col, "sleeve_exit_hold_min", "Рукав, пауза вершины", "мин", 1, 30, 1, 0, "Сколько минут вершина должна стоять перед продажей на откате.")
         self._add_spin(col, "sleeve_cancel_z", "Рукав, z отмены", "", -2, 0, 0.1, 1, "Если z уже у средней, сетап входа сбрасывается.")
         self._add_spin(col, "rebalance_pct", "Коридор ребаланса", "%", 2, 15, 0.5, 1, "Внутри коридора стол ногу рукава не трогает.")
         self._add_spin(col, "cooldown_hours", "Кулдаун", "ч", 1, 48, 1, 0, "После оборота монету не крутим снова сразу.")
@@ -513,6 +519,10 @@ QSpinBox, QDoubleSpinBox {{
         value = float(spin.value())
         if key == "pocket_hold_min":
             update(pocket_hold_sec=value * 60.0)
+        elif key == "sleeve_hold_min":
+            update(sleeve_hold_sec=value * 60.0)
+        elif key == "sleeve_exit_hold_min":
+            update(sleeve_exit_hold_sec=value * 60.0)
         else:
             update(**{key: value})
         data = current()
@@ -520,6 +530,8 @@ QSpinBox, QDoubleSpinBox {{
         try:
             self._set_spin("pocket_pct", data.pocket_pct)
             self._set_spin("sleeve_max_pct", data.sleeve_max_pct)
+            self._set_spin("sleeve_bounce_pct", data.sleeve_bounce_pct)
+            self._set_spin("sleeve_chase_pct", data.sleeve_chase_pct)
             self._set_spin("probe_break_min_pct", data.probe_break_min_pct)
             self._set_spin("probe_break_max_pct", data.probe_break_max_pct)
         finally:
@@ -602,8 +614,11 @@ QSpinBox, QDoubleSpinBox {{
             "sleeve_max_names",
             "sleeve_entry_z",
             "sleeve_bounce_pct",
+            "sleeve_hold_min",
+            "sleeve_chase_pct",
             "sleeve_stop_pct",
             "sleeve_exit_arm_pct",
+            "sleeve_exit_hold_min",
             "sleeve_cancel_z",
         ):
             spin = self._spins.get(key)

@@ -33,7 +33,7 @@ ALT_BB_INTERVAL = "240"
 ALT_BB_ENTRY_Z = -2.5
 # 0,4% ловил шум в начале падения. Нужен заметный отскок, и дно не должно обновляться.
 ALT_ENTRY_BOUNCE_PCT = 1.5
-ALT_ENTRY_HOLD_SEC = 20 * 60
+ALT_ENTRY_HOLD_SEC = 5 * 60
 ALT_ENTRY_STILL_Z = -1.2
 ALT_ENTRY_CANCEL_Z = -0.5
 POCKET_ENTRY_BOUNCE_PCT = 1.0
@@ -42,13 +42,15 @@ POCKET_ENTRY_HOLD_SEC = 10 * 60
 POCKET_SWING_PCT = 3.0
 POCKET_SWING_BARS = 16
 # Живой выход рукава — ловушка вершины, не касание средней.
-# Взвод: рост покрыл taker×2 + $0.50. Продажа на откате −0,5% после 5 минут, плюс ещё ≥ порога взвода.
+# Взвод: рост покрыл taker×2 + $0.50. Продажа на откате −0,5% после 2 минут, плюс ещё ≥ порога взвода.
 # Прогон выше +8% не режем: это верх рабочей зоны, не потолок.
 ALT_EXIT_ARM_PCT = 3.0  # устаревший %; живой взвод — exit_trap_arm_pct()
 ALT_EXIT_PULLBACK_PCT = 0.5
-ALT_EXIT_HOLD_SEC = 5 * 60
+ALT_EXIT_HOLD_SEC = 2 * 60
 ALT_EXIT_MIN_GAIN_PCT = 1.0  # старый порог у средней; его держит crypto_backtest.py
-ALT_STOP_LOSS_PCT = 7.0
+ALT_STOP_LOSS_PCT = 4.0
+# Выше этого % от дна — догон, сетап рукава сбрасываем (как CAP +20% пока ждали свечу).
+ALT_CHASE_PCT = 5.0
 ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
 # Суточный потолок +25% остался только у impulse: уже разогнанную свечу не догоняем.
@@ -780,6 +782,17 @@ def _bounce_held(state: dict[str, Any], now: float | None, hold_sec: float) -> b
     return float(now) - float(state.get("ts") or 0) >= float(hold_sec)
 
 
+def alt_chase_too_far(state: dict[str, Any] | None, price: float) -> bool:
+    """Цена уже далеко от дна — покупать поздно, сетап сбрасываем."""
+    if not state:
+        return False
+    low = float(state.get("low") or 0)
+    px = float(price or 0)
+    if low <= 0 or px <= 0:
+        return False
+    return px >= low * (1.0 + cfg().sleeve_chase_pct / 100.0) - 1e-12
+
+
 def update_alt_arm(
     state: dict[str, Any] | None,
     *,
@@ -787,7 +800,7 @@ def update_alt_arm(
     z: float | None,
     now: float,
 ) -> dict[str, float] | None:
-    """Сигнал z ≤ −2,5 запоминает дно. Близко к средней сигнал снимается."""
+    """Сигнал z ≤ −2,5 запоминает дно. Близко к средней или chase — сигнал снимается."""
     if z is None:
         return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
     zf = float(z)
@@ -797,6 +810,8 @@ def update_alt_arm(
     px = float(price or 0)
     if px <= 0:
         return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+    if state is not None and alt_chase_too_far(state, px):
+        return None
     if state is None:
         if zf <= limits.sleeve_entry_z:
             return {"low": px, "ts": float(now)}
@@ -811,7 +826,7 @@ def alt_bounce_ready(
     z: float | None,
     now: float | None = None,
 ) -> bool:
-    """Покупка рукава: +1,5% от дна, дно держится 20 минут, z ещё не у средней."""
+    """Покупка рукава: +1,5% от дна, дно держится 5 минут, без догона выше chase, z ещё не у средней."""
     limits = cfg()
     if not state or z is None or float(z) > limits.sleeve_still_z:
         return False
@@ -820,6 +835,8 @@ def alt_bounce_ready(
     low = float(state.get("low") or 0)
     px = float(price or 0)
     if low <= 0 or px <= 0:
+        return False
+    if alt_chase_too_far(state, px):
         return False
     return px >= low * (1.0 + limits.sleeve_bounce_pct / 100.0) - 1e-12
 
@@ -1061,7 +1078,7 @@ def alt_exit_ready(
     now: float | None = None,
     qty: float = 0.0,
 ) -> bool:
-    """Продажа рукава: −0,5% от вершины, вершина 5 минут не обновлялась, плюс ещё ≥ комиссия+$0.50."""
+    """Продажа рукава: −0,5% от вершины, вершина 2 минуты не обновлялась, плюс ещё ≥ комиссия+$0.50."""
     limits = cfg()
     if not state or not _bounce_held(state, now, limits.sleeve_exit_hold_sec):
         return False
@@ -1086,14 +1103,14 @@ def alt_exit_reason(
     swing_low: float = 0.0,
     qty: float = 0.0,
 ) -> str | None:
-    """Выход альта: стоп −7% на дыре, обычный срыв — возврат под дно входа, плюс — откат от вершины."""
+    """Выход альта: стоп на дыре, обычный срыв — возврат под дно входа, плюс — откат от вершины."""
     del ma
     px = float(price or 0)
     ent = float(entry or 0)
     if px <= 0 or ent <= 0:
         return None
     gain = (px / ent - 1.0) * 100.0
-    # Ровно −7% в float чуть больше порога — иначе стоп молчит.
+    # Ровно −stop% в float чуть больше порога — иначе стоп молчит.
     if gain <= -cfg().sleeve_stop_pct + 1e-6:
         return "стоп"
     if float(swing_low or 0) > 0 and px <= float(swing_low):
@@ -1505,6 +1522,98 @@ def trail_pct_for(ticker: str) -> float | None:
     return None
 
 
+def calculate_trailing_stop(
+    *,
+    price: float,
+    entry: float,
+    peak: float | None = None,
+    prev_stop: float | None = None,
+    stoploss_pct: float = 10.0,
+    trail_pct: float | None = None,
+    positive_trail_pct: float | None = None,
+    offset_pct: float = 0.0,
+    only_offset: bool = False,
+) -> dict[str, Any]:
+    """Трейлинг-стоп в духе Freqtrade `ft_stoploss_adjust` / Trailing Stop Loss.
+
+    Отличия от Freqtrade (явно):
+    - У Freqtrade `stoploss` / `trailing_stop_positive` — доли (−0.10, 0.02).
+      У нас проценты стола: 10.0 = −10%, 2.0 = −2% от пика (как sleeve_stop_pct).
+    - Только long spot: нет `is_short`, нет leverage.
+    - Нет объекта Trade и `adjust_stop_loss`: возвращаем снимок для JSON/дозора.
+    - Стоп для long только поднимается (не ослабевает), как у Freqtrade.
+    - `only_offset` ≈ `trailing_only_offset_is_reached`: до offset стоп статичен
+      от входа; после — тянется от пика.
+    - `positive_trail_pct` ≈ `trailing_stop_positive`: более тугой трейл после offset.
+    - `hit` считаем по текущей цене (live); в бэктесте Freqtrade сверяет high/low свечи.
+
+    Пример (Freqtrade docs → наши %): entry=100, stoploss_pct=10, trail как 10%,
+    peak=102 → stop=91.8; при positive_trail_pct=2 и offset_pct=3, peak=103.5 → stop=101.43.
+    """
+    px = float(price or 0)
+    ent = float(entry or 0)
+    if ent <= 0 and px > 0:
+        ent = px
+    if px <= 0 or ent <= 0:
+        return {
+            "entry": max(ent, 0.0),
+            "peak": max(float(peak or 0), ent, 0.0),
+            "stop": float(prev_stop or 0),
+            "trail_pct": float(stoploss_pct or 0),
+            "gain_pct": 0.0,
+            "trailing": False,
+            "hit": False,
+        }
+
+    # Freqtrade: bound = high для long в бэктесте; в live — current_rate.
+    # У нас peak = max(предыдущий high, entry, текущая цена).
+    hi = max(float(peak or 0), ent, px)
+    # gain от пика для решения «какой trail %», как bound_profit у Freqtrade.
+    peak_gain_pct = (hi / ent - 1.0) * 100.0
+    gain_pct = (px / ent - 1.0) * 100.0
+
+    base_trail = float(stoploss_pct if trail_pct is None else trail_pct)
+    base_trail = max(0.0, base_trail)
+    pos_trail = None if positive_trail_pct is None else max(0.0, float(positive_trail_pct))
+    offset = max(0.0, float(offset_pct or 0))
+
+    # Статический стоп от входа: Freqtrade initial adjust_stop_loss(open_rate, stoploss).
+    initial_stop = ent * (1.0 - base_trail / 100.0)
+
+    # trailing_only_offset_is_reached: до offset не двигаем стоп от пика.
+    can_trail = (not only_offset) or (peak_gain_pct + 1e-12 >= offset)
+
+    # Freqtrade: если profit > offset и задан trailing_stop_positive — берём его как дистанцию.
+    active_trail = base_trail
+    if (
+        can_trail
+        and pos_trail is not None
+        and peak_gain_pct + 1e-12 >= offset
+    ):
+        active_trail = pos_trail
+
+    if can_trail:
+        # stop = peak * (1 - trail%): аналог adjust_stop_loss(bound, stop_loss_value).
+        trailed = hi * (1.0 - active_trail / 100.0)
+        # Стоп только ужесточаем (для long — только вверх).
+        stop = max(initial_stop, trailed, float(prev_stop or 0))
+        trailing = True
+    else:
+        stop = max(initial_stop, float(prev_stop or 0))
+        trailing = False
+
+    hit = px <= stop + 1e-12
+    return {
+        "entry": ent,
+        "peak": hi,
+        "stop": stop,
+        "trail_pct": active_trail if trailing else base_trail,
+        "gain_pct": gain_pct,
+        "trailing": trailing,
+        "hit": hit,
+    }
+
+
 def update_trail_leg(
     *,
     price: float,
@@ -1514,7 +1623,11 @@ def update_trail_leg(
     arm_pct: float = TRAIL_ARM_PCT,
     trail_pct: float = 6.0,
 ) -> dict[str, Any]:
-    """Обновить водяную марку. hit=True — цена пробила подтягивающийся стоп."""
+    """Обновить водяную марку. hit=True — цена пробила подтягивающийся стоп.
+
+    Упрощённый трейл стола (arm_pct → взвод). Полная логика Freqtrade —
+    в calculate_trailing_stop (offset / positive / only_offset).
+    """
     px = float(price)
     ent = float(entry) if entry and float(entry) > 0 else px
     if px <= 0 or ent <= 0:
