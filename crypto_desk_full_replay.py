@@ -480,6 +480,7 @@ def main() -> int:
                 peak=leg.peak,
                 entry_low=leg.low,
                 algo=leg.algo,
+                qty=leg.qty,
             )
             if reason:
                 sell(book, leg, ts=ts, price=price, reason=reason)
@@ -492,7 +493,7 @@ def main() -> int:
                     continue
                 leg.peak = max(leg.peak, price)
                 leg.exit_arm = update_pocket_exit_arm(
-                    leg.exit_arm, price=price, entry=leg.entry, now=ts
+                    leg.exit_arm, price=price, entry=leg.entry, now=ts, qty=leg.qty
                 )
                 reason = btc_dip_exit_reason(
                     price=price,
@@ -511,7 +512,7 @@ def main() -> int:
             if price <= 0:
                 continue
             leg.exit_arm = update_alt_exit_arm(
-                leg.exit_arm, price=price, entry=leg.entry, now=ts
+                leg.exit_arm, price=price, entry=leg.entry, now=ts, qty=leg.qty
             )
             reason = alt_exit_reason(
                 price=price,
@@ -519,6 +520,7 @@ def main() -> int:
                 exit_arm=leg.exit_arm,
                 now=ts,
                 swing_low=leg.swing_low,
+                qty=leg.qty,
             )
             if reason:
                 sell(book, leg, ts=ts, price=price, reason=reason)

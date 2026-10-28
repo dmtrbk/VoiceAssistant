@@ -216,22 +216,37 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.alt_exit_reason(price=97.0, entry=100.0, swing_low=98.0), "дно")
         self.assertIsNone(policy.alt_exit_reason(price=99.0, entry=100.0, swing_low=98.0))
         self.assertIsNone(policy.alt_exit_reason(price=102.0, entry=100.0, ma=101.0))
-        armed = policy.update_alt_exit_arm(None, price=103.0, entry=100.0, now=10.0)
+        # На $100 взвод ≈ комиссия×2 + $0.50 ≈ +0.86%, не старые +3%.
+        self.assertIsNone(policy.update_alt_exit_arm(None, price=100.5, entry=100.0, now=1.0, qty=1.0))
+        armed = policy.update_alt_exit_arm(None, price=103.0, entry=100.0, now=10.0, qty=1.0)
         self.assertAlmostEqual(armed["high"], 103.0)
+        # Откат ещё не −0,5% от вершины (нужно ≤ 102.485).
         self.assertFalse(
-            policy.alt_exit_ready(armed, price=101.9, entry=100.0, now=10.0 + policy.ALT_EXIT_HOLD_SEC)
+            policy.alt_exit_ready(
+                armed, price=102.7, entry=100.0, now=10.0 + policy.ALT_EXIT_HOLD_SEC, qty=1.0
+            )
         )
-        higher = policy.update_alt_exit_arm(armed, price=108.0, entry=100.0, now=20.0)
+        higher = policy.update_alt_exit_arm(armed, price=108.0, entry=100.0, now=20.0, qty=1.0)
         self.assertEqual(higher["ts"], 20.0)
         need = 108.0 * (1.0 - policy.ALT_EXIT_PULLBACK_PCT / 100.0)
-        self.assertGreaterEqual((need / 100.0 - 1.0) * 100.0, policy.ALT_EXIT_ARM_PCT)
-        self.assertFalse(policy.alt_exit_ready(higher, price=need, entry=100.0, now=20.0 + 10))
+        self.assertGreaterEqual(
+            (need / 100.0 - 1.0) * 100.0, policy.exit_trap_arm_pct(entry=100.0, qty=1.0)
+        )
+        self.assertFalse(
+            policy.alt_exit_ready(higher, price=need, entry=100.0, now=20.0 + 10, qty=1.0)
+        )
         self.assertTrue(
-            policy.alt_exit_ready(higher, price=need, entry=100.0, now=20.0 + policy.ALT_EXIT_HOLD_SEC)
+            policy.alt_exit_ready(
+                higher, price=need, entry=100.0, now=20.0 + policy.ALT_EXIT_HOLD_SEC, qty=1.0
+            )
         )
         self.assertEqual(
             policy.alt_exit_reason(
-                price=need, entry=100.0, exit_arm=higher, now=20.0 + policy.ALT_EXIT_HOLD_SEC
+                price=need,
+                entry=100.0,
+                exit_arm=higher,
+                now=20.0 + policy.ALT_EXIT_HOLD_SEC,
+                qty=1.0,
             ),
             "вершина",
         )
@@ -704,10 +719,11 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             "дно",
         )
-        self.assertIsNone(
+        self.assertEqual(
             policy.probe_exit_reason(
                 price=1.04, entry=1.0, shelf=0.5, trend15="bull", entry_low=1.05, peak=1.07
-            )
+            ),
+            "вершина",
         )
         self.assertEqual(
             policy.probe_exit_reason(price=0.96, entry=1.05, shelf=0.5, trend15="bull"),
@@ -719,16 +735,37 @@ class TestDeskPolicy(unittest.TestCase):
             policy.probe_exit_reason(price=1.19, entry=1.05, shelf=1.0, trend15="bear"),
             "тренд",
         )
-        self.assertIsNone(
+        # Ловушка: пик покрыл комиссию+$0.50, откат −0,5% при ещё живом плюсе.
+        qty100 = 100.0 / 1.05
+        self.assertEqual(
             policy.probe_exit_reason(
-                price=1.10, entry=1.05, shelf=1.0, trend15="bull", arm_px=1.08, peak=1.20,
-            )
+                price=1.10,
+                entry=1.05,
+                shelf=1.0,
+                trend15="bull",
+                arm_px=1.08,
+                peak=1.20,
+                qty=qty100,
+            ),
+            "вершина",
         )
         self.assertEqual(
             policy.probe_exit_reason(
                 price=1.06, entry=1.05, shelf=1.0, trend15="bull", arm_px=1.07, peak=1.08,
             ),
-            "ожидание",
+            "вершина",
+        )
+        # Ещё растём — ловушка молчит.
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.12,
+                entry=1.05,
+                shelf=1.0,
+                trend15="bull",
+                peak=1.12,
+                qty=qty100,
+                algo=policy.PROBE_ALGO_GRIND,
+            )
         )
         # Подножка: до +6% пика не режем ожидание/дно — только стоп и полка.
         self.assertIsNone(
@@ -842,12 +879,17 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.btc_dip_exit_reason(price=101.0, entry=100.0))
         self.assertEqual(policy.btc_dip_exit_reason(price=85.0, entry=100.0), "стоп")
         self.assertIsNone(policy.btc_dip_exit_reason(price=100.4, entry=100.0))
-        armed = policy.update_pocket_exit_arm(None, price=101.1, entry=100.0, now=10.0)
+        self.assertIsNone(
+            policy.update_pocket_exit_arm(None, price=100.5, entry=100.0, now=1.0, qty=1.0)
+        )
+        armed = policy.update_pocket_exit_arm(None, price=101.1, entry=100.0, now=10.0, qty=1.0)
         self.assertAlmostEqual(armed["high"], 101.1)
         self.assertFalse(policy.pocket_exit_ready(armed, price=100.9, now=10.0 + policy.POCKET_EXIT_HOLD_SEC))
-        higher = policy.update_pocket_exit_arm(armed, price=104.0, entry=100.0, now=20.0)
+        higher = policy.update_pocket_exit_arm(armed, price=104.0, entry=100.0, now=20.0, qty=1.0)
         self.assertEqual(higher["ts"], 20.0)
-        held = policy.update_pocket_exit_arm(higher, price=103.5, entry=100.0, now=20.0 + policy.POCKET_EXIT_HOLD_SEC)
+        held = policy.update_pocket_exit_arm(
+            higher, price=103.5, entry=100.0, now=20.0 + policy.POCKET_EXIT_HOLD_SEC, qty=1.0
+        )
         self.assertEqual(held["high"], 104.0)
         self.assertEqual(held["ts"], 20.0)
         need = 104.0 * (1.0 - policy.POCKET_EXIT_PULLBACK_PCT / 100.0)
@@ -857,8 +899,12 @@ class TestDeskPolicy(unittest.TestCase):
             policy.btc_dip_exit_reason(price=need, entry=100.0, exit_arm=held, now=20.0 + policy.POCKET_EXIT_HOLD_SEC),
             "вершина",
         )
-        kept = policy.update_pocket_exit_arm(held, price=100.2, entry=100.0, now=80.0)
+        kept = policy.update_pocket_exit_arm(held, price=100.2, entry=100.0, now=80.0, qty=1.0)
         self.assertEqual(kept["high"], 104.0)
+        # $50 нога: порог выше (~1.36%), $200 — ниже (~0.61%).
+        self.assertAlmostEqual(policy.exit_trap_arm_pct(cost_usd=100.0), 0.86, places=2)
+        self.assertGreater(policy.exit_trap_arm_pct(cost_usd=50.0), 1.2)
+        self.assertLess(policy.exit_trap_arm_pct(cost_usd=200.0), 0.7)
 
     def test_watch_stream_tickers_skips_dust(self):
         self.assertEqual(
@@ -902,7 +948,9 @@ class TestDeskPolicy(unittest.TestCase):
     def test_watch_period_sec_and_snapshot(self):
         self.assertEqual(policy.watch_period_sec(legs=[]), policy.WATCH_PERIOD_CALM)
         self.assertEqual(
-            policy.watch_period_sec(legs=[{"price": 100.8, "entry": 100.0, "kind": "pocket"}]),
+            policy.watch_period_sec(
+                legs=[{"price": 100.8, "entry": 100.0, "kind": "pocket", "qty": 1.0}]
+            ),
             policy.WATCH_PERIOD_HOT,
         )
         self.assertEqual(
@@ -911,12 +959,14 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertEqual(
             policy.watch_period_sec(
-                legs=[{"price": 101.2, "entry": 100.0, "ma": 101.3, "kind": "alt"}]
+                legs=[{"price": 100.3, "entry": 100.0, "ma": 101.3, "kind": "alt", "qty": 1.0}]
             ),
             policy.WATCH_PERIOD_CALM,
         )
         self.assertEqual(
-            policy.watch_period_sec(legs=[{"price": 102.7, "entry": 100.0, "kind": "alt"}]),
+            policy.watch_period_sec(
+                legs=[{"price": 102.7, "entry": 100.0, "kind": "alt", "qty": 1.0}]
+            ),
             policy.WATCH_PERIOD_HOT,
         )
         self.assertEqual(
@@ -1433,7 +1483,8 @@ class TestDeskAutoUsesScore(unittest.TestCase):
     def test_btc_dip_sells_only_pocket_on_bounce(self):
         from skills.crypto.common import read_btc_dip, write_btc_dip
 
-        write_btc_dip(0.01, 100.0)
+        # Карман 1 SOL @100$ — порог взвода ≈ +0.86%, не пыль на 0.01 монеты.
+        write_btc_dip(1.0, 100.0)
         placed: list[tuple] = []
 
         def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
@@ -1444,7 +1495,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         with patch.object(self.skill, "_place_order", side_effect=place):
             phrase = self.skill._trade_btc_dip(
                 day_chg=-6.0,
-                positions={"SOL": {"qty": 1.0, "value": 101.5, "price": 101.5}},
+                positions={"SOL": {"qty": 2.0, "value": 203.0, "price": 101.5}},
                 price=101.5,
                 blocked=False,
             )
@@ -1458,13 +1509,13 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         ):
             higher = self.skill._trade_btc_dip(
                 day_chg=-1.0,
-                positions={"SOL": {"qty": 1.0, "value": 100.4, "price": 100.4}},
+                positions={"SOL": {"qty": 2.0, "value": 200.8, "price": 100.4}},
                 price=101.5 * (1.0 - policy.POCKET_EXIT_PULLBACK_PCT / 100.0),
                 blocked=False,
             )
         self.assertIn("ok", higher or "")
         self.assertEqual(placed[0][0], "SOL")
-        self.assertEqual(placed[0][2], 0.01)
+        self.assertEqual(placed[0][2], 1.0)
         self.assertEqual(read_btc_dip()["qty"], 0.0)
 
     def test_pocket_keeps_coins_when_sell_does_not_fill(self):

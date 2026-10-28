@@ -100,6 +100,7 @@ from .desk_policy import (
     update_alt_arm,
     update_exclusions,
     update_pocket_exit_arm,
+    exit_trap_arm_pct,
     pocket_bounce_ready,
     cfg,
     watch_period_sec,
@@ -1194,7 +1195,11 @@ class CryptoDeskMixin:
             )
             entry = position_basis(book, read_anchors().get(ticker))
             exit_state = update_alt_exit_arm(
-                sleeve_exits.get(ticker), price=price, entry=entry, now=exit_now
+                sleeve_exits.get(ticker),
+                price=price,
+                entry=entry,
+                now=exit_now,
+                qty=qty,
             )
             if exit_state:
                 kept_exits[ticker] = exit_state
@@ -1204,19 +1209,21 @@ class CryptoDeskMixin:
                 exit_arm=exit_state,
                 now=exit_now,
                 swing_low=float(read_sleeve_lows().get(ticker) or 0),
+                qty=qty,
             )
             if not reason:
                 if exit_state and price > 0 and entry > 0:
                     high = float(exit_state["high"])
                     pull = high * (1.0 - cfg().sleeve_exit_pullback_pct / 100.0)
-                    floor = entry * (1.0 + cfg().sleeve_exit_arm_pct / 100.0)
+                    arm_pct = exit_trap_arm_pct(entry=entry, qty=qty)
+                    floor = entry * (1.0 + arm_pct / 100.0)
                     if pull < floor:
                         logger.info(
-                            "[Крипта] альт %s вершина %.4g, откат %.4g ниже плюса +%.0f%%",
+                            "[Крипта] альт %s вершина %.4g, откат %.4g ниже плюса +%.2f%%",
                             ticker,
                             high,
                             pull,
-                            cfg().sleeve_exit_arm_pct,
+                            arm_pct,
                         )
                     else:
                         logger.info(
@@ -1418,6 +1425,7 @@ class CryptoDeskMixin:
                     "ma": ma,
                     "kind": "alt",
                     "exit_high": exit_high,
+                    "qty": qty,
                 })
                 snap.append(
                     watch_snapshot_line(
@@ -1428,12 +1436,14 @@ class CryptoDeskMixin:
                         kind="alt",
                         exit_high=exit_high,
                         basis=basis,
+                        qty=qty,
                     )
                 )
         dip = read_btc_dip()
         dip_entry = float(dip.get("entry") or 0)
+        dip_qty = float(dip.get("qty") or 0)
         dip_px = float(prices.get(BTC_DIP_TICKER) or 0)
-        if float(dip.get("qty") or 0) > 0 and dip_px > 0 and dip_entry > 0:
+        if dip_qty > 0 and dip_px > 0 and dip_entry > 0:
             exit_high = float(dip.get("exit_high") or 0)
             basis = read_anchors().get(BTC_DIP_TICKER) or 0.0
             legs.append({
@@ -1442,6 +1452,7 @@ class CryptoDeskMixin:
                 "entry": position_basis(dip_entry, basis),
                 "kind": "pocket",
                 "exit_high": exit_high,
+                "qty": dip_qty,
             })
             snap.append(
                 watch_snapshot_line(
@@ -1451,13 +1462,15 @@ class CryptoDeskMixin:
                     kind="pocket",
                     exit_high=exit_high,
                     basis=basis,
+                    qty=dip_qty,
                 )
             )
         sui = read_sui_dip()
         second = self._second_ticker()
         sui_entry = float(sui.get("entry") or 0)
+        sui_qty = float(sui.get("qty") or 0)
         sui_px_now = float(prices.get(second) or 0) if second else 0.0
-        if second and float(sui.get("qty") or 0) > 0 and sui_px_now > 0 and sui_entry > 0:
+        if second and sui_qty > 0 and sui_px_now > 0 and sui_entry > 0:
             exit_high = float(sui.get("exit_high") or 0)
             basis = read_anchors().get(second) or 0.0
             legs.append({
@@ -1466,6 +1479,7 @@ class CryptoDeskMixin:
                 "entry": position_basis(sui_entry, basis),
                 "kind": "pocket",
                 "exit_high": exit_high,
+                "qty": sui_qty,
             })
             snap.append(
                 watch_snapshot_line(
@@ -1475,6 +1489,7 @@ class CryptoDeskMixin:
                     kind="pocket",
                     exit_high=exit_high,
                     basis=basis,
+                    qty=sui_qty,
                 )
             )
         self._sync_tape(positions, legs)
@@ -1524,7 +1539,9 @@ class CryptoDeskMixin:
             taped_high = float((tape.exit_highs() if tape is not None else {}).get(ticker) or 0)
             if exit_state and taped_high > float(exit_state["high"]) + 1e-12:
                 exit_state = {"high": taped_high, "ts": now}
-            exit_state = update_pocket_exit_arm(exit_state, price=price, entry=entry, now=now)
+            exit_state = update_pocket_exit_arm(
+                exit_state, price=price, entry=entry, now=now, qty=qty
+            )
             if exit_state:
                 store(
                     qty,
@@ -1915,6 +1932,7 @@ class CryptoDeskMixin:
             peak=peak,
             entry_low=float(state.get("low") or 0),
             algo=leg_algo,
+            qty=float(state.get("qty") or 0),
         )
         if not reason:
             return

@@ -301,6 +301,7 @@ def simulate_probe_ticker(
                 arm_px=arm_px,
                 peak=peak,
                 entry_low=entry_low,
+                qty=(policy.probe_quote() / entry) if entry > 0 else 0.0,
             )
             if reason:
                 exit_px = price * (1.0 - FEE_SIDE)

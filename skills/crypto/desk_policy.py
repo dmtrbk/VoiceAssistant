@@ -42,9 +42,9 @@ POCKET_ENTRY_HOLD_SEC = 10 * 60
 POCKET_SWING_PCT = 3.0
 POCKET_SWING_BARS = 16
 # Живой выход рукава — ловушка вершины, не касание средней.
-# +3% взводит верх. Продажа на откате −0,5% после 5 минут, и только если плюс ещё ≥ +3%.
+# Взвод: рост покрыл taker×2 + $0.50. Продажа на откате −0,5% после 5 минут, плюс ещё ≥ порога взвода.
 # Прогон выше +8% не режем: это верх рабочей зоны, не потолок.
-ALT_EXIT_ARM_PCT = 3.0
+ALT_EXIT_ARM_PCT = 3.0  # устаревший %; живой взвод — exit_trap_arm_pct()
 ALT_EXIT_PULLBACK_PCT = 0.5
 ALT_EXIT_HOLD_SEC = 5 * 60
 ALT_EXIT_MIN_GAIN_PCT = 1.0  # старый порог у средней; его держит crypto_backtest.py
@@ -52,6 +52,10 @@ ALT_STOP_LOSS_PCT = 7.0
 ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
 # Суточный потолок +25% остался только у impulse: уже разогнанную свечу не догоняем.
+# Ловушка: круг комиссий (taker 0,18% × 2) + полдоллара сверх.
+EXIT_FEE_SIDE = 0.0018
+EXIT_TRAP_EXTRA_USD = 0.50
+EXIT_TRAP_DEFAULT_COST_USD = 100.0
 
 # Стейблы не рукав, даже если оборот большой. Базовый список остаётся всегда.
 SLEEVE_SKIP = frozenset({
@@ -127,11 +131,12 @@ WATCH_TP_ALT_DAY_PCT = 8.0
 BTC_DIP_TICKER = "SOL"
 BTC_DIP_PCT = 25.0
 BTC_DIP_DAY_PCT = -3.0
+# Устаревший фиксированный %; живой взвод кармана — exit_trap_arm_pct().
 BTC_DIP_EXIT_PCT = 1.1
 # Второй карман: те же сутки и отскок, фиксированные 50$ вместо доли счёта.
 SUI_DIP_TICKER = "AVA"
 SUI_DIP_USD = 50.0
-# Плюс +1,1% только взводит вершину. Продажа — откат от неё, пауза короче входа.
+# Плюс (комиссия×2 + $0.50) взводит вершину. Продажа — откат от неё, пауза короче входа.
 POCKET_EXIT_PULLBACK_PCT = 0.5
 POCKET_EXIT_HOLD_SEC = 5 * 60
 BTC_DIP_STOP_PCT = 15.0
@@ -185,6 +190,28 @@ def btc_dip_should_buy(*, day_chg: float | None, qty: float) -> bool:
     if qty > 0 or day_chg is None:
         return False
     return float(day_chg) <= cfg().pocket_day_pct
+
+
+def exit_trap_arm_pct(
+    *,
+    entry: float = 0.0,
+    qty: float = 0.0,
+    cost_usd: float = 0.0,
+) -> float:
+    """Порог взвода ловушки в %: taker×2 на ногу + $0.50 сверх.
+
+    Нет размера — считаем от типичных $100, чтобы дозор не молчал.
+    """
+    cost = float(cost_usd or 0)
+    if cost <= 0:
+        ent = float(entry or 0)
+        q = float(qty or 0)
+        if ent > 0 and q > 0:
+            cost = ent * q
+    if cost <= 0:
+        cost = EXIT_TRAP_DEFAULT_COST_USD
+    need = cost * (2.0 * EXIT_FEE_SIDE) + EXIT_TRAP_EXTRA_USD
+    return need / cost * 100.0
 
 
 def btc_dip_exit_reason(
@@ -658,11 +685,12 @@ def probe_exit_reason(
     peak: float = 0.0,
     entry_low: float = 0.0,
     algo: str = "",
+    qty: float = 0.0,
 ) -> str | None:
-    """Маленький ход режется возвратом к цене ожидания. Уехавший — медвежьим 15м.
+    """Стоп и полка. Плюс — ловушка: пик ≥ комиссия×2+$0.50, продажа на откате −0,5%.
 
-    impulse/sprint/grind — подножка: до пика +PROBE_RUN_PCT не режем «ожидание»/«дно»,
-    иначе ход срезается на шуме. Стоп и полка остаются.
+    Пока ловушка не взведена: shelf режется «ожиданием»/«дном»; подножка
+    impulse/sprint/grind эти срезы не берёт. Большой ход (+PROBE_RUN) ещё и медвежьим 15м.
     """
     px = float(price or 0)
     ent = float(entry or 0)
@@ -675,6 +703,14 @@ def probe_exit_reason(
     if level > 0 and px <= level:
         return "полка"
     high = max(float(peak or 0), px)
+    arm_pct = exit_trap_arm_pct(entry=ent, qty=qty)
+    peak_gain = (high / ent - 1.0) * 100.0 if ent > 0 else 0.0
+    if (
+        peak_gain >= arm_pct - 1e-6
+        and px <= high * (1.0 - cfg().pocket_exit_pullback_pct / 100.0) + 1e-12
+        and gain >= arm_pct - 1e-6
+    ):
+        return "вершина"
     run = high >= ent * (1.0 + PROBE_RUN_PCT / 100.0)
     name = str(algo or "").strip().lower()
     footboard = name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPRINT, PROBE_ALGO_GRIND}
@@ -921,8 +957,9 @@ def update_pocket_exit_arm(
     price: float,
     entry: float,
     now: float,
+    qty: float = 0.0,
 ) -> dict[str, float] | None:
-    """Плюс ≥ +1,1% запоминает вершину. Новая вершина сбрасывает таймер.
+    """Плюс ≥ комиссия×2+$0.50 запоминает вершину. Новая вершина сбрасывает таймер.
 
     Ниже порога ловушка ещё не взведена. Уже взведенная не снимается:
     откат как раз и есть сигнал продажи.
@@ -935,7 +972,7 @@ def update_pocket_exit_arm(
         return {"high": float(state["high"]), "ts": float(state.get("ts") or now)}
     gain = (px / ent - 1.0) * 100.0
     if state is None:
-        if gain < BTC_DIP_EXIT_PCT - 1e-6:
+        if gain < exit_trap_arm_pct(entry=ent, qty=qty) - 1e-6:
             return None
         return {"high": px, "ts": float(now)}
     high = float(state.get("high") or 0)
@@ -975,8 +1012,9 @@ def update_alt_exit_arm(
     price: float,
     entry: float,
     now: float,
+    qty: float = 0.0,
 ) -> dict[str, float] | None:
-    """Плюс ≥ +3% запоминает вершину рукава. Новая вершина сбрасывает таймер.
+    """Плюс ≥ комиссия×2+$0.50 запоминает вершину рукава. Новая вершина сбрасывает таймер.
 
     Ниже порога ловушка ещё не взведена. Уже взведенная не снимается.
     """
@@ -988,7 +1026,7 @@ def update_alt_exit_arm(
         return {"high": float(state["high"]), "ts": float(state.get("ts") or now)}
     gain = (px / ent - 1.0) * 100.0
     if state is None:
-        if gain < cfg().sleeve_exit_arm_pct - 1e-6:
+        if gain < exit_trap_arm_pct(entry=ent, qty=qty) - 1e-6:
             return None
         return {"high": px, "ts": float(now)}
     high = float(state.get("high") or 0)
@@ -1003,8 +1041,9 @@ def alt_exit_ready(
     price: float,
     entry: float,
     now: float | None = None,
+    qty: float = 0.0,
 ) -> bool:
-    """Продажа рукава: −0,5% от вершины, вершина 5 минут не обновлялась, плюс ещё ≥ +3%."""
+    """Продажа рукава: −0,5% от вершины, вершина 5 минут не обновлялась, плюс ещё ≥ комиссия+$0.50."""
     limits = cfg()
     if not state or not _bounce_held(state, now, limits.sleeve_exit_hold_sec):
         return False
@@ -1016,7 +1055,7 @@ def alt_exit_ready(
     if px > high * (1.0 - limits.sleeve_exit_pullback_pct / 100.0) + 1e-12:
         return False
     gain = (px / ent - 1.0) * 100.0
-    return gain >= limits.sleeve_exit_arm_pct - 1e-6
+    return gain >= exit_trap_arm_pct(entry=ent, qty=qty) - 1e-6
 
 
 def alt_exit_reason(
@@ -1027,6 +1066,7 @@ def alt_exit_reason(
     now: float | None = None,
     ma: float | None = None,
     swing_low: float = 0.0,
+    qty: float = 0.0,
 ) -> str | None:
     """Выход альта: стоп −7% на дыре, обычный срыв — возврат под дно входа, плюс — откат от вершины."""
     del ma
@@ -1040,7 +1080,7 @@ def alt_exit_reason(
         return "стоп"
     if float(swing_low or 0) > 0 and px <= float(swing_low):
         return "дно"
-    if alt_exit_ready(exit_arm, price=px, entry=ent, now=now):
+    if alt_exit_ready(exit_arm, price=px, entry=ent, now=now, qty=qty):
         return "вершина"
     return None
 
@@ -1302,17 +1342,18 @@ def watch_period_sec(
         gain = (px / ent - 1.0) * 100.0
         kind = str(leg.get("kind") or "alt")
         limits = cfg()
+        arm = exit_trap_arm_pct(entry=ent, qty=float(leg.get("qty") or 0))
         if kind == "pocket":
             if float(leg.get("exit_high") or 0) > 0:
                 return int(hot)
-            if gain >= BTC_DIP_EXIT_PCT - NEAR_TP_PCT:
+            if gain >= arm - NEAR_TP_PCT:
                 return int(hot)
             if gain <= -limits.pocket_stop_pct + NEAR_SL_PCT:
                 return int(hot)
             continue
         if float(leg.get("exit_high") or 0) > 0:
             return int(hot)
-        if gain >= limits.sleeve_exit_arm_pct - NEAR_TP_PCT:
+        if gain >= arm - NEAR_TP_PCT:
             return int(hot)
         if gain <= -limits.sleeve_stop_pct + NEAR_SL_PCT:
             return int(hot)
@@ -1328,6 +1369,7 @@ def watch_snapshot_line(
     kind: str = "alt",
     exit_high: float = 0.0,
     basis: float = 0.0,
+    qty: float = 0.0,
 ) -> str:
     """Одна нога дозора: avg, цена, дистанция до стопа/тейка."""
     name = str(ticker or "?").upper()
@@ -1338,6 +1380,7 @@ def watch_snapshot_line(
         return f"{name} px={px:.4g} avg=?"
     book = (px / ent - 1.0) * 100.0
     gain = (px / rule - 1.0) * 100.0 if rule > 0 else book
+    arm = exit_trap_arm_pct(entry=rule or ent, qty=qty)
     bits = [f"{name} px={px:.4g} avg={ent:.4g} {book:+.2f}%"]
     if rule > 0 and abs(rule - ent) / ent > 1e-6:
         bits.append(f"отсчёт {rule:.4g} {gain:+.2f}%")
@@ -1348,20 +1391,18 @@ def watch_snapshot_line(
             need = hi * (1.0 - cfg().pocket_exit_pullback_pct / 100.0)
             bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + stop:.1f}пп")
         else:
-            bits.append(
-                f"до ловушки {BTC_DIP_EXIT_PCT - gain:+.2f}пп до стопа {gain + stop:.1f}пп"
-            )
+            bits.append(f"до ловушки {arm - gain:+.2f}пп до стопа {gain + stop:.1f}пп")
     else:
         hi = float(exit_high or 0)
         limits = cfg()
         if hi > 0:
             pull = hi * (1.0 - limits.sleeve_exit_pullback_pct / 100.0)
-            floor = rule * (1.0 + limits.sleeve_exit_arm_pct / 100.0)
+            floor = rule * (1.0 + arm / 100.0)
             need = pull if pull >= floor else floor
             bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + limits.sleeve_stop_pct:.1f}пп")
         else:
             bits.append(
-                f"до ловушки {limits.sleeve_exit_arm_pct - gain:+.2f}пп до стопа {gain + limits.sleeve_stop_pct:.1f}пп"
+                f"до ловушки {arm - gain:+.2f}пп до стопа {gain + limits.sleeve_stop_pct:.1f}пп"
             )
         if ma and float(ma) > 0:
             bits.append(f"MA {px / float(ma) - 1.0:+.2%}")
