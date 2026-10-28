@@ -50,7 +50,7 @@ _LIMITS: dict[str, tuple[float, float]] = {
     "pocket_exit_pullback_pct": (0.2, 3.0),
     "pocket_exit_hold_sec": (60, 30 * 60),
     "sui_usd": (10.0, 200.0),
-    "sleeve_max_pct": (50.0, 92.0),
+    "sleeve_max_pct": (20.0, 92.0),
     "sleeve_max_names": (1, 6),
     "sleeve_entry_z": (-4.0, -1.0),
     "sleeve_bounce_pct": (0.3, 5.0),

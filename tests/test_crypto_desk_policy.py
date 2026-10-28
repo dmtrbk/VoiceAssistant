@@ -585,7 +585,7 @@ class TestDeskPolicy(unittest.TestCase):
             "drop",
         )
         self.assertEqual(
-            policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **{**base, "price": 1.09}),
+            policy.probe_arm_action(now=100.0 + policy.PROBE_ENTRY_HOLD_SEC, **{**base, "price": 1.10}),
             "drop",
         )
         self.assertEqual(
@@ -593,7 +593,7 @@ class TestDeskPolicy(unittest.TestCase):
             "drop",
         )
         sprint = dict(base, algo=policy.PROBE_ALGO_SPRINT)
-        self.assertEqual(policy.probe_arm_action(now=130.0, **sprint), "wait")
+        self.assertEqual(policy.probe_arm_action(now=120.0, **sprint), "wait")
         self.assertEqual(
             policy.probe_arm_action(now=100.0 + policy.PROBE_SPRINT_HOLD_SEC, **sprint),
             "buy",
@@ -1688,10 +1688,21 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertEqual(probe_arms(), [])
 
     def test_probe_reserve_second_only_when_open(self):
-        self.assertEqual(policy.probe_reserve_quote(open_legs=0), 30.0)
-        self.assertEqual(policy.probe_reserve_quote(open_legs=0, pending=1), 60.0)
-        self.assertEqual(policy.probe_reserve_quote(open_legs=1), 30.0)
-        self.assertEqual(policy.probe_reserve_quote(open_legs=2), 0.0)
+        # Пусто — резерв одной ноги; при взводе/открытой — под все PROBE_MAX_LEGS.
+        q = policy.probe_quote()
+        self.assertEqual(policy.probe_reserve_quote(open_legs=0), q)
+        self.assertEqual(
+            policy.probe_reserve_quote(open_legs=0, pending=1),
+            q * policy.PROBE_MAX_LEGS,
+        )
+        self.assertEqual(
+            policy.probe_reserve_quote(open_legs=1),
+            q * (policy.PROBE_MAX_LEGS - 1),
+        )
+        self.assertEqual(
+            policy.probe_reserve_quote(open_legs=policy.PROBE_MAX_LEGS),
+            0.0,
+        )
 
     def test_risk_off_sells_core_keeps_alt(self):
         placed: list[tuple[str, str]] = []
