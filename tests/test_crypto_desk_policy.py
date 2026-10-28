@@ -681,16 +681,31 @@ class TestDeskPolicy(unittest.TestCase):
                 "close": px,
                 "volume": 10.0,
             })
+        # Откат от хая живой свечи ≥ tip_gap — не кончик импульса.
         live_grind = {
-            "high": px * 1.01,
+            "high": px * 1.012,
             "low": px * 0.999,
-            "close": px * 1.008,
+            "close": px * 1.004,
             "volume": 12.0,
         }
         grind = policy.probe_grind_setup(stair + [live_grind])
         self.assertIsNotNone(grind)
         assert grind is not None
         self.assertLess(grind["shelf"], grind["price"])
+        tip = {
+            "high": px * 1.012,
+            "low": px * 0.999,
+            "close": px * 1.011,  # у хая свечи — поздно
+            "volume": 12.0,
+        }
+        self.assertIsNone(policy.probe_grind_setup(stair + [tip]))
+        spike = {
+            "high": px * 1.03,
+            "low": px * 0.999,
+            "close": px * 1.004,
+            "volume": 20.0,
+        }
+        self.assertIsNone(policy.probe_grind_setup(stair + [spike]))
         steep = []
         level = 1.0
         for _ in range(16):
@@ -704,7 +719,7 @@ class TestDeskPolicy(unittest.TestCase):
         steep_live = {
             "high": level * 1.01,
             "low": level * 0.999,
-            "close": level * 1.005,
+            "close": level * 1.002,
             "volume": 12.0,
         }
         self.assertIsNone(policy.probe_grind_setup(steep + [steep_live]))
@@ -712,6 +727,8 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.probe_grind_setup(stair + [ripped]))
         flat = [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(16)]
         self.assertIsNone(policy.probe_grind_setup(flat + [live_grind]))
+        self.assertEqual(policy.PROBE_GRIND_TIP_GAP_PCT, 0.5)
+        self.assertEqual(policy.PROBE_GRIND_CHASE_PCT, 1.5)
         self.assertIsNone(
             policy.probe_exit_reason(
                 price=1.02,

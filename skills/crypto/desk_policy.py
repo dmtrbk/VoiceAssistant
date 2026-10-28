@@ -126,9 +126,13 @@ PROBE_GRIND_MIN_RISE_PCT = 3.0
 PROBE_GRIND_MAX_RISE_PCT = 15.0
 PROBE_GRIND_MAX_EXT_PCT = 6.0
 PROBE_GRIND_MAX_BAR_PCT = 8.0
+# Живая свеча — не вертикальный выстрел и не покупка у её хая.
+PROBE_GRIND_MAX_LIVE_BAR_PCT = 2.0
+PROBE_GRIND_TIP_GAP_PCT = 0.5
 PROBE_GRIND_FLOOR_BARS = 4
 PROBE_GRIND_HOLD_SEC = 15
-PROBE_GRIND_CHASE_PCT = 5.0
+# После взвода почти не догоняем — иначе берём пик той же свечи.
+PROBE_GRIND_CHASE_PCT = 1.5
 # Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
 TAKE_PROFIT_DAY_PCT = 18.0
 TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем на подъёме
@@ -553,6 +557,8 @@ def probe_grind_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         high = max(float(bar["high"]) for bar in window)
         low = min(float(bar["low"]) for bar in window)
         price = float(forming.get("close") or 0)
+        live_high = float(forming.get("high") or 0)
+        live_low = float(forming.get("low") or 0)
         spans = []
         for bar in window:
             lo = float(bar["low"])
@@ -567,6 +573,15 @@ def probe_grind_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     except (TypeError, ValueError, KeyError):
         return None
     if high <= 0 or low <= 0 or price <= 0 or prior <= 0 or shelf <= 0:
+        return None
+    if live_high <= 0 or live_low <= 0:
+        return None
+    live_span = (live_high - live_low) / live_low * 100.0
+    if live_span > PROBE_GRIND_MAX_LIVE_BAR_PCT + 1e-12:
+        return None
+    # Не у кончика живой свечи (LTC взяли на хае импульса).
+    tip_cap = live_high * (1.0 - PROBE_GRIND_TIP_GAP_PCT / 100.0)
+    if price > tip_cap + 1e-12:
         return None
     rise = (price / low - 1.0) * 100.0
     if rise < PROBE_GRIND_MIN_RISE_PCT or rise > PROBE_GRIND_MAX_RISE_PCT:
