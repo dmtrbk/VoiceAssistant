@@ -96,8 +96,10 @@ from .desk_policy import (
     should_rebalance_leg,
     should_watch_dip_buy,
     take_profit_day_pct_for,
+    TRAIL_ARM_PCT,
+    TRAIL_POSITIVE_PCT,
+    calculate_trailing_stop,
     trail_pct_for,
-    update_trail_leg,
     update_alt_arm,
     update_exclusions,
     update_pocket_exit_arm,
@@ -1232,6 +1234,9 @@ class CryptoDeskMixin:
         for ticker, pos in positions.items():
             if self._is_owner_position(ticker):
                 continue
+            # Щуп — свой автомат, трейл дозора его не закрывает.
+            if ticker in probe_held:
+                continue
             price = float(prices.get(ticker) or pos.get("price") or 0)
             if price <= 0:
                 continue
@@ -1239,21 +1244,30 @@ class CryptoDeskMixin:
             leg_value = float(pos.get("value") or 0) or float(pos.get("qty") or 0) * price
             if leg_value < min_trade:
                 continue
-            if trail_pct_for(ticker) is None:
+            dist = trail_pct_for(ticker)
+            if dist is None:
                 continue
             prev = trail_legs.get(ticker) or {}
             entry = float(prev.get("entry") or 0) or float(avg_costs.get(ticker) or 0) or price
-            updated = update_trail_leg(
+            peak = float(prev.get("high") or prev.get("peak") or 0) or None
+            prev_stop = float(prev.get("stop") or 0) or None
+            # Freqtrade-style: offset=arm, only_offset, positive после offset.
+            updated = calculate_trailing_stop(
                 price=price,
                 entry=entry,
-                high=float(prev.get("high") or 0) or None,
-                armed=bool(prev.get("armed")),
-                trail_pct=trail_pct_for(ticker),
+                peak=peak,
+                prev_stop=prev_stop,
+                stoploss_pct=float(dist),
+                trail_pct=float(dist),
+                positive_trail_pct=TRAIL_POSITIVE_PCT,
+                offset_pct=TRAIL_ARM_PCT,
+                only_offset=True,
             )
             new_trail[ticker] = {
                 "entry": updated["entry"],
-                "high": updated["high"],
-                "armed": updated["armed"],
+                "high": updated["peak"],
+                "stop": updated["stop"],
+                "armed": bool(updated["trailing"]),
             }
             if not updated["hit"]:
                 continue
@@ -1272,10 +1286,11 @@ class CryptoDeskMixin:
                 trail_sold.add(ticker)
                 time.sleep(0.4)
                 logger.info(
-                    "[Крипта] трейл %s: high %.4g stop %.4g gain %+.1f%%",
+                    "[Крипта] трейл %s: peak %.4g stop %.4g trail %.1f%% gain %+.1f%%",
                     ticker,
-                    updated["high"],
+                    updated["peak"],
                     updated["stop"],
+                    updated["trail_pct"],
                     updated["gain_pct"],
                 )
             except Exception as exc:

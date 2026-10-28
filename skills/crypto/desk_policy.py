@@ -153,6 +153,8 @@ NEAR_SL_PCT = 3.0
 NEAR_MA_PCT = 0.4
 TRAIL_ARM_PCT = 5.0
 TRAIL_ALT_PCT = 8.0
+# После offset — туже, как trailing_stop_positive у Freqtrade.
+TRAIL_POSITIVE_PCT = 4.0
 CHURN_COOLDOWN_HOURS = 12.0
 # Свежекупленный альт не ротируем полным столом (трейл, TP и risk-off продают как обычно).
 ALT_MIN_HOLD_HOURS = 12.0
@@ -1517,9 +1519,9 @@ def pick_watch_alt_entries(
 
 
 def trail_pct_for(ticker: str) -> float | None:
-    """У альта свой выход — средняя полоса или стоп, трейла нет."""
+    """Дистанция трейла дозора (% от пика). None — ногу не ведём."""
     del ticker
-    return None
+    return TRAIL_ALT_PCT
 
 
 def calculate_trailing_stop(
@@ -1622,33 +1624,34 @@ def update_trail_leg(
     armed: bool = False,
     arm_pct: float = TRAIL_ARM_PCT,
     trail_pct: float = 6.0,
+    prev_stop: float | None = None,
+    positive_trail_pct: float | None = None,
 ) -> dict[str, Any]:
     """Обновить водяную марку. hit=True — цена пробила подтягивающийся стоп.
 
-    Упрощённый трейл стола (arm_pct → взвод). Полная логика Freqtrade —
-    в calculate_trailing_stop (offset / positive / only_offset).
+    Обёртка над calculate_trailing_stop: arm_pct → only_offset / offset_pct.
+    До взвода hit не ставим (старый контракт дозора), даже если цена ниже
+    начального stoploss от входа.
     """
-    px = float(price)
-    ent = float(entry) if entry and float(entry) > 0 else px
-    if px <= 0 or ent <= 0:
-        return {
-            "entry": max(ent, 0.0),
-            "high": max(float(high or 0), ent, 0.0),
-            "armed": False,
-            "stop": 0.0,
-            "hit": False,
-            "gain_pct": 0.0,
-        }
-    hi = max(float(high or 0), ent, px)
-    gain_pct = (px / ent - 1.0) * 100.0
-    is_armed = bool(armed) or gain_pct >= float(arm_pct)
-    stop = hi * (1.0 - float(trail_pct) / 100.0)
-    hit = is_armed and px <= stop + 1e-12
+    out = calculate_trailing_stop(
+        price=price,
+        entry=entry,
+        peak=high,
+        prev_stop=prev_stop,
+        stoploss_pct=float(trail_pct),
+        trail_pct=float(trail_pct),
+        positive_trail_pct=positive_trail_pct,
+        offset_pct=float(arm_pct),
+        only_offset=True,
+    )
+    is_armed = bool(armed) or bool(out["trailing"])
     return {
-        "entry": ent,
-        "high": hi,
+        "entry": out["entry"],
+        "high": out["peak"],
         "armed": is_armed,
-        "stop": stop,
-        "hit": hit,
-        "gain_pct": gain_pct,
+        "stop": out["stop"],
+        "hit": bool(out["hit"]) and is_armed,
+        "gain_pct": out["gain_pct"],
+        "trailing": out["trailing"],
+        "trail_pct": out["trail_pct"],
     }

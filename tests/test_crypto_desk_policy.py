@@ -1062,8 +1062,8 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(cold["armed"])
         self.assertFalse(cold["hit"])
         self.assertEqual(policy.TRAIL_ARM_PCT, 5.0)
-        self.assertIsNone(policy.trail_pct_for("BTC"))
-        self.assertIsNone(policy.trail_pct_for("DOGE"))
+        self.assertEqual(policy.trail_pct_for("BTC"), policy.TRAIL_ALT_PCT)
+        self.assertEqual(policy.trail_pct_for("DOGE"), policy.TRAIL_ALT_PCT)
 
     def test_calculate_trailing_stop_freqtrade_examples(self):
         # Docs: entry 100, stoploss −10%, peak 102 → stop 91.8
@@ -1284,8 +1284,9 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         from skills.crypto import common as crypto_common
 
         crypto_common.write_alloc_state({"BTC": 40.0}, why="test")
+        # peak 120, offset уже пройден; positive 4% → stop 115.2; цена 112 → hit
         crypto_common.write_trail_state(
-            {"BTC": {"entry": 100.0, "high": 120.0, "armed": True}}
+            {"BTC": {"entry": 100.0, "high": 120.0, "stop": 110.4, "armed": True}}
         )
         placed: list[tuple] = []
 
@@ -1305,7 +1306,6 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patch.object(self.skill, "_cash_and_held", return_value=(10.0, {})),
             patch.object(self.skill, "_ensure_desk_bought"),
             patch.object(self.skill, "_btc_regime", return_value=(2.0, 1.0)),
-            # 112 / 120 high, trail 6% → stop 112.8; 112 <= 112.8 → hit
             patch.object(self.skill, "_ticker", return_value={"price": 112.0, "chg": 1.0, "turnover": 1}),
             patch.object(self.skill, "_place_order", side_effect=place),
             patch.object(self.skill, "_api_key", "x"),
@@ -1315,7 +1315,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             self.skill._desk_bought_ready = True
             self.skill._desk_bought = {"BTC"}
             result = self.skill._desk_watch_locked(silent=True)
-        self.assertFalse(placed, result)
+        self.assertTrue(any(t == "BTC" and side == "Sell" for t, side, *_ in placed), result)
         self.assertNotIn("BTC", crypto_common.read_trail_state())
 
     def test_risk_off_keeps_held_alts(self):

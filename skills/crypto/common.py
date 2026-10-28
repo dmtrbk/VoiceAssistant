@@ -572,7 +572,7 @@ def write_sleeve_lows(lows: dict[str, float], path: str | None = None) -> None:
 
 
 def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
-    """high/entry/armed по тикерам стола."""
+    """high/entry/stop/armed по тикерам стола (peak храним в high)."""
     path = path or _TRAIL_PATH
     raw = _read_trail_payload(path)
     legs_raw = raw.get("legs")
@@ -584,8 +584,9 @@ def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
         if not ticker or not isinstance(value, dict):
             continue
         try:
-            high = float(value.get("high") or 0)
+            high = float(value.get("high") or value.get("peak") or 0)
             entry = float(value.get("entry") or 0)
+            stop = float(value.get("stop") or 0)
         except (TypeError, ValueError):
             continue
         if high <= 0 and entry <= 0:
@@ -593,6 +594,7 @@ def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
         out[ticker] = {
             "high": max(high, entry, 0.0),
             "entry": max(entry, 0.0),
+            "stop": max(stop, 0.0),
             "armed": bool(value.get("armed")),
         }
     return out
@@ -1098,17 +1100,21 @@ def write_trail_state(
         if not ticker or not isinstance(value, dict):
             continue
         try:
-            high = float(value.get("high") or 0)
+            high = float(value.get("high") or value.get("peak") or 0)
             entry = float(value.get("entry") or 0)
+            stop = float(value.get("stop") or 0)
         except (TypeError, ValueError):
             continue
         if high <= 0 and entry <= 0:
             continue
-        clean[ticker] = {
+        row: dict[str, Any] = {
             "high": max(high, entry, 0.0),
             "entry": max(entry, 0.0),
             "armed": bool(value.get("armed")),
         }
+        if stop > 0:
+            row["stop"] = stop
+        clean[ticker] = row
     prev = _read_trail_payload(path)
     payload: dict[str, Any] = {"legs": clean, "ts": time.time()}
     if isinstance(prev.get("sleeve_exits"), dict):
