@@ -109,10 +109,12 @@ PROBE_IMPULSE_VOL_MULT = 2.5
 PROBE_IMPULSE_BREAK_MIN_PCT = 3.0
 PROBE_IMPULSE_BREAK_MAX_PCT = 15.0
 PROBE_IMPULSE_MAX_DAY_PCT = 25.0
+# Grind без дневного потолка ловит уже разогнанные тикеры у хая суток.
+PROBE_GRIND_MAX_DAY_PCT = 20.0
 # Лестница: ближе к началу хода, не только у самого хая. Свежий пробой +4% — не grind.
 PROBE_GRIND_BARS = 16
 PROBE_GRIND_NEAR_HIGH = 0.97
-PROBE_GRIND_MIN_RISE_PCT = 2.5
+PROBE_GRIND_MIN_RISE_PCT = 3.0
 # Окно 4ч уже уехало сильнее — это не свежая лестница, а догон хая.
 PROBE_GRIND_MAX_RISE_PCT = 15.0
 PROBE_GRIND_MAX_EXT_PCT = 6.0
@@ -597,6 +599,7 @@ def probe_pick_setup(
     """Первый сработавший: impulse → grind → sprint → shelf.
 
     Impulse не берём, если сутки уже +25% и выше: это покупка у пика дня.
+    Grind — с +20%: слабее импульс, но тоже поздно заходить в дневной разгон.
     """
     seq = tuple(order or PROBE_ALGO_ORDER)
     for algo in seq:
@@ -605,6 +608,12 @@ def probe_pick_setup(
             name == PROBE_ALGO_IMPULSE
             and day_chg is not None
             and float(day_chg) >= PROBE_IMPULSE_MAX_DAY_PCT
+        ):
+            continue
+        if (
+            name == PROBE_ALGO_GRIND
+            and day_chg is not None
+            and float(day_chg) >= PROBE_GRIND_MAX_DAY_PCT
         ):
             continue
         if name == PROBE_ALGO_IMPULSE:
@@ -629,9 +638,16 @@ def probe_trends_ok(
     trend1h: str,
     day_chg: float | None,
     week_chg: float | None = None,
+    *,
+    algo: str = "",
 ) -> bool:
-    """15м бычий, час не медвежий, неделя не слабее −5%. Потолок суток только у impulse."""
+    """15м бычий, час не медвежий, неделя не слабее −5%.
+
+    Grind требует бычий час: нейтральный 1h часто = уже выдохшийся подъём.
+    """
     if trend15 != "bull" or trend1h == "bear":
+        return False
+    if str(algo or "").strip().lower() == PROBE_ALGO_GRIND and trend1h != "bull":
         return False
     if day_chg is None:
         return False

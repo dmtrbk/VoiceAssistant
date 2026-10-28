@@ -549,6 +549,12 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.probe_trends_ok("bull", "bull", 30.0))
         self.assertFalse(policy.probe_trends_ok("bull", "neutral", 8.0, week_chg=-6.0))
         self.assertTrue(policy.probe_trends_ok("bull", "neutral", 8.0, week_chg=-4.0))
+        self.assertFalse(
+            policy.probe_trends_ok("bull", "neutral", 8.0, algo=policy.PROBE_ALGO_GRIND)
+        )
+        self.assertTrue(
+            policy.probe_trends_ok("bull", "bull", 8.0, algo=policy.PROBE_ALGO_GRIND)
+        )
         self.assertGreater(
             policy.probe_scan_rank({
                 "chg": -18.0, "price": 0.108, "low": 0.071, "high": 0.111, "turnover": 5_000_000,
@@ -635,6 +641,22 @@ class TestDeskPolicy(unittest.TestCase):
             day_chg=40.0,
         )
         self.assertIsNone(late_day)
+        grind_bars = (
+            [{"high": 1.0, "low": 0.98, "close": 0.99, "volume": 10.0} for _ in range(20)]
+            + [
+                {"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0},
+                {"high": 1.02, "low": 1.0, "close": 1.015, "volume": 12.0},
+                {"high": 1.03, "low": 1.01, "close": 1.025, "volume": 12.0},
+                {"high": 1.04, "low": 1.02, "close": 1.035, "volume": 12.0},
+            ]
+        )
+        late_grind = policy.probe_pick_setup(
+            grind_bars,
+            None,
+            order=(policy.PROBE_ALGO_GRIND,),
+            day_chg=22.0,
+        )
+        self.assertIsNone(late_grind)
         self.assertEqual(
             policy.probe_arm_action(
                 now=100.0 + policy.PROBE_IMPULSE_HOLD_SEC,

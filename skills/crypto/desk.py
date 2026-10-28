@@ -1848,6 +1848,8 @@ class CryptoDeskMixin:
             blocked.add(second)
         alloc = (read_alloc_state() or {}).get("alloc") or {}
         blocked |= {str(ticker).upper() for ticker in alloc}
+        # Убыточный выход (MEGA/HAEDAL) — не сразу обратно в ту же монету.
+        blocked |= set(crypto_journal.cooldown_tickers(cfg().cooldown_hours))
         try:
             _cash, positions = self._wallet()
         except Exception as exc:
@@ -2111,14 +2113,15 @@ class CryptoDeskMixin:
                 logger.info("[Крипта] щуп %s час: %s", ticker, exc)
                 continue
             week = self._probe_week(ticker)
+            algo = str(setup.get("algo") or "shelf")
             if week is None or not probe_trends_ok(
                 ma_trend([bar["close"] for bar in bars]),
                 ma_trend([bar["close"] for bar in hour]),
                 float(row.get("chg") or 0),
                 week_chg=week,
+                algo=algo,
             ):
                 continue
-            algo = str(setup.get("algo") or "shelf")
             hold = int(float(setup.get("hold_sec") or PROBE_ENTRY_HOLD_SEC))
             write_probe(
                 arm_ticker=ticker,
