@@ -665,6 +665,7 @@ def _empty_probe() -> dict[str, Any]:
         "arm_ts": 0.0,
         "arm_px": 0.0,
         "arm_algo": "",
+        "arms": [],
         "peak": 0.0,
         "low": 0.0,
         "legs": [],
@@ -707,6 +708,60 @@ def probe_tickers(state: dict[str, Any] | None = None) -> set[str]:
     return {str(leg.get("ticker") or "") for leg in probe_legs(state) if leg.get("ticker")}
 
 
+def _arm_from_fields(
+    ticker: Any,
+    shelf: Any,
+    ts: Any = 0,
+    px: Any = 0,
+    algo: Any = "",
+) -> dict[str, Any] | None:
+    name = _normalize_ticker(str(ticker or ""))
+    try:
+        level = float(shelf or 0)
+        when = float(ts or 0)
+        price = float(px or 0)
+    except (TypeError, ValueError):
+        return None
+    if not name or level <= 0:
+        return None
+    return {
+        "ticker": name,
+        "shelf": level,
+        "ts": when,
+        "px": price,
+        "algo": str(algo or "").strip().lower(),
+    }
+
+
+def probe_arms(state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Ожидания входа. Пока одно ждёт, второе может взвестись рядом."""
+    if state is None:
+        state = read_probe()
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in state.get("arms") or []:
+        if not isinstance(raw, dict):
+            continue
+        arm = _arm_from_fields(
+            raw.get("ticker"), raw.get("shelf"), raw.get("ts"), raw.get("px"), raw.get("algo"),
+        )
+        if not arm or arm["ticker"] in seen:
+            continue
+        seen.add(arm["ticker"])
+        out.append(arm)
+    return out
+
+
+def _sync_primary_arm(out: dict[str, Any], arms: list[dict[str, Any]]) -> None:
+    first = arms[0] if arms else {}
+    out["arm_ticker"] = str(first.get("ticker") or "")
+    out["arm_shelf"] = float(first.get("shelf") or 0)
+    out["arm_ts"] = float(first.get("ts") or 0)
+    out["arm_px"] = float(first.get("px") or 0)
+    out["arm_algo"] = str(first.get("algo") or "")
+    out["arms"] = arms
+
+
 def _flatten_probe(out: dict[str, Any]) -> dict[str, Any]:
     first = (out.get("legs") or [{}])[0] if out.get("legs") else {}
     out["ticker"] = str(first.get("ticker") or "")
@@ -734,13 +789,31 @@ def read_probe(path: str | None = None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return empty
     out = _empty_probe()
-    out["arm_ticker"] = _normalize_ticker(str(raw.get("arm_ticker") or ""))
-    out["arm_algo"] = str(raw.get("arm_algo") or "").strip().lower()
-    for key in ("arm_shelf", "arm_ts", "arm_px"):
-        try:
-            out[key] = float(raw.get(key) or 0)
-        except (TypeError, ValueError):
-            out[key] = 0.0
+    arms: list[dict[str, Any]] = []
+    seen_arms: set[str] = set()
+    raw_arms = raw.get("arms")
+    if isinstance(raw_arms, list):
+        for item in raw_arms:
+            if not isinstance(item, dict):
+                continue
+            arm = _arm_from_fields(
+                item.get("ticker"), item.get("shelf"), item.get("ts"), item.get("px"), item.get("algo"),
+            )
+            if not arm or arm["ticker"] in seen_arms:
+                continue
+            seen_arms.add(arm["ticker"])
+            arms.append(arm)
+    if not arms:
+        legacy = _arm_from_fields(
+            raw.get("arm_ticker"),
+            raw.get("arm_shelf"),
+            raw.get("arm_ts"),
+            raw.get("arm_px"),
+            raw.get("arm_algo"),
+        )
+        if legacy:
+            arms.append(legacy)
+    _sync_primary_arm(out, arms)
     legs: list[dict[str, Any]] = []
     seen: set[str] = set()
     raw_legs = raw.get("legs")
@@ -755,14 +828,9 @@ def read_probe(path: str | None = None) -> dict[str, Any]:
         seen.add(leg["ticker"])
         legs.append(leg)
     out["legs"] = legs
+    if not arms:
+        _sync_primary_arm(out, [])
     _flatten_probe(out)
-    if out["arm_shelf"] <= 0:
-        out["arm_ticker"] = ""
-        out["arm_shelf"] = 0.0
-        out["arm_ts"] = 0.0
-        out["arm_algo"] = ""
-        if out["qty"] <= 0:
-            out["arm_px"] = 0.0
     return out
 
 
@@ -781,6 +849,7 @@ def write_probe(
     low: float = 0.0,
     algo: str = "",
     drop: str = "",
+    drop_arm: str = "",
     clear_arm: bool = False,
     path: str | None = None,
 ) -> None:
@@ -791,6 +860,7 @@ def write_probe(
         and not _normalize_ticker(arm_ticker)
         and float(arm_shelf or 0) <= 0
         and not _normalize_ticker(drop)
+        and not _normalize_ticker(drop_arm)
         and not clear_arm
     )
     if empty_call:
@@ -802,9 +872,11 @@ def write_probe(
         return
     current = read_probe(path)
     legs = probe_legs(current)
+    arms = probe_arms(current)
     gone = _normalize_ticker(drop)
     if gone:
         legs = [leg for leg in legs if leg["ticker"] != gone]
+        arms = [arm for arm in arms if arm["ticker"] != gone]
     name = _normalize_ticker(ticker)
     if name and float(qty) > 0 and float(entry) > 0:
         prev_algo = ""
@@ -823,26 +895,29 @@ def write_probe(
             "low": float(low or 0),
             "algo": str(algo or prev_algo or "").strip().lower(),
         })
+        arms = [arm for arm in arms if arm["ticker"] != name]
     arm_name = _normalize_ticker(arm_ticker)
     keep_arm = float(arm_shelf or 0) > 0 and arm_name
-    armed = str(current.get("arm_ticker") or "")
+    if _normalize_ticker(drop_arm):
+        arms = [arm for arm in arms if arm["ticker"] != _normalize_ticker(drop_arm)]
+    if clear_arm:
+        arms = []
     if keep_arm:
-        current["arm_ticker"] = arm_name
-        current["arm_shelf"] = float(arm_shelf)
-        current["arm_ts"] = float(arm_ts or 0)
-        if float(arm_px or 0) > 0:
-            current["arm_px"] = float(arm_px)
-        if arm_algo or not current.get("arm_algo"):
-            current["arm_algo"] = str(arm_algo or "").strip().lower()
-    elif clear_arm or (gone and gone == armed) or (name and name == armed):
-        current["arm_ticker"] = ""
-        current["arm_shelf"] = 0.0
-        current["arm_ts"] = 0.0
-        current["arm_algo"] = ""
-        if not legs:
-            current["arm_px"] = 0.0
+        from skills.crypto.desk_policy import PROBE_MAX_LEGS
+
+        arms = [arm for arm in arms if arm["ticker"] != arm_name]
+        if len(legs) + len(arms) < int(PROBE_MAX_LEGS):
+            arms.append({
+                "ticker": arm_name,
+                "shelf": float(arm_shelf),
+                "ts": float(arm_ts or 0),
+                "px": float(arm_px or 0),
+                "algo": str(arm_algo or "").strip().lower(),
+            })
+    _sync_primary_arm(current, arms)
     payload: dict[str, Any] = {"legs": legs}
-    if current.get("arm_shelf") and current.get("arm_ticker"):
+    if current.get("arms"):
+        payload["arms"] = current["arms"]
         payload["arm_ticker"] = current["arm_ticker"]
         payload["arm_shelf"] = float(current["arm_shelf"])
         payload["arm_ts"] = float(current.get("arm_ts") or 0)
@@ -861,7 +936,7 @@ def write_probe(
             payload["arm_px"] = float(first["arm_px"])
         if float(first.get("low") or 0) > 0:
             payload["low"] = float(first["low"])
-    if not payload.get("legs") and not payload.get("arm_ticker"):
+    if not payload.get("legs") and not payload.get("arms"):
         try:
             if os.path.isfile(path):
                 os.remove(path)

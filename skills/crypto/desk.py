@@ -28,6 +28,7 @@ from .common import (
     read_btc_dip,
     read_entry_arms,
     probe_legs,
+    probe_arms,
     probe_tickers,
     read_probe,
     read_sleeve_exits,
@@ -538,8 +539,8 @@ class CryptoDeskMixin:
             seed.add(second)
         probe = read_probe()
         seed |= probe_tickers(probe)
-        if probe.get("arm_ticker"):
-            seed.add(str(probe["arm_ticker"]))
+        for arm in probe_arms(probe):
+            seed.add(str(arm["ticker"]))
         tape.set_symbols(seed)
         tape.start()
 
@@ -572,7 +573,10 @@ class CryptoDeskMixin:
         )
         if float(read_sui_dip().get("qty") or 0) <= 0 and cfg().second_on:
             reserve += sui_dip_quote()
-        reserve += probe_reserve_quote(open_legs=len(probe_legs()))
+        reserve += probe_reserve_quote(
+            open_legs=len(probe_legs()),
+            pending=len(probe_arms()),
+        )
         return reserve
 
     def _second_ticker(self) -> str | None:
@@ -1862,10 +1866,16 @@ class CryptoDeskMixin:
         if not cfg().probe_on:
             return
         state = read_probe()
-        if state.get("arm_ticker"):
-            self._probe_arm(state)
-            return
-        if len(probe_legs(state)) < PROBE_MAX_LEGS:
+        for arm in probe_arms(state):
+            self._probe_arm({
+                "arm_ticker": arm["ticker"],
+                "arm_shelf": arm["shelf"],
+                "arm_ts": arm["ts"],
+                "arm_px": arm["px"],
+                "arm_algo": arm["algo"],
+            })
+        state = read_probe()
+        if len(probe_legs(state)) + len(probe_arms(state)) < PROBE_MAX_LEGS:
             self._probe_scan()
 
     def _probe_exit(self, state: dict[str, Any]) -> None:
@@ -1982,7 +1992,7 @@ class CryptoDeskMixin:
         if action == "wait":
             return
         if action == "drop":
-            write_probe(clear_arm=True)
+            write_probe(drop_arm=ticker)
             logger.info(
                 "[Крипта] щуп %s снят (%s): полка %.4g сейчас %.4g тренд %s",
                 ticker,
@@ -2044,14 +2054,14 @@ class CryptoDeskMixin:
         )
 
     def _probe_scan(self) -> None:
-        if len(probe_legs()) >= PROBE_MAX_LEGS:
+        if len(probe_legs()) + len(probe_arms()) >= PROBE_MAX_LEGS:
             return
         try:
             tape = self._tape()
         except Exception as exc:
             logger.info("[Крипта] щуп лента: %s", exc)
             return
-        blocked = self._probe_blocked() | probe_tickers()
+        blocked = self._probe_blocked() | probe_tickers() | {arm["ticker"] for arm in probe_arms()}
         ranked: list[tuple[float, dict[str, Any]]] = []
         for row in tape:
             ticker = str(row.get("ticker") or "")
@@ -2249,7 +2259,7 @@ class CryptoDeskMixin:
                     self._pockets_tick()
                 except Exception as exc:
                     logger.warning("[Крипта] карманы: %s", exc)
-                armed = bool((read_probe() or {}).get("arm_ticker"))
+                armed = bool(probe_arms())
                 gap = PROBE_ARMED_PERIOD_SEC if armed else PROBE_PERIOD_SEC
                 next_probe = time.time() + gap
         tape = getattr(self, "_bybit_tape", None)

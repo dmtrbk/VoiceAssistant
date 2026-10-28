@@ -654,6 +654,23 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNotNone(grind)
         assert grind is not None
         self.assertLess(grind["shelf"], grind["price"])
+        steep = []
+        level = 1.0
+        for _ in range(16):
+            level *= 1.012
+            steep.append({
+                "high": level * 1.002,
+                "low": level * 0.998,
+                "close": level,
+                "volume": 10.0,
+            })
+        steep_live = {
+            "high": level * 1.01,
+            "low": level * 0.999,
+            "close": level * 1.005,
+            "volume": 12.0,
+        }
+        self.assertIsNone(policy.probe_grind_setup(steep + [steep_live]))
         ripped = {**live_grind, "close": px * 1.05, "high": px * 1.05}
         self.assertIsNone(policy.probe_grind_setup(stair + [ripped]))
         flat = [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(16)]
@@ -1607,8 +1624,21 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         write_probe()
         self.assertEqual(probe_legs(), [])
 
+    def test_probe_second_arm_while_first_waits(self):
+        from skills.crypto.common import probe_arms, read_probe, write_probe
+
+        write_probe(arm_ticker="DOOD", arm_shelf=1.0, arm_ts=1.0, arm_px=1.1, arm_algo="grind")
+        write_probe(arm_ticker="PEPE", arm_shelf=2.0, arm_ts=2.0, arm_px=2.2, arm_algo="impulse")
+        self.assertEqual([arm["ticker"] for arm in probe_arms()], ["DOOD", "PEPE"])
+        write_probe(drop_arm="DOOD")
+        self.assertEqual([arm["ticker"] for arm in probe_arms()], ["PEPE"])
+        self.assertEqual(read_probe()["arm_ticker"], "PEPE")
+        write_probe()
+        self.assertEqual(probe_arms(), [])
+
     def test_probe_reserve_second_only_when_open(self):
         self.assertEqual(policy.probe_reserve_quote(open_legs=0), 30.0)
+        self.assertEqual(policy.probe_reserve_quote(open_legs=0, pending=1), 60.0)
         self.assertEqual(policy.probe_reserve_quote(open_legs=1), 30.0)
         self.assertEqual(policy.probe_reserve_quote(open_legs=2), 0.0)
 

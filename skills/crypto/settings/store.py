@@ -59,7 +59,7 @@ def reset() -> DeskSettings:
 
 
 def status_line() -> str:
-    from skills.crypto.common import probe_legs, read_alloc_state, read_btc_dip, read_probe, read_sui_dip
+    from skills.crypto.common import probe_arms, probe_legs, read_alloc_state, read_btc_dip, read_probe, read_sui_dip
 
     data = current()
     pocket = read_btc_dip()
@@ -76,13 +76,17 @@ def status_line() -> str:
     parts.append(f"Рукав {sleeve} из {int(data.sleeve_max_names)}")
     if not data.probe_on:
         parts.append("Щуп выключен")
-    elif probe_legs(probe):
-        names = ", ".join(str(leg["ticker"]) for leg in probe_legs(probe))
-        parts.append(f"Щуп держит {names}")
-    elif probe.get("arm_ticker"):
-        parts.append(f"Щуп взведён {probe['arm_ticker']}")
     else:
-        parts.append("Щуп молчит")
+        held = probe_legs(probe)
+        arms = probe_arms(probe)
+        if held:
+            names = ", ".join(str(leg["ticker"]) for leg in held)
+            parts.append(f"Щуп держит {names}")
+        if arms:
+            names = ", ".join(str(arm["ticker"]) for arm in arms)
+            parts.append(f"Щуп взведён {names}")
+        if not held and not arms:
+            parts.append("Щуп молчит")
     return " · ".join(parts)
 
 

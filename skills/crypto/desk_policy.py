@@ -109,6 +109,8 @@ PROBE_IMPULSE_MAX_DAY_PCT = 25.0
 PROBE_GRIND_BARS = 16
 PROBE_GRIND_NEAR_HIGH = 0.985
 PROBE_GRIND_MIN_RISE_PCT = 4.0
+# Окно 4ч уже уехало сильнее — это не свежая лестница, а догон хая.
+PROBE_GRIND_MAX_RISE_PCT = 15.0
 PROBE_GRIND_MAX_EXT_PCT = 6.0
 PROBE_GRIND_MAX_BAR_PCT = 8.0
 PROBE_GRIND_FLOOR_BARS = 4
@@ -305,12 +307,13 @@ def probe_quote() -> float:
     return float(cfg().probe_usd)
 
 
-def probe_reserve_quote(*, open_legs: int) -> float:
-    """Пустой щуп резервирует один слот. Второй — только когда первый уже куплен."""
+def probe_reserve_quote(*, open_legs: int, pending: int = 0) -> float:
+    """Пустой щуп резервирует один слот. Взвод или открытая нога держат место и под второй."""
     if not cfg().probe_on:
         return 0.0
     opened = max(0, int(open_legs))
-    want = PROBE_MAX_LEGS if opened >= 1 else 1
+    waiting = max(0, int(pending))
+    want = PROBE_MAX_LEGS if opened + waiting >= 1 else 1
     return probe_quote() * max(0, want - opened)
 
 
@@ -517,7 +520,8 @@ def probe_grind_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         return None
     if high <= 0 or low <= 0 or price <= 0 or prior <= 0 or shelf <= 0:
         return None
-    if (price / low - 1.0) * 100.0 < PROBE_GRIND_MIN_RISE_PCT:
+    rise = (price / low - 1.0) * 100.0
+    if rise < PROBE_GRIND_MIN_RISE_PCT or rise > PROBE_GRIND_MAX_RISE_PCT:
         return None
     if price < high * PROBE_GRIND_NEAR_HIGH:
         return None
