@@ -37,13 +37,13 @@ from skills.crypto.desk_policy import (
     pocket_swing,
     probe_arm_action,
     probe_exit_reason,
+    probe_should_handoff,
+    pocket_from_probe_max,
     probe_pick_setup,
     probe_quote,
     probe_reserve_quote,
     probe_scan_rank,
     probe_trends_ok,
-    second_pocket_choice,
-    sui_dip_quote,
     update_alt_arm,
     update_alt_exit_arm,
     update_exclusions,
@@ -317,12 +317,10 @@ def free_cash(
 ) -> float:
     """Кэш минус резервы под пустые карман/щуп — как idle_special_reserve."""
     pocket_open = bool(book.open_kinds("pocket"))
-    second_open = bool(book.open_kinds("second"))
     reserve = 0.0
     if do_pocket and not pocket_open:
         reserve += btc_dip_quote(equity)
-    if do_second and not second_open:
-        reserve += sui_dip_quote()
+    # Второй карман не резервирует USDT — ноги приходят с щупа уже в монете.
     if do_probe:
         reserve += probe_reserve_quote(
             open_legs=len(book.open_kinds("probe")),
@@ -401,15 +399,14 @@ def main() -> int:
     start = end - timedelta(hours=args.hours)
     start_ts = start.timestamp()
     end_ts = end.timestamp()
-    second = (args.second or ("AVA" if not str(args.only or "").strip() else limits.second_ticker)).upper()
-    if second not in {"AVA", "SUI"}:
-        second = second_pocket_choice()
     only = {part.strip().lower() for part in str(args.only or "").split(",") if part.strip()}
     if only:
-        do_pocket = "pocket" in only or "second" in only
-        do_second = "second" in only or ("pocket" in only and bool(str(args.second or "").strip()))
+        do_pocket = "pocket" in only
+        do_second = "second" in only
         do_sleeve = "sleeve" in only
         do_probe = "probe" in only
+        if do_second and not do_probe:
+            do_probe = True  # карман2 наполняется только с щупа
     else:
         do_pocket = True
         do_second = bool(limits.second_on)
@@ -422,7 +419,7 @@ def main() -> int:
     if do_pocket:
         modes.append(f"SOL {limits.pocket_pct:.0f}%")
     if do_second:
-        modes.append(f"{second} ${sui_dip_quote():.0f}")
+        modes.append(f"карман2 ≤{pocket_from_probe_max()} с щупа")
     if do_sleeve:
         modes.append(f"рукав {limits.sleeve_max_pct:.0f}%/{limits.sleeve_max_names}")
     if do_probe:
@@ -443,8 +440,6 @@ def main() -> int:
     end_ms = int(end_ts * 1000)
 
     need_bars = {BTC_DIP_TICKER, "BTC"}
-    if do_second:
-        need_bars.add(second)
     if do_sleeve:
         need_bars |= set(DESK_ALT_SLEEVE)
     if do_probe:
@@ -525,8 +520,26 @@ def main() -> int:
                 algo=leg.algo,
                 qty=leg.qty,
             )
-            if reason:
-                sell(book, leg, ts=ts, price=price, reason=reason)
+            if not reason:
+                continue
+            if (
+                do_second
+                and probe_should_handoff(reason)
+                and len(book.open_kinds("second")) < pocket_from_probe_max()
+            ):
+                leg.kind = "second"
+                book.log(
+                    ts,
+                    "handoff",
+                    leg.ticker,
+                    kind="second",
+                    px=price,
+                    quote=leg.qty * price,
+                    reason=reason,
+                    algo=leg.algo,
+                )
+                continue
+            sell(book, leg, ts=ts, price=price, reason=reason)
 
         # --- выходы карманов ---
         for kind, arm_attr in (("pocket", "pocket_arm"), ("second", "second_arm")):
@@ -607,40 +620,7 @@ def main() -> int:
                         book.legs[-1].swing_low = float(book.pocket_arm["low"])
                         book.pocket_arm = None
 
-        # --- второй карман ---
-        if do_second and second in series:
-            px = prices.get(second) or 0
-            bars15 = window_upto(series[second]["15"], ts, 40)
-            if px > 0 and bars15:
-                swing = pocket_swing(as_ohlc(bars15), pullback_pct=P.POCKET_SWING_PCT)
-                keep = False
-                if book.second_arm and float(book.second_arm.get("low") or 0) > 0:
-                    keep = pocket_dip_pending(as_ohlc(bars15), float(book.second_arm["low"]))
-                book.second_arm = update_pocket_swing_arm(
-                    book.second_arm,
-                    price=px,
-                    swing_low=swing,
-                    now=ts,
-                    keep=keep,
-                )
-                if (
-                    not book.open_kinds("second")
-                    and book.second_arm
-                    and pocket_bounce_ready(book.second_arm, price=px, now=ts)
-                    and pocket_dip_held(as_ohlc(bars15), float(book.second_arm["low"]))
-                ):
-                    quote = min(sui_dip_quote(), book.cash * 0.998)
-                    if buy(
-                        book,
-                        ts=ts,
-                        kind="second",
-                        ticker=second,
-                        price=px,
-                        quote=quote,
-                        low=float(book.second_arm["low"]),
-                    ):
-                        book.legs[-1].swing_low = float(book.second_arm["low"])
-                        book.second_arm = None
+        # Второй карман не покупает сам — только handoff с щупа выше.
 
         # --- рукав: взвод и вход ---
         sleeve_held = {leg.ticker for leg in book.open_kinds("sleeve")}
@@ -650,8 +630,9 @@ def main() -> int:
             for ticker in DESK_ALT_SLEEVE:
                 if ticker in sleeve_held or ticker in blacklist or ticker in excluded:
                     continue
-                if ticker in {BTC_DIP_TICKER, second}:
-                    # карманные тикеры рукав не набирает, пока карман может их занять
+                if ticker == BTC_DIP_TICKER:
+                    continue
+                if any(leg.ticker == ticker for leg in book.open_kinds("second")):
                     continue
                 if ticker not in series:
                     continue
@@ -862,7 +843,7 @@ def main() -> int:
         by_kind.setdefault(ev["kind"], []).append(ev)
 
     for kind in ("pocket", "second", "sleeve", "probe"):
-        buys = [e for e in by_kind.get(kind, []) if e["side"] == "buy"]
+        buys = [e for e in by_kind.get(kind, []) if e["side"] in {"buy", "handoff"}]
         sells = [e for e in by_kind.get(kind, []) if e["side"] == "sell"]
         pnl_closed = sum(float(e["pnl"]) for e in sells)
         open_legs = book.open_kinds(kind if kind != "second" else "second")
@@ -876,7 +857,7 @@ def main() -> int:
         open_pnl += mtm
         label = {
             "pocket": "Карман SOL",
-            "second": f"Карман {second}",
+            "second": "Карман2 (с щупа)",
             "sleeve": "Рукав",
             "probe": "Щуп",
         }[kind]

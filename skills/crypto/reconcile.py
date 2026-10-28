@@ -64,6 +64,45 @@ def reconcile_pocket_qty(
     return min(local, held)
 
 
+def reconcile_second_pocket_legs(
+    legs: list[dict[str, Any]],
+    *,
+    wallet_qtys: dict[str, float],
+    prices: dict[str, float],
+    dust_usd: float = POCKET_DUST_USD,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Обрезать/сбросить ноги второго кармана по балансу биржи."""
+    notes: list[str] = []
+    out: list[dict[str, Any]] = []
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            continue
+        ticker = str(leg.get("ticker") or "").upper()
+        try:
+            local = float(leg.get("qty") or 0)
+            entry = float(leg.get("entry") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not ticker or local <= 0 or entry <= 0:
+            continue
+        fixed = reconcile_pocket_qty(
+            local_qty=local,
+            wallet_qty=float(wallet_qtys.get(ticker) or 0),
+            price=float(prices.get(ticker) or 0),
+            dust_usd=dust_usd,
+        )
+        if fixed <= 0:
+            notes.append(f"карман2 {ticker} сброшен")
+            continue
+        row = dict(leg)
+        row["ticker"] = ticker
+        if abs(fixed - local) > 1e-12:
+            row["qty"] = fixed
+            notes.append(f"карман2 {ticker} qty {local:.6g}→{fixed:.6g}")
+        out.append(row)
+    return out, notes
+
+
 def reconcile_sleeve_alloc(
     alloc: dict[str, float],
     *,

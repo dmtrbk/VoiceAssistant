@@ -54,6 +54,7 @@ _TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trail.json")
 _EARN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_earn.json")
 _BTC_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_btc_dip.json")
 _SUI_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_ava_dip.json")
+_SECOND_POCKET_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_second_pocket.json")
 _PROBE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe.json")
 _ENTRY_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_entry_arm.json")
 _ANCHOR_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_anchor.json")
@@ -652,8 +653,261 @@ def _parse_low_arm(raw: Any) -> dict[str, float] | None:
     return {"low": low, "ts": ts}
 
 
+def _legacy_sui_dip_row(path: str | None = None) -> dict[str, Any]:
+    """Старый одиночный AVA/SUI файл — только для миграции."""
+    row = read_btc_dip(path or _SUI_DIP_PATH)
+    if float(row.get("qty") or 0) <= 0:
+        return {}
+    ticker = str(row.get("ticker") or "AVA").upper() or "AVA"
+    return {
+        "ticker": ticker,
+        "qty": float(row["qty"]),
+        "entry": float(row["entry"]),
+        "exit_high": float(row.get("exit_high") or 0),
+        "exit_ts": float(row.get("exit_ts") or 0),
+        "low": float(row.get("low") or 0),
+    }
+
+
+def _parse_second_pocket_leg(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    ticker = _normalize_ticker(str(raw.get("ticker") or ""))
+    try:
+        qty = float(raw.get("qty") or 0)
+        entry = float(raw.get("entry") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not ticker or qty <= 0 or entry <= 0:
+        return None
+    try:
+        exit_high = float(raw.get("exit_high") or 0)
+        exit_ts = float(raw.get("exit_ts") or 0)
+        low = float(raw.get("low") or 0)
+    except (TypeError, ValueError):
+        exit_high = 0.0
+        exit_ts = 0.0
+        low = 0.0
+    return {
+        "ticker": ticker,
+        "qty": qty,
+        "entry": entry,
+        "exit_high": max(exit_high, 0.0),
+        "exit_ts": exit_ts,
+        "low": max(low, 0.0),
+    }
+
+
+def read_second_pocket_legs(path: str | None = None) -> list[dict[str, Any]]:
+    """Ноги второго кармана (переданы с щупа). Любой тикер."""
+    path = path or _SECOND_POCKET_PATH
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except Exception:
+            raw = None
+        if isinstance(raw, dict):
+            rows = raw.get("legs")
+            if isinstance(rows, list):
+                out = []
+                for item in rows:
+                    leg = _parse_second_pocket_leg(item)
+                    if leg:
+                        out.append(leg)
+                if out:
+                    return out
+            # Одиночный формат в новом файле.
+            one = _parse_second_pocket_leg(raw)
+            if one:
+                return [one]
+    legacy = _legacy_sui_dip_row()
+    if legacy:
+        write_second_pocket_legs([legacy], path=path)
+        try:
+            if os.path.isfile(_SUI_DIP_PATH):
+                os.remove(_SUI_DIP_PATH)
+        except Exception:
+            pass
+        return [legacy]
+    return []
+
+
+def write_second_pocket_legs(
+    legs: list[dict[str, Any]],
+    path: str | None = None,
+) -> None:
+    path = path or _SECOND_POCKET_PATH
+    clean: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in legs or []:
+        leg = _parse_second_pocket_leg(raw)
+        if not leg:
+            continue
+        ticker = str(leg["ticker"])
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        row: dict[str, Any] = {
+            "ticker": ticker,
+            "qty": float(leg["qty"]),
+            "entry": float(leg["entry"]),
+        }
+        if float(leg.get("exit_high") or 0) > 0:
+            row["exit_high"] = float(leg["exit_high"])
+            row["exit_ts"] = float(leg.get("exit_ts") or 0)
+        if float(leg.get("low") or 0) > 0:
+            row["low"] = float(leg["low"])
+        clean.append(row)
+    if not clean:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("[Крипта] не стёр второй карман: %s", exc)
+        return
+    payload = {"legs": clean, "ts": time.time()}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал второй карман: %s", exc)
+
+
+def second_pocket_tickers(path: str | None = None) -> set[str]:
+    return {str(leg["ticker"]) for leg in read_second_pocket_legs(path)}
+
+
+def second_pocket_qty(ticker: str, path: str | None = None) -> float:
+    coin = _normalize_ticker(str(ticker or ""))
+    if not coin:
+        return 0.0
+    for leg in read_second_pocket_legs(path):
+        if str(leg["ticker"]) == coin:
+            return float(leg["qty"])
+    return 0.0
+
+
+def upsert_second_pocket_leg(
+    *,
+    ticker: str,
+    qty: float,
+    entry: float,
+    low: float = 0.0,
+    exit_high: float = 0.0,
+    exit_ts: float = 0.0,
+    max_legs: int | None = None,
+    path: str | None = None,
+) -> bool:
+    """Добавить/обновить ногу. False — карман полон и тикера ещё нет."""
+    coin = _normalize_ticker(str(ticker or ""))
+    if not coin or float(qty or 0) <= 0 or float(entry or 0) <= 0:
+        return False
+    from skills.crypto.desk_policy import pocket_from_probe_max
+
+    limit = int(pocket_from_probe_max() if max_legs is None else max_legs)
+    legs = read_second_pocket_legs(path)
+    found = None
+    for idx, leg in enumerate(legs):
+        if str(leg["ticker"]) == coin:
+            found = idx
+            break
+    if found is None and len(legs) >= max(1, limit):
+        return False
+    row = {
+        "ticker": coin,
+        "qty": float(qty),
+        "entry": float(entry),
+        "low": max(0.0, float(low or 0)),
+        "exit_high": max(0.0, float(exit_high or 0)),
+        "exit_ts": float(exit_ts or 0),
+    }
+    if found is None:
+        legs.append(row)
+    else:
+        prev = legs[found]
+        # Добор той же монеты — средняя цена.
+        prev_qty = float(prev["qty"])
+        prev_entry = float(prev["entry"])
+        total = prev_qty + float(qty)
+        mid = (prev_qty * prev_entry + float(qty) * float(entry)) / total if total > 0 else float(entry)
+        row["qty"] = total
+        row["entry"] = mid
+        row["low"] = float(low or 0) or float(prev.get("low") or 0)
+        row["exit_high"] = max(float(exit_high or 0), float(prev.get("exit_high") or 0))
+        row["exit_ts"] = float(exit_ts or prev.get("exit_ts") or 0)
+        legs[found] = row
+    write_second_pocket_legs(legs, path=path)
+    return True
+
+
+def update_second_pocket_leg(
+    ticker: str,
+    *,
+    qty: float | None = None,
+    entry: float | None = None,
+    low: float | None = None,
+    exit_high: float | None = None,
+    exit_ts: float | None = None,
+    path: str | None = None,
+) -> None:
+    coin = _normalize_ticker(str(ticker or ""))
+    if not coin:
+        return
+    legs = read_second_pocket_legs(path)
+    out: list[dict[str, Any]] = []
+    for leg in legs:
+        if str(leg["ticker"]) != coin:
+            out.append(leg)
+            continue
+        if qty is not None and float(qty) <= 0:
+            continue
+        row = dict(leg)
+        if qty is not None:
+            row["qty"] = float(qty)
+        if entry is not None and float(entry) > 0:
+            row["entry"] = float(entry)
+        if low is not None:
+            row["low"] = max(0.0, float(low))
+        if exit_high is not None:
+            row["exit_high"] = max(0.0, float(exit_high))
+        if exit_ts is not None:
+            row["exit_ts"] = float(exit_ts)
+        out.append(row)
+    write_second_pocket_legs(out, path=path)
+
+
+def drop_second_pocket_leg(ticker: str, path: str | None = None) -> None:
+    coin = _normalize_ticker(str(ticker or ""))
+    if not coin:
+        return
+    legs = [leg for leg in read_second_pocket_legs(path) if str(leg["ticker"]) != coin]
+    write_second_pocket_legs(legs, path=path)
+
+
 def read_sui_dip(path: str | None = None) -> dict[str, float]:
-    return read_btc_dip(path or _SUI_DIP_PATH)
+    """Совместимость: первая нога второго кармана (или пусто)."""
+    del path
+    legs = read_second_pocket_legs()
+    if not legs:
+        return {"qty": 0.0, "entry": 0.0}
+    # AVA/SUI раньше были единственными — предпочитаем их, иначе первую.
+    preferred = None
+    for leg in legs:
+        if str(leg["ticker"]) in {"SUI", "AVA"}:
+            preferred = leg
+            break
+    leg = preferred or legs[0]
+    return {
+        "qty": float(leg["qty"]),
+        "entry": float(leg["entry"]),
+        "exit_high": float(leg.get("exit_high") or 0),
+        "exit_ts": float(leg.get("exit_ts") or 0),
+        "low": float(leg.get("low") or 0),
+        "ticker": str(leg["ticker"]),
+    }
 
 
 def _empty_probe() -> dict[str, Any]:
@@ -964,15 +1218,30 @@ def write_sui_dip(
     low: float = 0.0,
     ticker: str = "",
 ) -> None:
-    write_btc_dip(
-        qty,
-        entry,
-        path or _SUI_DIP_PATH,
-        exit_high=exit_high,
-        exit_ts=exit_ts,
-        low=low,
-        ticker=ticker,
+    """Совместимость: пишет одну ногу во второй карман (по умолчанию AVA)."""
+    del path
+    coin = str(ticker or "AVA").upper() or "AVA"
+    if float(qty or 0) <= 0 or float(entry or 0) <= 0:
+        drop_second_pocket_leg(coin)
+        # Старый одиночный файл больше не используем.
+        try:
+            if os.path.isfile(_SUI_DIP_PATH):
+                os.remove(_SUI_DIP_PATH)
+        except Exception:
+            pass
+        return
+    legs = [leg for leg in read_second_pocket_legs() if str(leg["ticker"]) != coin]
+    legs.append(
+        {
+            "ticker": coin,
+            "qty": float(qty),
+            "entry": float(entry),
+            "exit_high": float(exit_high or 0),
+            "exit_ts": float(exit_ts or 0),
+            "low": float(low or 0),
+        }
     )
+    write_second_pocket_legs(legs)
 
 
 def read_entry_arms(path: str | None = None) -> dict[str, Any]:

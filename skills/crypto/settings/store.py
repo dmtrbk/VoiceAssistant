@@ -59,18 +59,26 @@ def reset() -> DeskSettings:
 
 
 def status_line() -> str:
-    from skills.crypto.common import probe_arms, probe_legs, read_alloc_state, read_btc_dip, read_probe, read_sui_dip
+    from skills.crypto.common import (
+        probe_arms,
+        probe_legs,
+        read_alloc_state,
+        read_btc_dip,
+        read_probe,
+        read_second_pocket_legs,
+    )
 
     data = current()
     pocket = read_btc_dip()
-    sui = read_sui_dip()
+    second_legs = read_second_pocket_legs()
     probe = read_probe()
     state = read_alloc_state() or {}
     alloc = state.get("alloc") if isinstance(state.get("alloc"), dict) else {}
     sleeve = len(alloc)
     parts = ["Карман открыт" if float(pocket.get("qty") or 0) > 0 else "Карман закрыт"]
-    if float(sui.get("qty") or 0) > 0:
-        parts.append(f"{str(sui.get('ticker') or 'AVA')} открыт")
+    if second_legs:
+        names = ", ".join(str(leg["ticker"]) for leg in second_legs)
+        parts.append(f"Карман2 {names}")
     elif not data.second_on:
         parts.append("Второй выключен")
     if not data.sleeve_on:

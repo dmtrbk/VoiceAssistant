@@ -16,6 +16,11 @@ DESK_ALT_SLEEVE = frozenset({
 ALT_SLEEVE_MAX_PCT = 50.0
 ALT_MAX_NAMES = 2
 PROBE_MAX_LEGS = 3
+# Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
+POCKET_FROM_PROBE_MAX = 3
+# Мягкий выход щупа → передача во второй карман; жёсткий — продажа.
+PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд", "дно"})
+PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина"})
 DESK_CASH_FLOOR_PCT = 25.0
 DESK_CASH_FLOOR_BULL_PCT = 8.0
 REBALANCE_BAND_PCT = 6.0
@@ -304,14 +309,24 @@ def btc_dip_quote(equity: float) -> float:
 
 
 def sui_dip_quote() -> float:
-    """Второй карман: фиксированная сумма, не доля счёта."""
+    """Устарело: второй карман больше не покупает на фиксированную сумму."""
     return float(cfg().sui_usd)
 
 
 def second_pocket_choice() -> str:
-    """SUI или AVA. Чужое значение остаётся AVA."""
+    """Устарело: тикер второго кармана приходит с щупа, не из whitelist."""
     raw = str(cfg().second_ticker or "AVA").upper()
     return raw if raw in {"SUI", "AVA"} else "AVA"
+
+
+def pocket_from_probe_max() -> int:
+    """Сколько ног, переданных с щупа, держит второй карман."""
+    return max(1, int(cfg().pocket_from_probe_max))
+
+
+def probe_should_handoff(reason: str | None) -> bool:
+    """Мягкий выход щупа — отдать ногу во второй карман, не продавать."""
+    return str(reason or "") in PROBE_HANDOFF_REASONS
 
 
 def probe_scan_rank(row: dict[str, Any]) -> float:

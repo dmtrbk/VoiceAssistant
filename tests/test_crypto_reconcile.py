@@ -64,6 +64,20 @@ class TestCryptoReconcile(unittest.TestCase):
         self.assertNotIn("CAP", arms)
         self.assertNotIn("CAP", lows)
 
+    def test_second_pocket_legs_clamp_and_drop(self):
+        cleaned, notes = R.reconcile_second_pocket_legs(
+            [
+                {"ticker": "PONS", "qty": 100.0, "entry": 0.29},
+                {"ticker": "CAP", "qty": 10.0, "entry": 1.0},
+            ],
+            wallet_qtys={"PONS": 40.0},
+            prices={"PONS": 0.28, "CAP": 1.0},
+        )
+        self.assertEqual(len(cleaned), 1)
+        self.assertEqual(cleaned[0]["ticker"], "PONS")
+        self.assertAlmostEqual(cleaned[0]["qty"], 40.0)
+        self.assertTrue(any("CAP" in n for n in notes))
+
     def test_orphan_orders_skip_probe_and_fresh(self):
         now = 1_700_000_000.0  # реалистичный epoch, Bybit createdTime в ms
         rows = [

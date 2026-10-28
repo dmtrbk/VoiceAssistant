@@ -32,6 +32,7 @@ class TestDeskSettings(unittest.TestCase):
         self.assertTrue(data.sleeve_on)
         self.assertFalse(data.second_on)
         self.assertEqual(data.second_ticker, "AVA")
+        self.assertEqual(data.pocket_from_probe_max, 3)
         self.assertEqual(policy.btc_dip_quote(1000.0), 250.0)
         self.assertEqual(policy.probe_quote(), 30.0)
 

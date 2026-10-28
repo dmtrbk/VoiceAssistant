@@ -822,6 +822,13 @@ class TestDeskPolicy(unittest.TestCase):
             "полка",
         )
         self.assertEqual(policy.probe_quote(), 30.0)
+        self.assertTrue(policy.probe_should_handoff("ожидание"))
+        self.assertTrue(policy.probe_should_handoff("тренд"))
+        self.assertTrue(policy.probe_should_handoff("дно"))
+        self.assertFalse(policy.probe_should_handoff("полка"))
+        self.assertFalse(policy.probe_should_handoff("стоп"))
+        self.assertFalse(policy.probe_should_handoff("вершина"))
+        self.assertEqual(policy.pocket_from_probe_max(), 3)
 
     def test_btc_dip_rules(self):
         self.assertTrue(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))
@@ -1178,6 +1185,7 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ("trail.json", "_TRAIL_PATH"),
             ("btc_dip.json", "_BTC_DIP_PATH"),
             ("sui_dip.json", "_SUI_DIP_PATH"),
+            ("second_pocket.json", "_SECOND_POCKET_PATH"),
             ("probe.json", "_PROBE_PATH"),
             ("entry_arm.json", "_ENTRY_ARM_PATH"),
             ("excluded.json", "_EXCLUDED_PATH"),
@@ -1188,6 +1196,13 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             patcher = patch(f"skills.crypto.common.{attr}", path)
             patcher.start()
             self.addCleanup(patcher.stop)
+        settings_path = os.path.join(self.tmp.name, "settings.json")
+        from skills.crypto.settings import store as settings_store
+
+        self._settings_old = settings_store._PATH
+        settings_store._PATH = settings_path
+        settings_store.reset_cache()
+        self.addCleanup(self._restore_settings)
         self.skill = CryptoSkill()
         self.bands: dict[str, dict] = {}
         bands_patch = patch.object(self.skill, "_alt_bands", side_effect=lambda t: self.bands.get(t))
@@ -1199,6 +1214,12 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         cool_patch = patch("skills.crypto.journal.cooldown_tickers", return_value=set())
         cool_patch.start()
         self.addCleanup(cool_patch.stop)
+
+    def _restore_settings(self):
+        from skills.crypto.settings import store as settings_store
+
+        settings_store._PATH = self._settings_old
+        settings_store.reset_cache()
 
     def test_trade_auto_uses_score_not_groq(self):
         with (
@@ -1615,52 +1636,139 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertAlmostEqual(read_btc_dip()["qty"], 1.0)
         self.assertAlmostEqual(read_btc_dip()["low"], 90.0)
 
-    def test_sui_pocket_buys_fifty_and_keeps_sol(self):
-        from skills.crypto.common import read_btc_dip, read_entry_arms, read_sui_dip, write_btc_dip, write_entry_arms
+    def test_second_pocket_no_longer_buys_ava(self):
+        from skills.crypto.common import read_btc_dip, write_btc_dip
 
         write_btc_dip(0.2, 100.0)
-        now = time.time()
-        write_entry_arms(
-            {},
-            {"low": 100.0, "ts": now},
-            sui={"low": 1.0, "ts": now - policy.POCKET_ENTRY_HOLD_SEC - 5},
+        phrase = self.skill._trade_btc_dip(
+            day_chg=-4.0,
+            positions={},
+            price=1.01,
+            blocked=False,
+            equity=400.0,
+            ticker="AVA",
+        )
+        self.assertIsNone(phrase)
+        self.assertAlmostEqual(read_btc_dip()["qty"], 0.2)
+
+    def test_probe_soft_exit_handoff_to_second_pocket(self):
+        from skills.crypto.common import (
+            probe_legs,
+            read_second_pocket_legs,
+            write_probe,
+        )
+        from skills.crypto.settings import store as settings_store
+
+        settings_store.update(second_on=True, pocket_from_probe_max=3)
+        write_probe(
+            ticker="PONS",
+            qty=100.0,
+            entry=0.29,
+            shelf=0.28,
+            arm_px=0.29,
+            peak=0.291,
+            low=0.285,
+            algo=policy.PROBE_ALGO_GRIND,
         )
         placed: list[tuple] = []
 
         def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
-            placed.append((ticker, side, quote_usdt))
+            placed.append((ticker, side))
             return f"ok {ticker}"
 
-        held_bars = [
-            {"high": 1.2, "low": 1.05, "close": 1.1, "volume": 1.0},
-            {"high": 1.1, "low": 1.0, "close": 1.02, "volume": 1.0},
-            {"high": 1.08, "low": 1.01, "close": 1.04, "volume": 1.0},
-            {"high": 1.05, "low": 1.012, "close": 1.01, "volume": 1.0},
-        ]
+        bars = [{"high": 0.3, "low": 0.28, "close": 0.288, "volume": 1.0} for _ in range(80)]
         with (
+            patch.object(self.skill, "_ticker", return_value={"price": 0.288, "chg": 1.0}),
+            patch.object(self.skill, "_probe_bars", return_value=bars),
             patch.object(self.skill, "_place_order", side_effect=place),
-            patch.object(self.skill, "_probe_bars", return_value=held_bars),
+            # Без run у grind «ожидание» не бьёт; тренд bear + gain<=0 → тренд.
+            patch("skills.crypto.desk.ma_trend", return_value="bear"),
+        ):
+            self.skill._probe_exit(probe_legs()[0])
+        self.assertEqual(placed, [])
+        self.assertEqual(probe_legs(), [])
+        legs = read_second_pocket_legs()
+        self.assertEqual(len(legs), 1)
+        self.assertEqual(legs[0]["ticker"], "PONS")
+        self.assertAlmostEqual(legs[0]["qty"], 100.0)
+
+    def test_probe_hard_exit_still_sells(self):
+        from skills.crypto.common import probe_legs, read_second_pocket_legs, write_probe
+        from skills.crypto.settings import store as settings_store
+
+        settings_store.update(second_on=True)
+        write_probe(
+            ticker="PONS",
+            qty=100.0,
+            entry=0.29,
+            shelf=0.28,
+            arm_px=0.29,
+            peak=0.291,
+            low=0.285,
+        )
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, base_qty))
+            return f"ok {ticker}"
+
+        bars = [{"high": 0.3, "low": 0.27, "close": 0.27, "volume": 1.0} for _ in range(80)]
+        with (
+            patch.object(self.skill, "_ticker", return_value={"price": 0.27, "chg": -5.0}),
+            patch.object(self.skill, "_probe_bars", return_value=bars),
             patch.object(
                 self.skill,
                 "_cash_and_held",
-                return_value=(80.0, {"AVA": {"qty": 40.0, "value": 50.0, "price": 1.01}}),
+                return_value=(10.0, {"PONS": {"qty": 100.0}}),
             ),
+            patch.object(self.skill, "_place_order", side_effect=place),
         ):
-            phrase = self.skill._trade_btc_dip(
-                day_chg=-4.0,
-                positions={},
-                price=1.01,
-                blocked=False,
-                equity=400.0,
-                ticker=policy.SUI_DIP_TICKER,
-            )
-        self.assertIn("ok", phrase or "")
-        self.assertEqual(placed, [("AVA", "Buy", 50.0)])
-        self.assertAlmostEqual(read_sui_dip()["qty"], 40.0)
-        self.assertAlmostEqual(read_btc_dip()["qty"], 0.2)
-        arms = read_entry_arms()
-        self.assertIsNone(arms.get("ava"))
-        self.assertIsNotNone(arms.get("pocket"))
+            self.skill._probe_exit(probe_legs()[0])
+        self.assertEqual(placed, [("PONS", "Sell", 100.0)])
+        self.assertEqual(probe_legs(), [])
+        self.assertEqual(read_second_pocket_legs(), [])
+
+    def test_probe_handoff_sells_when_pocket_full(self):
+        from skills.crypto.common import (
+            probe_legs,
+            read_second_pocket_legs,
+            upsert_second_pocket_leg,
+            write_probe,
+        )
+        from skills.crypto.settings import store as settings_store
+
+        settings_store.update(second_on=True, pocket_from_probe_max=1)
+        upsert_second_pocket_leg(ticker="CAP", qty=10.0, entry=1.0, max_legs=1)
+        write_probe(
+            ticker="PONS",
+            qty=50.0,
+            entry=0.29,
+            shelf=0.28,
+            arm_px=0.29,
+            peak=0.291,
+            low=0.285,
+        )
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, base_qty))
+            return f"ok {ticker}"
+
+        bars = [{"high": 0.3, "low": 0.28, "close": 0.288, "volume": 1.0} for _ in range(80)]
+        with (
+            patch.object(self.skill, "_ticker", return_value={"price": 0.288, "chg": 1.0}),
+            patch.object(self.skill, "_probe_bars", return_value=bars),
+            patch.object(
+                self.skill,
+                "_cash_and_held",
+                return_value=(10.0, {"PONS": {"qty": 50.0}}),
+            ),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.desk.ma_trend", return_value="bear"),
+        ):
+            self.skill._probe_exit(probe_legs()[0])
+        self.assertEqual(placed, [("PONS", "Sell", 50.0)])
+        self.assertEqual([leg["ticker"] for leg in read_second_pocket_legs()], ["CAP"])
 
     def test_rebalance_sells_sui_sleeve_keeps_pocket(self):
         from skills.crypto.common import read_sui_dip, write_sui_dip

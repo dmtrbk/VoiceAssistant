@@ -8,7 +8,6 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
@@ -261,11 +260,9 @@ QSpinBox, QDoubleSpinBox {{
             self._set_spin("pocket_day_pct", data.pocket_day_pct)
             self._set_spin("pocket_bounce_pct", data.pocket_bounce_pct)
             self._set_spin("pocket_stop_pct", data.pocket_stop_pct)
-            self._set_spin("sui_usd", data.sui_usd)
+            self._set_spin("pocket_from_probe_max", data.pocket_from_probe_max)
             if self._second_box is not None:
                 self._second_box.setChecked(data.second_on)
-            if self._second_combo is not None:
-                self._second_combo.setCurrentText(data.second_ticker)
             if self._sleeve_box is not None:
                 self._sleeve_box.setChecked(data.sleeve_on)
             self._set_spin("sleeve_max_pct", data.sleeve_max_pct)
@@ -350,19 +347,18 @@ QSpinBox, QDoubleSpinBox {{
         switch.addWidget(name, 1)
         switch.addWidget(box, 0)
         col.addLayout(switch)
-        pick = QHBoxLayout()
-        pick.setContentsMargins(0, 6, 0, 0)
-        coin = QLabel("Монета")
-        coin.setObjectName("rowTitle")
-        combo = QComboBox()
-        combo.addItems(["SUI", "AVA"])
-        combo.setCurrentText("AVA")
-        combo.currentTextChanged.connect(self._on_second_ticker)
-        self._second_combo = combo
-        pick.addWidget(coin, 1)
-        pick.addWidget(combo, 0)
-        col.addLayout(pick)
-        self._add_spin(col, "sui_usd", "Сумма", "$", 10, 200, 5, 0, "Фиксированная сумма второго кармана. Выключенный карман деньги не резервирует.")
+        self._second_combo = None
+        self._add_spin(
+            col,
+            "pocket_from_probe_max",
+            "Ног с щупа",
+            "",
+            1,
+            6,
+            1,
+            0,
+            "Сколько переданных с щупа ног держим. Тикер любой — без AVA/SUI. Полон — щуп продаёт.",
+        )
         col.addStretch(1)
         return card
 
@@ -413,7 +409,17 @@ QSpinBox, QDoubleSpinBox {{
         fields = QVBoxLayout(self._probe_fields)
         fields.setContentsMargins(0, 0, 0, 0)
         fields.setSpacing(0)
-        self._add_spin(fields, "probe_usd", "Размер", "$", 10, 100, 5, 0, "Фиксированные доллары. Не слот рукава и не карман.")
+        self._add_spin(
+            fields,
+            "probe_usd",
+            "Размер свечи",
+            "$",
+            10,
+            100,
+            5,
+            0,
+            "Одна покупка щупа. Неудачная свеча может уйти во второй карман.",
+        )
         self._add_spin(fields, "probe_max_loss_pct", "Макс. убыток", "%", 3, 20, 0.5, 1, "Запасной стоп на дыре. До хода +6% щуп также выходит под минимум свечи входа.")
         self._add_spin(fields, "probe_shelf_range_pct", "Полка, ширина", "%", 4, 25, 1, 0, "Диапазон полки не шире этого, иначе сетап не считается.")
         self._add_spin(fields, "probe_break_min_pct", "Пробой от", "%", 1, 10, 0.5, 1, "Цена должна выйти из полки хотя бы на этот процент.")
@@ -546,20 +552,15 @@ QSpinBox, QDoubleSpinBox {{
             self._clear_second_arm_if_flat()
         self._status.setText(status_line())
         self._hint.setText(
-            "Второй карман ищет откат." if checked else "Второй карман выключен."
+            "Второй карман принимает ноги щупа, если свеча не задалась."
+            if checked
+            else "Второй карман выключен — щуп продаёт сам."
         )
 
-    def _on_second_ticker(self, text: str) -> None:
-        if self._syncing or not text:
-            return
-        update(second_ticker=text)
-        self._clear_second_arm_if_flat()
-        self._hint.setText(f"Второй карман: {text}.")
-
     def _clear_second_arm_if_flat(self) -> None:
-        from skills.crypto.common import read_entry_arms, read_sui_dip, write_entry_arms
+        from skills.crypto.common import read_entry_arms, read_second_pocket_legs, write_entry_arms
 
-        if float(read_sui_dip().get("qty") or 0) > 0:
+        if read_second_pocket_legs():
             return
         arms = read_entry_arms()
         write_entry_arms(arms["alts"], arms.get("pocket"), sui=False)

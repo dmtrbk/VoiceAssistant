@@ -15,9 +15,10 @@ class DeskSettings:
     pocket_hold_sec: float = 10 * 60
     pocket_exit_pullback_pct: float = 0.5
     pocket_exit_hold_sec: float = 5 * 60
-    sui_usd: float = 50.0
+    sui_usd: float = 50.0  # устарело: второй карман не покупает сам
     second_on: bool = False
-    second_ticker: str = "AVA"
+    second_ticker: str = "AVA"  # устарело: тикер приходит с щупа
+    pocket_from_probe_max: int = 3
     sleeve_on: bool = True
     sleeve_max_pct: float = 50.0
     sleeve_max_names: int = 2
@@ -52,6 +53,7 @@ _LIMITS: dict[str, tuple[float, float]] = {
     "pocket_exit_pullback_pct": (0.2, 3.0),
     "pocket_exit_hold_sec": (60, 30 * 60),
     "sui_usd": (10.0, 200.0),
+    "pocket_from_probe_max": (1, 6),
     "sleeve_max_pct": (20.0, 92.0),
     "sleeve_max_names": (1, 6),
     "sleeve_entry_z": (-4.0, -1.0),
@@ -73,7 +75,7 @@ _LIMITS: dict[str, tuple[float, float]] = {
     "cooldown_hours": (1.0, 48.0),
 }
 
-_INT_FIELDS = frozenset({"sleeve_max_names"})
+_INT_FIELDS = frozenset({"sleeve_max_names", "pocket_from_probe_max"})
 _BOOL_FIELDS = frozenset({"probe_on", "second_on", "sleeve_on"})
 _CHOICES: dict[str, tuple[str, ...]] = {"second_ticker": ("SUI", "AVA")}
 _KEYS = {item.name for item in fields(DeskSettings)}
@@ -136,7 +138,12 @@ def to_payload(data: DeskSettings) -> dict[str, object]:
             "exit_pullback_pct": data.pocket_exit_pullback_pct,
             "exit_hold_sec": data.pocket_exit_hold_sec,
         },
-        "sui": {"usd": data.sui_usd, "on": data.second_on, "ticker": data.second_ticker},
+        "sui": {
+            "usd": data.sui_usd,
+            "on": data.second_on,
+            "ticker": data.second_ticker,
+            "from_probe_max": data.pocket_from_probe_max,
+        },
         "sleeve": {
             "on": data.sleeve_on,
             "max_pct": data.sleeve_max_pct,
@@ -189,6 +196,7 @@ def from_payload(raw: object) -> DeskSettings:
         "sui_usd": sui.get("usd"),
         "second_on": sui.get("on"),
         "second_ticker": sui.get("ticker"),
+        "pocket_from_probe_max": sui.get("from_probe_max"),
         "sleeve_on": sleeve.get("on"),
         "sleeve_max_pct": sleeve.get("max_pct"),
         "sleeve_max_names": sleeve.get("max_names"),
