@@ -531,7 +531,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.probe_trends_ok("bull", "neutral", 8.0))
         self.assertFalse(policy.probe_trends_ok("bull", "bear", 8.0))
         self.assertFalse(policy.probe_trends_ok("neutral", "neutral", 8.0))
-        self.assertFalse(policy.probe_trends_ok("bull", "bull", 30.0))
+        self.assertTrue(policy.probe_trends_ok("bull", "bull", 30.0))
         self.assertFalse(policy.probe_trends_ok("bull", "neutral", 8.0, week_chg=-6.0))
         self.assertTrue(policy.probe_trends_ok("bull", "neutral", 8.0, week_chg=-4.0))
         self.assertGreater(
@@ -552,7 +552,7 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             0,
         )
-        self.assertLess(
+        self.assertGreater(
             policy.probe_scan_rank({
                 "chg": 40.0, "price": 0.026, "low": 0.017, "high": 0.027, "turnover": 2_000_000,
             }),
@@ -613,6 +613,42 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNotNone(picked)
         assert picked is not None
         self.assertEqual(picked["algo"], policy.PROBE_ALGO_IMPULSE)
+
+        stair = []
+        px = 1.0
+        for i in range(16):
+            px = 1.0 + i * 0.004
+            stair.append({
+                "high": px * 1.002,
+                "low": px * 0.998,
+                "close": px,
+                "volume": 10.0,
+            })
+        live_grind = {
+            "high": px * 1.01,
+            "low": px * 0.999,
+            "close": px * 1.008,
+            "volume": 12.0,
+        }
+        grind = policy.probe_grind_setup(stair + [live_grind])
+        self.assertIsNotNone(grind)
+        assert grind is not None
+        self.assertLess(grind["shelf"], grind["price"])
+        ripped = {**live_grind, "close": px * 1.05, "high": px * 1.05}
+        self.assertIsNone(policy.probe_grind_setup(stair + [ripped]))
+        flat = [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(16)]
+        self.assertIsNone(policy.probe_grind_setup(flat + [live_grind]))
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.02,
+                entry=1.05,
+                shelf=1.0,
+                trend15="bull",
+                arm_px=1.07,
+                peak=1.06,
+                algo=policy.PROBE_ALGO_GRIND,
+            )
+        )
         self.assertEqual(
             policy.probe_exit_reason(price=1.02, entry=1.05, shelf=1.0, trend15="bull"),
             "ожидание",

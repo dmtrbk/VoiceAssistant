@@ -84,11 +84,17 @@ PROBE_ARMED_PERIOD_SEC = 15
 PROBE_EMA_FAST = 20
 PROBE_EMA_SLOW = 50
 PROBE_SHELF_BARS = 96
-# Несколько реакций щупа: импульс (подножка) → спринт по полке → классика 4 мин.
+# Несколько реакций щупа: импульс → лестница у хая → спринт по полке → классика 4 мин.
 PROBE_ALGO_IMPULSE = "impulse"
+PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
-PROBE_ALGO_ORDER = (PROBE_ALGO_IMPULSE, PROBE_ALGO_SPRINT, PROBE_ALGO_SHELF)
+PROBE_ALGO_ORDER = (
+    PROBE_ALGO_IMPULSE,
+    PROBE_ALGO_GRIND,
+    PROBE_ALGO_SPRINT,
+    PROBE_ALGO_SHELF,
+)
 PROBE_SPRINT_HOLD_SEC = 45
 PROBE_SPRINT_CHASE_PCT = 5.0
 PROBE_IMPULSE_HOLD_SEC = 20
@@ -97,6 +103,15 @@ PROBE_IMPULSE_LOOKBACK = 12
 PROBE_IMPULSE_VOL_MULT = 2.5
 PROBE_IMPULSE_BREAK_MIN_PCT = 3.0
 PROBE_IMPULSE_BREAK_MAX_PCT = 15.0
+# Лестница: цена у хая окна, ход есть, но свежего пробоя +4% нет — это не полка.
+PROBE_GRIND_BARS = 16
+PROBE_GRIND_NEAR_HIGH = 0.985
+PROBE_GRIND_MIN_RISE_PCT = 4.0
+PROBE_GRIND_MAX_EXT_PCT = 6.0
+PROBE_GRIND_MAX_BAR_PCT = 8.0
+PROBE_GRIND_FLOOR_BARS = 4
+PROBE_GRIND_HOLD_SEC = 30
+PROBE_GRIND_CHASE_PCT = 4.0
 # Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
 TAKE_PROFIT_DAY_PCT = 18.0
 TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем на подъёме
@@ -272,7 +287,8 @@ def probe_scan_rank(row: dict[str, Any]) -> float:
         turn = float(row.get("turnover") or 0)
     except (TypeError, ValueError):
         return -1.0
-    if turn < PROBE_MIN_TURNOVER_USD or price <= 0 or chg >= MAX_DAY_PUMP_PCT:
+    # Сутки +25% щуп пока не отсекает: лестница часто уже там.
+    if turn < PROBE_MIN_TURNOVER_USD or price <= 0:
         return -1.0
     if chg >= PROBE_DAY_MIN_PCT:
         return chg
@@ -466,6 +482,54 @@ def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     return {"shelf": prior_high, "price": price}
 
 
+def probe_grind_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Лестница у хая: подъём без свежего пробоя полки.
+
+    bars — 15м, от старых к новым, последняя может быть открытой.
+    Полка здесь — локальный пол последних свечей, не хай: под ним вход снимаем.
+    Свежий пробой +break_min оставляем sprint/shelf.
+    """
+    if len(bars) < PROBE_GRIND_BARS + 1:
+        return None
+    forming = bars[-1]
+    closed = bars[:-1]
+    if len(closed) < PROBE_GRIND_BARS:
+        return None
+    window = closed[-PROBE_GRIND_BARS:]
+    try:
+        high = max(float(bar["high"]) for bar in window)
+        low = min(float(bar["low"]) for bar in window)
+        price = float(forming.get("close") or 0)
+        spans = []
+        for bar in window:
+            lo = float(bar["low"])
+            hi = float(bar["high"])
+            if lo <= 0:
+                return None
+            spans.append((hi - lo) / lo * 100.0)
+        older = window[:-2] if len(window) > 4 else window
+        prior = max(float(bar["high"]) for bar in older)
+        floor_src = window[-PROBE_GRIND_FLOOR_BARS:]
+        shelf = min(float(bar["low"]) for bar in floor_src)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if high <= 0 or low <= 0 or price <= 0 or prior <= 0 or shelf <= 0:
+        return None
+    if (price / low - 1.0) * 100.0 < PROBE_GRIND_MIN_RISE_PCT:
+        return None
+    if price < high * PROBE_GRIND_NEAR_HIGH:
+        return None
+    if price > high * (1.0 + PROBE_GRIND_MAX_EXT_PCT / 100.0):
+        return None
+    if max(spans) > PROBE_GRIND_MAX_BAR_PCT:
+        return None
+    if price >= prior * (1.0 + cfg().probe_break_min_pct / 100.0):
+        return None
+    if price <= shelf:
+        return None
+    return {"shelf": shelf, "price": price}
+
+
 def probe_algo_params(algo: str) -> dict[str, float]:
     """hold_sec / chase_pct для алгоритма щупа."""
     name = str(algo or PROBE_ALGO_SHELF).strip().lower() or PROBE_ALGO_SHELF
@@ -479,6 +543,11 @@ def probe_algo_params(algo: str) -> dict[str, float]:
             "hold_sec": float(PROBE_SPRINT_HOLD_SEC),
             "chase_pct": float(PROBE_SPRINT_CHASE_PCT),
         }
+    if name == PROBE_ALGO_GRIND:
+        return {
+            "hold_sec": float(PROBE_GRIND_HOLD_SEC),
+            "chase_pct": float(PROBE_GRIND_CHASE_PCT),
+        }
     return {
         "hold_sec": float(PROBE_ENTRY_HOLD_SEC),
         "chase_pct": float(PROBE_CHASE_PCT),
@@ -491,12 +560,14 @@ def probe_pick_setup(
     *,
     order: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Первый сработавший алгоритм: impulse (5м) → sprint (локальная полка) → shelf (сутки)."""
+    """Первый сработавший: impulse → grind → sprint → shelf."""
     seq = tuple(order or PROBE_ALGO_ORDER)
     for algo in seq:
         name = str(algo or "").strip().lower()
         if name == PROBE_ALGO_IMPULSE:
             setup = probe_impulse_setup(bars5 or [])
+        elif name == PROBE_ALGO_GRIND:
+            setup = probe_grind_setup(bars15)
         elif name == PROBE_ALGO_SPRINT:
             setup = probe_shelf_setup_local(bars15)
         elif name == PROBE_ALGO_SHELF:
@@ -516,12 +587,10 @@ def probe_trends_ok(
     day_chg: float | None,
     week_chg: float | None = None,
 ) -> bool:
-    """15м бычий, час не медвежий, сутки ниже +25%, неделя не слабее −5%."""
+    """15м бычий, час не медвежий, неделя не слабее −5%. Суточный потолок +25% у щупа снят."""
     if trend15 != "bull" or trend1h == "bear":
         return False
     if day_chg is None:
-        return False
-    if float(day_chg) >= MAX_DAY_PUMP_PCT:
         return False
     if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
         return False
@@ -544,8 +613,6 @@ def probe_arm_action(
 ) -> str:
     """buy — держится над полкой; drop — пробой погас или цена ушла; wait — ещё рано."""
     if shelf <= 0 or price <= shelf or trend15 != "bull":
-        return "drop"
-    if day_chg is not None and float(day_chg) >= MAX_DAY_PUMP_PCT:
         return "drop"
     if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
         return "drop"
@@ -572,8 +639,8 @@ def probe_exit_reason(
 ) -> str | None:
     """Маленький ход режется возвратом к цене ожидания. Уехавший — медвежьим 15м.
 
-    impulse/sprint — подножка: до пика +PROBE_RUN_PCT не режем «ожидание»/«дно»,
-    иначе импульс срезается на шуме. Стоп и полка остаются.
+    impulse/sprint/grind — подножка: до пика +PROBE_RUN_PCT не режем «ожидание»/«дно»,
+    иначе ход срезается на шуме. Стоп и полка остаются.
     """
     px = float(price or 0)
     ent = float(entry or 0)
@@ -588,7 +655,7 @@ def probe_exit_reason(
     high = max(float(peak or 0), px)
     run = high >= ent * (1.0 + PROBE_RUN_PCT / 100.0)
     name = str(algo or "").strip().lower()
-    footboard = name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPRINT}
+    footboard = name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPRINT, PROBE_ALGO_GRIND}
     if not run and not footboard:
         if float(entry_low or 0) > 0 and px <= float(entry_low):
             return "дно"
