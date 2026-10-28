@@ -29,6 +29,7 @@ class TestDeskSettings(unittest.TestCase):
         self.assertEqual(data.pocket_pct, DEFAULTS.pocket_pct)
         self.assertEqual(data.sleeve_max_pct, DEFAULTS.sleeve_max_pct)
         self.assertTrue(data.probe_on)
+        self.assertTrue(data.sleeve_on)
         self.assertFalse(data.second_on)
         self.assertEqual(data.second_ticker, "AVA")
         self.assertEqual(policy.btc_dip_quote(1000.0), 250.0)
@@ -59,10 +60,20 @@ class TestDeskSettings(unittest.TestCase):
         self.assertFalse(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))
         self.assertFalse(settings_store.current().probe_on)
 
+    def test_sleeve_off_blocks_score(self):
+        settings_store.update(sleeve_on=False)
+        self.assertFalse(settings_store.current().sleeve_on)
+        self.assertEqual(policy.alt_slot_pct(), 0.0)
+        alloc, why = policy.score_alloc(
+            [{"ticker": "ENA", "bb_z": -2.8, "chg": -5.0, "turnover": 1e7}]
+        )
+        self.assertEqual(alloc, {})
+        self.assertIn("выключен", why.lower())
+
     def test_payload_roundtrip(self):
         raw = {
             "pocket": {"pct": 20, "day_pct": -4},
-            "sleeve": {"max_names": 2, "entry_z": -3},
+            "sleeve": {"max_names": 2, "entry_z": -3, "on": False},
             "probe": {"usd": 40, "on": True},
         }
         data = from_payload(raw)
@@ -70,6 +81,7 @@ class TestDeskSettings(unittest.TestCase):
         self.assertEqual(data.sleeve_max_pct, 50.0)
         self.assertEqual(data.sleeve_max_names, 2)
         self.assertEqual(data.sleeve_entry_z, -3.0)
+        self.assertFalse(data.sleeve_on)
         self.assertEqual(data.probe_usd, 40.0)
         self.assertFalse(data.second_on)
         self.assertEqual(from_payload({"sui": {"ticker": "DOGE", "on": True}}).second_ticker, "AVA")

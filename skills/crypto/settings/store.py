@@ -73,7 +73,10 @@ def status_line() -> str:
         parts.append(f"{str(sui.get('ticker') or 'AVA')} открыт")
     elif not data.second_on:
         parts.append("Второй выключен")
-    parts.append(f"Рукав {sleeve} из {int(data.sleeve_max_names)}")
+    if not data.sleeve_on:
+        parts.append("Рукав выключен")
+    else:
+        parts.append(f"Рукав {sleeve} из {int(data.sleeve_max_names)}")
     if not data.probe_on:
         parts.append("Щуп выключен")
     else:

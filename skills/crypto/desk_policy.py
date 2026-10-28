@@ -752,6 +752,8 @@ def pocket_cash_reserve(equity: float, *, pocket_open: bool) -> float:
 
 def alt_slot_pct(sleeve_pct: float | None = None, max_names: int | None = None) -> float:
     limits = cfg()
+    if not limits.sleeve_on and sleeve_pct is None:
+        return 0.0
     sleeve = limits.sleeve_max_pct if sleeve_pct is None else float(sleeve_pct)
     names = limits.sleeve_max_names if max_names is None else int(max_names)
     return round(max(0.0, sleeve) / max(1, names), 1)
@@ -1247,6 +1249,8 @@ def score_alloc(
     limits = cfg()
     if cash_floor_pct is None:
         cash_floor_pct = limits.pocket_pct
+    if not limits.sleeve_on and alt_sleeve_pct is None:
+        return {}, "Рукав выключен."
     if alt_sleeve_pct is None:
         alt_sleeve_pct = limits.sleeve_max_pct
     if alt_max_names is None:

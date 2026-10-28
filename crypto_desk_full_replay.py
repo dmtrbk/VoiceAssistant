@@ -369,6 +369,11 @@ def main() -> int:
     parser.add_argument("--hours", type=float, default=24.0)
     parser.add_argument("--equity", type=float, default=404.0)
     parser.add_argument(
+        "--end",
+        default="",
+        help="Конец окна YEKT: YYYY-MM-DD HH:MM. Пусто — сейчас.",
+    )
+    parser.add_argument(
         "--second",
         default="",
         help="Второй карман: AVA/SUI. Пусто — из настроек, но для суток AVA если в сделках.",
@@ -376,7 +381,10 @@ def main() -> int:
     args = parser.parse_args()
 
     limits = cfg()
-    end = datetime.now(YEKT).replace(second=0, microsecond=0)
+    if str(args.end or "").strip():
+        end = datetime.strptime(str(args.end).strip(), "%Y-%m-%d %H:%M").replace(tzinfo=YEKT)
+    else:
+        end = datetime.now(YEKT).replace(second=0, microsecond=0)
     start = end - timedelta(hours=args.hours)
     start_ts = start.timestamp()
     end_ts = end.timestamp()
@@ -602,7 +610,7 @@ def main() -> int:
         # --- рукав: взвод и вход ---
         sleeve_held = {leg.ticker for leg in book.open_kinds("sleeve")}
         room = max(0, int(limits.sleeve_max_names) - len(sleeve_held))
-        if not risk and room > 0:
+        if limits.sleeve_on and not risk and room > 0:
             candidates: list[tuple[float, str, float]] = []
             for ticker in DESK_ALT_SLEEVE:
                 if ticker in sleeve_held or ticker in blacklist or ticker in excluded:
@@ -759,10 +767,15 @@ def main() -> int:
                 setup = probe_pick_setup(as_ohlc(bars15), as_ohlc(bars5), day_chg=day)
                 if not setup:
                     continue
+                algo = str(setup.get("algo") or "shelf")
                 trend = P.ma_trend([b["close"] for b in bars15])
-                hour = [bars15[n]["close"] for n in range(0, len(bars15), 4)]
-                t1h = P.ma_trend(hour) if len(hour) >= 50 else "neutral"
-                if not probe_trends_ok(trend, t1h, day, week_chg=week):
+                bars60 = window_upto(series[ticker]["60"], ts, 80)
+                t1h = (
+                    P.ma_trend([b["close"] for b in bars60])
+                    if len(bars60) >= 50
+                    else "neutral"
+                )
+                if not probe_trends_ok(trend, t1h, day, week_chg=week, algo=algo):
                     continue
                 book.probe_arms.append(
                     Arm(
@@ -771,7 +784,7 @@ def main() -> int:
                         ts=ts,
                         shelf=float(setup["shelf"]),
                         px=float(setup["price"]),
-                        algo=str(setup["algo"]),
+                        algo=algo,
                         hold_sec=float(setup.get("hold_sec") or 0),
                         chase_pct=float(setup.get("chase_pct") or 0),
                     )

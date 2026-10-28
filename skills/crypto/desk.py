@@ -406,6 +406,8 @@ class CryptoDeskMixin:
                 else "Риск-офф по BTC — новые альты не беру."
             )
             return self._held_alt_alloc(), why
+        if not cfg().sleeve_on:
+            return self._held_alt_alloc(), "Рукав выключен — новые альты не беру."
         if not rows:
             return {}, "Нет кандидатов для автостола."
         floor = cash_floor_pct(btc_chg_7=btc7, btc_chg_day=btc_day)
@@ -784,68 +786,71 @@ class CryptoDeskMixin:
         alts = dict(stored["alts"])
         tape = getattr(self, "_bybit_tape", None)
         taped = tape.entry_lows() if tape is not None else {}
-        interesting = {
-            ticker for ticker, band in bands.items()
-            if band and (
-                float(band.get("z") or 0) <= -1.5
-                or ticker in alts
-            )
-        }
-        missing = [ticker for ticker in interesting if float(prices.get(ticker) or 0) <= 0]
-        if missing:
-            fetched = self._gather_map(
-                lambda ticker: float((self._ticker(ticker) or {}).get("price") or 0),
-                set(missing),
-                label="вход",
-            )
-            for ticker, px in fetched.items():
-                if float(px or 0) > 0:
-                    prices[ticker] = float(px)
-        for ticker in list(alts):
-            if ticker in held or ticker in blocked or ticker in excluded:
-                alts.pop(ticker, None)
-        for ticker in sleeve_names():
-            if ticker in held or ticker in blocked or ticker in excluded:
-                continue
-            band = bands.get(ticker) or {}
-            z = band.get("z") if band else None
-            if z is None and ticker not in alts:
-                continue
-            state = alts.get(ticker)
-            if state and taped.get(ticker):
-                state = {**state, "low": min(float(state["low"]), float(taped[ticker]))}
-            updated = update_alt_arm(
-                state,
-                price=float(prices.get(ticker) or 0),
-                z=None if z is None else float(z),
-                now=now,
-            )
-            if updated is None:
-                alts.pop(ticker, None)
-                continue
-            was = stored["alts"].get(ticker)
-            alts[ticker] = updated
-            px = float(prices.get(ticker) or 0)
-            if was is None:
-                logger.info(
-                    "[Крипта] альт %s у нижней полосы 4h (z %.2f) — жду отскок %.1f%% от %.4g",
-                    ticker,
-                    float(z or 0),
-                    cfg().sleeve_bounce_pct,
-                    updated["low"],
+        if not cfg().sleeve_on:
+            alts = {}
+        else:
+            interesting = {
+                ticker for ticker, band in bands.items()
+                if band and (
+                    float(band.get("z") or 0) <= -1.5
+                    or ticker in alts
                 )
-            elif px > 0 and not alt_bounce_ready(
-                updated, price=px, z=None if z is None else float(z), now=now
-            ):
-                need = updated["low"] * (1.0 + cfg().sleeve_bounce_pct / 100.0)
-                logger.info(
-                    "[Крипта] альт %s жду отскок: дно %.4g сейчас %.4g нужно %.4g z %.2f",
-                    ticker,
-                    updated["low"],
-                    px,
-                    need,
-                    float(z or 0),
+            }
+            missing = [ticker for ticker in interesting if float(prices.get(ticker) or 0) <= 0]
+            if missing:
+                fetched = self._gather_map(
+                    lambda ticker: float((self._ticker(ticker) or {}).get("price") or 0),
+                    set(missing),
+                    label="вход",
                 )
+                for ticker, px in fetched.items():
+                    if float(px or 0) > 0:
+                        prices[ticker] = float(px)
+            for ticker in list(alts):
+                if ticker in held or ticker in blocked or ticker in excluded:
+                    alts.pop(ticker, None)
+            for ticker in sleeve_names():
+                if ticker in held or ticker in blocked or ticker in excluded:
+                    continue
+                band = bands.get(ticker) or {}
+                z = band.get("z") if band else None
+                if z is None and ticker not in alts:
+                    continue
+                state = alts.get(ticker)
+                if state and taped.get(ticker):
+                    state = {**state, "low": min(float(state["low"]), float(taped[ticker]))}
+                updated = update_alt_arm(
+                    state,
+                    price=float(prices.get(ticker) or 0),
+                    z=None if z is None else float(z),
+                    now=now,
+                )
+                if updated is None:
+                    alts.pop(ticker, None)
+                    continue
+                was = stored["alts"].get(ticker)
+                alts[ticker] = updated
+                px = float(prices.get(ticker) or 0)
+                if was is None:
+                    logger.info(
+                        "[Крипта] альт %s у нижней полосы 4h (z %.2f) — жду отскок %.1f%% от %.4g",
+                        ticker,
+                        float(z or 0),
+                        cfg().sleeve_bounce_pct,
+                        updated["low"],
+                    )
+                elif px > 0 and not alt_bounce_ready(
+                    updated, price=px, z=None if z is None else float(z), now=now
+                ):
+                    need = updated["low"] * (1.0 + cfg().sleeve_bounce_pct / 100.0)
+                    logger.info(
+                        "[Крипта] альт %s жду отскок: дно %.4g сейчас %.4g нужно %.4g z %.2f",
+                        ticker,
+                        updated["low"],
+                        px,
+                        need,
+                        float(z or 0),
+                    )
         sol_px = float(prices.get(BTC_DIP_TICKER) or 0)
         second = self._second_ticker()
         sui_px = float(prices.get(second) or 0) if second else 0.0
@@ -1291,7 +1296,7 @@ class CryptoDeskMixin:
         )
         alt_arms = entry_arms["alts"]
         taken = {t for t in target_alloc if t in sleeve_names()} | held_alts
-        if allow_entries and len(taken) < cfg().sleeve_max_names:
+        if allow_entries and cfg().sleeve_on and len(taken) < cfg().sleeve_max_names:
             slot = alt_slot_pct()
             ready = [
                 t for t, state in alt_arms.items()

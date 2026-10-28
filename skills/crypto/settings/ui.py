@@ -130,6 +130,7 @@ class DeskSettingsWindow(QWidget):
         self._hints: dict[str, str] = {}
         self._probe_box: ToggleSwitch | None = None
         self._second_box: ToggleSwitch | None = None
+        self._sleeve_box: ToggleSwitch | None = None
         self._second_combo = None
         self._syncing = False
         self._apply_theme()
@@ -265,6 +266,8 @@ QSpinBox, QDoubleSpinBox {{
                 self._second_box.setChecked(data.second_on)
             if self._second_combo is not None:
                 self._second_combo.setCurrentText(data.second_ticker)
+            if self._sleeve_box is not None:
+                self._sleeve_box.setChecked(data.sleeve_on)
             self._set_spin("sleeve_max_pct", data.sleeve_max_pct)
             self._set_spin("sleeve_max_names", data.sleeve_max_names)
             self._set_spin("sleeve_entry_z", data.sleeve_entry_z)
@@ -287,13 +290,18 @@ QSpinBox, QDoubleSpinBox {{
             self._syncing = False
         self._refresh_alloc(data)
         self._set_probe_enabled(data.probe_on)
+        self._set_sleeve_enabled(data.sleeve_on)
         self._status.setText(status_line())
         self._hint.setText("Пока кармана нет, эти деньги не отдаём рукаву.")
 
     def _refresh_alloc(self, data: DeskSettings) -> None:
-        self._bar.set_shares(data.pocket_pct, data.sleeve_max_pct, data.probe_on)
+        sleeve_share = data.sleeve_max_pct if data.sleeve_on else 0.0
+        self._bar.set_shares(data.pocket_pct, sleeve_share, data.probe_on)
         self._pocket_legend.setText(f"Карман <b>{data.pocket_pct:.0f}%</b>")
-        self._sleeve_legend.setText(f"Рукав <b>{data.sleeve_max_pct:.0f}%</b>")
+        if data.sleeve_on:
+            self._sleeve_legend.setText(f"Рукав <b>{data.sleeve_max_pct:.0f}%</b>")
+        else:
+            self._sleeve_legend.setText("Рукав <b>выкл</b>")
         self._probe_legend.setText(f"Щуп <b>${data.probe_usd:.0f}</b>")
         self._probe_legend.setVisible(data.probe_on)
 
@@ -357,6 +365,20 @@ QSpinBox, QDoubleSpinBox {{
 
     def _sleeve_card(self) -> QFrame:
         card, col = self._card("Рукав", "Нижняя полоса 4ч, равные слоты")
+        top = card.layout()
+        assert isinstance(top, QVBoxLayout)
+        heading = top.itemAt(0).widget()
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        if heading is not None:
+            top.removeWidget(heading)
+            row.addWidget(heading, 1)
+        box = ToggleSwitch()
+        box.setChecked(True)
+        box.toggled.connect(self._on_sleeve_toggled)
+        self._sleeve_box = box
+        row.addWidget(box, 0)
+        top.insertLayout(0, row)
         self._add_spin(col, "sleeve_max_pct", "Потолок", "%", 20, 92, 1, 0, "Доля счёта на альты. Карман отдельно, остаток — кэш и щупы.")
         self._add_spin(col, "sleeve_max_names", "Слоты", "", 1, 6, 1, 0, "Не больше стольких ног сразу. Чёрный список занимает слот, пока нога жива.")
         self._add_spin(col, "sleeve_entry_z", "Вход, z", "", -4, -1, 0.1, 1, "Покупка у нижней полосы, когда z не выше этого порога.")
@@ -540,6 +562,28 @@ QSpinBox, QDoubleSpinBox {{
         self._status.setText(status_line())
         self._hint.setText("Щуп сканирует полки." if data.probe_on else "Щуп выключен. Стол его не сканирует.")
 
+    def _on_sleeve_toggled(self, checked: bool) -> None:
+        if self._syncing:
+            return
+        update(sleeve_on=checked)
+        if not checked:
+            self._clear_sleeve_arms()
+        data = current()
+        self._set_sleeve_enabled(data.sleeve_on)
+        self._refresh_alloc(data)
+        self._status.setText(status_line())
+        self._hint.setText(
+            "Рукав ищет отскок от нижней полосы."
+            if data.sleeve_on
+            else "Рукав выключен. Новые альты не беру, открытые ещё веду."
+        )
+
+    def _clear_sleeve_arms(self) -> None:
+        from skills.crypto.common import read_entry_arms, write_entry_arms
+
+        arms = read_entry_arms()
+        write_entry_arms({}, arms.get("pocket"))
+
     def _set_probe_enabled(self, on: bool) -> None:
         for key in (
             "probe_usd",
@@ -547,6 +591,20 @@ QSpinBox, QDoubleSpinBox {{
             "probe_shelf_range_pct",
             "probe_break_min_pct",
             "probe_break_max_pct",
+        ):
+            spin = self._spins.get(key)
+            if spin is not None:
+                spin.setEnabled(on)
+
+    def _set_sleeve_enabled(self, on: bool) -> None:
+        for key in (
+            "sleeve_max_pct",
+            "sleeve_max_names",
+            "sleeve_entry_z",
+            "sleeve_bounce_pct",
+            "sleeve_stop_pct",
+            "sleeve_exit_arm_pct",
+            "sleeve_cancel_z",
         ):
             spin = self._spins.get(key)
             if spin is not None:

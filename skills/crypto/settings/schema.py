@@ -18,6 +18,7 @@ class DeskSettings:
     sui_usd: float = 50.0
     second_on: bool = False
     second_ticker: str = "AVA"
+    sleeve_on: bool = True
     sleeve_max_pct: float = 50.0
     sleeve_max_names: int = 2
     sleeve_entry_z: float = -2.5
@@ -71,7 +72,7 @@ _LIMITS: dict[str, tuple[float, float]] = {
 }
 
 _INT_FIELDS = frozenset({"sleeve_max_names"})
-_BOOL_FIELDS = frozenset({"probe_on", "second_on"})
+_BOOL_FIELDS = frozenset({"probe_on", "second_on", "sleeve_on"})
 _CHOICES: dict[str, tuple[str, ...]] = {"second_ticker": ("SUI", "AVA")}
 _KEYS = {item.name for item in fields(DeskSettings)}
 
@@ -131,6 +132,7 @@ def to_payload(data: DeskSettings) -> dict[str, object]:
         },
         "sui": {"usd": data.sui_usd, "on": data.second_on, "ticker": data.second_ticker},
         "sleeve": {
+            "on": data.sleeve_on,
             "max_pct": data.sleeve_max_pct,
             "max_names": data.sleeve_max_names,
             "entry_z": data.sleeve_entry_z,
@@ -180,6 +182,7 @@ def from_payload(raw: object) -> DeskSettings:
         "sui_usd": sui.get("usd"),
         "second_on": sui.get("on"),
         "second_ticker": sui.get("ticker"),
+        "sleeve_on": sleeve.get("on"),
         "sleeve_max_pct": sleeve.get("max_pct"),
         "sleeve_max_names": sleeve.get("max_names"),
         "sleeve_entry_z": sleeve.get("entry_z"),
