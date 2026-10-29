@@ -2493,7 +2493,9 @@ class CryptoDeskMixin:
                 continue
             if self._probe_try_arm(row, setup, bars15, hour):
                 return
-        # 2) Узкий топ: impulse/grind/sprint/shelf (дороже по свечам).
+        # 2) Узкий топ: impulse/sprint/shelf. Пусто, пока в ORDER только candle.
+        if not classic:
+            return
         for _rank, row in ranked[:PROBE_SCAN_CLASSIC_LIMIT]:
             ticker = str(row["ticker"])
             try:

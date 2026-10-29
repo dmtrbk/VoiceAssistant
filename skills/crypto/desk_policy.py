@@ -106,24 +106,23 @@ PROBE_REENTRY_BREAKOUT_PCT = 2.5
 PROBE_EMA_FAST = 20
 PROBE_EMA_SLOW = 50
 PROBE_SHELF_BARS = 96
-# Сначала живая свеча. Grind сегодня жёг деньги у хая — вне порядка.
+# Только живая свеча (INIT: open→середина бара → ловушка).
+# Impulse/sprint/shelf сегодня: CPOOL/HYPE — поздний вход и срез за минуты.
 PROBE_ALGO_CANDLE = "candle"
 PROBE_ALGO_IMPULSE = "impulse"
 PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
-PROBE_ALGO_ORDER = (
-    PROBE_ALGO_CANDLE,
-    PROBE_ALGO_IMPULSE,
-    PROBE_ALGO_SPRINT,
-    PROBE_ALGO_SHELF,
-)
+PROBE_ALGO_ORDER = (PROBE_ALGO_CANDLE,)
 # 5м зелёная свеча: тело уже есть, но ещё не у хая бара.
 PROBE_CANDLE_LOOKBACK = 12
-PROBE_CANDLE_MIN_BODY_PCT = 0.25
+# 0,25% ловил шум (CSPR/BICO +0,5%). INIT был +1,3% от open.
+PROBE_CANDLE_MIN_BODY_PCT = 0.6
 PROBE_CANDLE_MAX_BODY_PCT = 2.0
 PROBE_CANDLE_MAX_BAR_POS = 0.55
 PROBE_CANDLE_TIP_GAP_PCT = 0.35
+# Касание open — фитиль той же свечи, не провал. Полка — только уход под open.
+PROBE_CANDLE_SHELF_BREAK_PCT = 0.4
 PROBE_CANDLE_VOL_MULT = 1.5
 PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 2.5
 # 5с hold = CPOOL вечный tip-drop: хай уезжает, bar_pos убивает buy.
@@ -796,10 +795,10 @@ def probe_pick_setup(
     day_chg: float | None = None,
     day_high: float | None = None,
 ) -> dict[str, Any] | None:
-    """Первый сработавший: candle → impulse → grind → sprint → shelf.
+    """Первый сработавший по order. Живой стол: только candle.
 
+    Impulse/sprint/shelf остаются для явного order= в тестах.
     Candle: свежий день + room до хая суток (не топ gainers у пика).
-    Impulse/grind — свои потолки дня.
     """
     seq = tuple(order or PROBE_ALGO_ORDER)
     for algo in seq:
@@ -933,13 +932,20 @@ def probe_exit_reason(
     px = float(price or 0)
     ent = float(entry or 0)
     level = float(shelf or 0)
+    name = str(algo or "").strip().lower()
     if px <= 0 or ent <= 0:
         return None
     gain = (px / ent - 1.0) * 100.0
     if gain <= -cfg().probe_max_loss_pct:
         return "стоп"
     if level > 0 and px <= level:
-        return "полка"
+        # Candle: INIT держался над open. Фитиль к open не продаём — только пробой.
+        if name == PROBE_ALGO_CANDLE:
+            floor = level * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0)
+            if px <= floor + 1e-12:
+                return "полка"
+        else:
+            return "полка"
     high = max(float(peak or 0), px)
     arm_pct = exit_trap_arm_pct(entry=ent, qty=qty)
     peak_gain = (high / ent - 1.0) * 100.0 if ent > 0 else 0.0
@@ -950,7 +956,6 @@ def probe_exit_reason(
     ):
         return "вершина"
     run = high >= ent * (1.0 + PROBE_RUN_PCT / 100.0)
-    name = str(algo or "").strip().lower()
     footboard = name in {
         PROBE_ALGO_CANDLE,
         PROBE_ALGO_IMPULSE,

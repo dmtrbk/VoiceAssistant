@@ -665,12 +665,21 @@ class TestDeskPolicy(unittest.TestCase):
                 quiet5 + [boom, {**live5, "close": 1.20, "high": 1.21}]
             )
         )
-        # Без open candle молчит → impulse.
+        # Без open candle молчит; impulse только по явному order (живой стол — candle).
+        self.assertIsNone(
+            policy.probe_pick_setup(
+                [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(60)]
+                + [{"high": 1.02, "low": 0.99, "close": 1.0, "volume": 10.0},
+                   {"high": 1.08, "low": 1.0, "close": 1.06, "volume": 40.0}],
+                quiet5 + [boom, live5],
+            )
+        )
         picked = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(60)]
             + [{"high": 1.02, "low": 0.99, "close": 1.0, "volume": 10.0},
                {"high": 1.08, "low": 1.0, "close": 1.06, "volume": 40.0}],
             quiet5 + [boom, live5],
+            order=(policy.PROBE_ALGO_IMPULSE,),
         )
         self.assertIsNotNone(picked)
         assert picked is not None
@@ -683,9 +692,9 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         rising = {
             "open": 1.0,
-            "high": 1.012,
+            "high": 1.016,
             "low": 0.999,
-            "close": 1.006,  # ~0.6% тело, середина бара
+            "close": 1.008,  # ~0.8% тело, как INIT, не шум +0.5%
             "volume": 25.0,
         }
         self.assertTrue(
@@ -719,7 +728,12 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_candle_buy_ok(1.019, 1.02, 0.999, 1.0)
         )
+        self.assertEqual(policy.PROBE_ALGO_ORDER, (policy.PROBE_ALGO_CANDLE,))
         self.assertNotIn(policy.PROBE_ALGO_GRIND, policy.PROBE_ALGO_ORDER)
+        self.assertNotIn(policy.PROBE_ALGO_IMPULSE, policy.PROBE_ALGO_ORDER)
+        self.assertGreaterEqual(policy.PROBE_CANDLE_MIN_BODY_PCT, 0.6)
+        weak = {**rising, "close": 1.004, "high": 1.012}
+        self.assertIsNone(policy.probe_candle_setup(base5 + [weak]))
         # Свежий день + room — да; +18% с room — да; +35% — нет; мало room — нет.
         fresh = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
@@ -912,6 +926,28 @@ class TestDeskPolicy(unittest.TestCase):
                 peak=0.05094,
                 algo=policy.PROBE_ALGO_GRIND,
             )
+        )
+        # INIT: касание open свечи — не полка; пробой open −0,4% — полка.
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.2205,
+                entry=0.22309,
+                shelf=0.2205,
+                trend15="bull",
+                peak=0.2234,
+                algo=policy.PROBE_ALGO_CANDLE,
+            )
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.2195,
+                entry=0.22309,
+                shelf=0.2205,
+                trend15="bull",
+                peak=0.2234,
+                algo=policy.PROBE_ALGO_CANDLE,
+            ),
+            "полка",
         )
         self.assertIsNone(
             policy.probe_exit_reason(
