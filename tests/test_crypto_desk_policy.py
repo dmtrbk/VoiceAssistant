@@ -681,13 +681,18 @@ class TestDeskPolicy(unittest.TestCase):
                 "close": px,
                 "volume": 10.0,
             })
-        # Откат от хая живой свечи ≥ tip_gap — не кончик импульса.
+        # Откат от хая живой свечи ≥ tip_gap и не верхняя доля бара.
         live_grind = {
             "high": px * 1.012,
             "low": px * 0.999,
-            "close": px * 1.004,
+            "close": px * 1.003,
             "volume": 12.0,
         }
+        self.assertTrue(
+            policy.probe_grind_live_ok(
+                live_grind["close"], live_grind["high"], live_grind["low"]
+            )
+        )
         grind = policy.probe_grind_setup(stair + [live_grind])
         self.assertIsNotNone(grind)
         assert grind is not None
@@ -698,11 +703,24 @@ class TestDeskPolicy(unittest.TestCase):
             "close": px * 1.011,  # у хая свечи — поздно
             "volume": 12.0,
         }
+        self.assertFalse(
+            policy.probe_grind_live_ok(tip["close"], tip["high"], tip["low"])
+        )
         self.assertIsNone(policy.probe_grind_setup(stair + [tip]))
+        # Верхняя доля бара при формальном tip_gap — тоже поздно.
+        upper = {
+            "high": px * 1.02,
+            "low": px * 1.0,
+            "close": px * 1.015,  # 75% высоты свечи
+            "volume": 12.0,
+        }
+        self.assertFalse(
+            policy.probe_grind_live_ok(upper["close"], upper["high"], upper["low"])
+        )
         spike = {
             "high": px * 1.03,
             "low": px * 0.999,
-            "close": px * 1.004,
+            "close": px * 1.003,
             "volume": 20.0,
         }
         self.assertIsNone(policy.probe_grind_setup(stair + [spike]))
@@ -727,8 +745,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.probe_grind_setup(stair + [ripped]))
         flat = [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(16)]
         self.assertIsNone(policy.probe_grind_setup(flat + [live_grind]))
-        self.assertEqual(policy.PROBE_GRIND_TIP_GAP_PCT, 0.5)
-        self.assertEqual(policy.PROBE_GRIND_CHASE_PCT, 1.5)
+        self.assertEqual(policy.PROBE_GRIND_TIP_GAP_PCT, 0.8)
+        self.assertEqual(policy.PROBE_GRIND_TIP_FRAC, 0.40)
+        self.assertEqual(policy.PROBE_GRIND_CHASE_PCT, 0.8)
+        self.assertEqual(policy.PROBE_GRIND_HOLD_SEC, 10)
         self.assertIsNone(
             policy.probe_exit_reason(
                 price=1.02,
@@ -841,7 +861,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.probe_quote(), 30.0)
         self.assertTrue(policy.probe_should_handoff("ожидание"))
         self.assertTrue(policy.probe_should_handoff("тренд"))
-        self.assertTrue(policy.probe_should_handoff("дно"))
+        self.assertFalse(policy.probe_should_handoff("дно"))
         self.assertFalse(policy.probe_should_handoff("полка"))
         self.assertFalse(policy.probe_should_handoff("стоп"))
         self.assertFalse(policy.probe_should_handoff("вершина"))
@@ -1708,6 +1728,57 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertEqual(len(legs), 1)
         self.assertEqual(legs[0]["ticker"], "PONS")
         self.assertAlmostEqual(legs[0]["qty"], 100.0)
+        # Старый low щупа не тащим — иначе сразу «дно».
+        self.assertEqual(float(legs[0].get("low") or 0), 0.0)
+        self.assertAlmostEqual(float(legs[0].get("exit_high") or 0), 0.291)
+        # Карман2 не продаёт по старому дну при той же цене.
+        self.assertIsNone(
+            policy.btc_dip_exit_reason(
+                price=0.288,
+                entry=0.29,
+                swing_low=float(legs[0].get("low") or 0),
+            )
+        )
+
+    def test_second_pocket_ignores_probe_low_after_handoff(self):
+        from skills.crypto.common import read_second_pocket_legs, upsert_second_pocket_leg
+
+        # Как после handoff: low=0, вершины ещё нет. Старый low щупа 58.5 при цене 58.35
+        # дал бы «дно» мгновенно — с low=0 не продаём.
+        upsert_second_pocket_leg(
+            ticker="LTC",
+            qty=1.0,
+            entry=59.0,
+            low=0.0,
+            exit_high=0.0,
+            exit_ts=0.0,
+            max_legs=3,
+        )
+        self.assertEqual(
+            policy.btc_dip_exit_reason(price=58.35, entry=59.0, swing_low=58.5),
+            "дно",
+        )
+        self.assertIsNone(
+            policy.btc_dip_exit_reason(price=58.35, entry=59.0, swing_low=0.0)
+        )
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch.object(self.skill, "_tape_quote", return_value={"price": 58.35}),
+        ):
+            phrases = self.skill._trade_second_pocket_legs(
+                positions={"LTC": {"qty": 1.0, "price": 58.35}},
+                prices={"LTC": 58.35},
+                blocked=set(),
+            )
+        self.assertEqual(phrases, [])
+        self.assertEqual(placed, [])
+        self.assertEqual(read_second_pocket_legs()[0]["ticker"], "LTC")
 
     def test_probe_hard_exit_still_sells(self):
         from skills.crypto.common import probe_legs, read_second_pocket_legs, write_probe
@@ -1889,6 +1960,47 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         self.assertEqual(read_probe()["arm_ticker"], "PEPE")
         write_probe()
         self.assertEqual(probe_arms(), [])
+
+    def test_probe_grind_drops_tip_at_buy(self):
+        """За hold цена уехала к хаю свечи — не покупаем пик, снимаем взвод."""
+        from skills.crypto.common import probe_arms, write_probe
+
+        # arm_px близко к цене: chase не срабатывает, режет именно tip.
+        write_probe(
+            arm_ticker="LTC",
+            arm_shelf=50.0,
+            arm_ts=time.time() - policy.PROBE_GRIND_HOLD_SEC - 1,
+            arm_px=59.0,
+            arm_algo=policy.PROBE_ALGO_GRIND,
+        )
+        bars = [
+            {"high": 57.0 + i * 0.1, "low": 56.5 + i * 0.1, "close": 56.8 + i * 0.1, "volume": 1.0}
+            for i in range(70)
+        ]
+        bars[-1] = {"high": 59.5, "low": 57.8, "close": 59.3, "volume": 2.0}
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side))
+            return f"ok {ticker}"
+
+        with (
+            patch.object(self.skill, "_ticker", return_value={"price": 59.3, "chg": 5.0}),
+            patch.object(self.skill, "_probe_bars", return_value=bars),
+            patch.object(self.skill, "_probe_week", return_value=2.0),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.desk.ma_trend", return_value="bull"),
+        ):
+            self.skill._probe_arm({
+                "arm_ticker": "LTC",
+                "arm_shelf": 50.0,
+                "arm_ts": time.time() - policy.PROBE_GRIND_HOLD_SEC - 1,
+                "arm_px": 59.0,
+                "arm_algo": policy.PROBE_ALGO_GRIND,
+            })
+        self.assertEqual(placed, [])
+        self.assertEqual(probe_arms(), [])
+        self.assertFalse(policy.probe_grind_live_ok(59.3, 59.5, 57.8))
 
     def test_probe_reserve_second_only_when_open(self):
         # Пусто — резерв одной ноги; при взводе/открытой — под все PROBE_MAX_LEGS.

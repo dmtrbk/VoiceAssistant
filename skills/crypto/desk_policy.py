@@ -19,8 +19,9 @@ PROBE_MAX_LEGS = 3
 # Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
 POCKET_FROM_PROBE_MAX = 3
 # Мягкий выход щупа → передача во второй карман; жёсткий — продажа.
-PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд", "дно"})
-PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина"})
+# «дно» не передаём: цена уже у low щупа — карман2 сразу резал бы тем же дном.
+PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд"})
+PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "дно"})
 DESK_CASH_FLOOR_PCT = 25.0
 DESK_CASH_FLOOR_BULL_PCT = 8.0
 REBALANCE_BAND_PCT = 6.0
@@ -128,11 +129,13 @@ PROBE_GRIND_MAX_EXT_PCT = 6.0
 PROBE_GRIND_MAX_BAR_PCT = 8.0
 # Живая свеча — не вертикальный выстрел и не покупка у её хая.
 PROBE_GRIND_MAX_LIVE_BAR_PCT = 2.0
-PROBE_GRIND_TIP_GAP_PCT = 0.5
+# Абсолютный откат от high + не в верхней доле диапазона свечи.
+PROBE_GRIND_TIP_GAP_PCT = 0.8
+PROBE_GRIND_TIP_FRAC = 0.40
 PROBE_GRIND_FLOOR_BARS = 4
-PROBE_GRIND_HOLD_SEC = 15
+PROBE_GRIND_HOLD_SEC = 10
 # После взвода почти не догоняем — иначе берём пик той же свечи.
-PROBE_GRIND_CHASE_PCT = 1.5
+PROBE_GRIND_CHASE_PCT = 0.8
 # Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
 TAKE_PROFIT_DAY_PCT = 18.0
 TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем на подъёме
@@ -539,6 +542,28 @@ def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     return {"shelf": prior_high, "price": price}
 
 
+def probe_grind_live_ok(price: float, live_high: float, live_low: float) -> bool:
+    """Цена не у хая живой свечи и свеча не вертикальный выстрел.
+
+    Нужно и при взводе, и перед buy: за hold цена часто доезжает до пика.
+    """
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    if px <= 0 or hi <= 0 or lo <= 0 or hi < lo:
+        return False
+    live_span = (hi - lo) / lo * 100.0
+    if live_span > PROBE_GRIND_MAX_LIVE_BAR_PCT + 1e-12:
+        return False
+    tip_cap = hi * (1.0 - PROBE_GRIND_TIP_GAP_PCT / 100.0)
+    if px > tip_cap + 1e-12:
+        return False
+    span = hi - lo
+    if span > 1e-12 and (px - lo) / span > (1.0 - PROBE_GRIND_TIP_FRAC) + 1e-12:
+        return False
+    return True
+
+
 def probe_grind_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     """Лестница у хая: подъём без свежего пробоя полки.
 
@@ -574,14 +599,7 @@ def probe_grind_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         return None
     if high <= 0 or low <= 0 or price <= 0 or prior <= 0 or shelf <= 0:
         return None
-    if live_high <= 0 or live_low <= 0:
-        return None
-    live_span = (live_high - live_low) / live_low * 100.0
-    if live_span > PROBE_GRIND_MAX_LIVE_BAR_PCT + 1e-12:
-        return None
-    # Не у кончика живой свечи (LTC взяли на хае импульса).
-    tip_cap = live_high * (1.0 - PROBE_GRIND_TIP_GAP_PCT / 100.0)
-    if price > tip_cap + 1e-12:
+    if not probe_grind_live_ok(price, live_high, live_low):
         return None
     rise = (price / low - 1.0) * 100.0
     if rise < PROBE_GRIND_MIN_RISE_PCT or rise > PROBE_GRIND_MAX_RISE_PCT:

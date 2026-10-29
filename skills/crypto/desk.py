@@ -72,7 +72,9 @@ from .desk_policy import (
     probe_algo_params,
     probe_arm_action,
     probe_exit_reason,
+    probe_grind_live_ok,
     probe_should_handoff,
+    PROBE_ALGO_GRIND,
     PROBE_MAX_LEGS,
     pocket_from_probe_max,
     probe_pick_setup,
@@ -2159,11 +2161,17 @@ class CryptoDeskMixin:
             and qty > 0
             and entry > 0
         ):
+            # low не тащим: иначе карман2 сразу бьёт «дно» по старому low щупа.
+            # Вершину ловушки можем засеять с peak, если уже был плюс.
+            peak_px = float(state.get("peak") or 0)
+            seed_high = peak_px if peak_px > entry + 1e-12 else 0.0
             ok = upsert_second_pocket_leg(
                 ticker=ticker,
                 qty=qty,
                 entry=entry,
-                low=float(state.get("low") or state.get("shelf") or 0),
+                low=0.0,
+                exit_high=seed_high,
+                exit_ts=time.time() if seed_high > 0 else 0.0,
                 max_legs=pocket_from_probe_max(),
             )
             if ok:
@@ -2265,6 +2273,23 @@ class CryptoDeskMixin:
                 trend,
             )
             return
+        # Grind: за hold цена часто доезжает до хая свечи — ещё раз отсекаем tip.
+        if str(algo or "") == PROBE_ALGO_GRIND and bars:
+            live = bars[-1]
+            if not probe_grind_live_ok(
+                price,
+                float(live.get("high") or 0),
+                float(live.get("low") or 0),
+            ):
+                write_probe(drop_arm=ticker)
+                logger.info(
+                    "[Крипта] щуп %s снят (grind tip): сейчас %.4g high %.4g low %.4g",
+                    ticker,
+                    price,
+                    float(live.get("high") or 0),
+                    float(live.get("low") or 0),
+                )
+                return
         self._probe_buy(
             ticker,
             shelf,
