@@ -579,13 +579,21 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             0,
         )
-        # Свежий день выше разгона +40% — иначе всегда берём хай суток.
+        # У хая суток (+40%, price≈high) ниже свежего дня; с room до хая — наоборот в топ.
         self.assertGreater(
             policy.probe_scan_rank({
                 "chg": 7.6, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
             }),
             policy.probe_scan_rank({
-                "chg": 40.0, "price": 0.026, "low": 0.017, "high": 0.027, "turnover": 2_000_000,
+                "chg": 40.0, "price": 0.0265, "low": 0.017, "high": 0.027, "turnover": 2_000_000,
+            }),
+        )
+        self.assertGreater(
+            policy.probe_scan_rank({
+                "chg": 36.0, "price": 0.066, "low": 0.048, "high": 0.084, "turnover": 2_000_000,
+            }),
+            policy.probe_scan_rank({
+                "chg": 7.6, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
             }),
         )
 
@@ -680,6 +688,31 @@ class TestDeskPolicy(unittest.TestCase):
         assert candle_pick is not None
         self.assertEqual(candle_pick["algo"], policy.PROBE_ALGO_CANDLE)
         self.assertEqual(candle_pick["hold_sec"], policy.PROBE_CANDLE_HOLD_SEC)
+        # Горячий день (INIT/MPLX) не стоп, если ещё есть room до хая суток.
+        hot = policy.probe_pick_setup(
+            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+            base5 + [rising],
+            day_chg=35.0,
+            day_high=1.05,
+        )
+        self.assertIsNotNone(hot)
+        assert hot is not None
+        self.assertEqual(hot["algo"], policy.PROBE_ALGO_CANDLE)
+        # У самого хая суток — нет.
+        self.assertIsNone(
+            policy.probe_pick_setup(
+                [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+                base5 + [rising],
+                day_chg=35.0,
+                day_high=1.006,
+            )
+        )
+        self.assertTrue(
+            policy.probe_trends_ok("neutral", "neutral", 8.0, algo=policy.PROBE_ALGO_CANDLE)
+        )
+        self.assertFalse(
+            policy.probe_trends_ok("bear", "neutral", 8.0, algo=policy.PROBE_ALGO_CANDLE)
+        )
         late_day = policy.probe_pick_setup(
             [],
             quiet5 + [boom, live5],
