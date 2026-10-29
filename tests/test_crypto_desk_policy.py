@@ -713,6 +713,33 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_trends_ok("bear", "neutral", 8.0, algo=policy.PROBE_ALGO_CANDLE)
         )
+        # Arm не должен снимать candle на neutral 15м (иначе INIT вечный wait→drop).
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=100.0,
+                now=100.0 + policy.PROBE_CANDLE_HOLD_SEC,
+                price=1.006,
+                shelf=1.0,
+                trend15="neutral",
+                day_chg=10.0,
+                arm_px=1.005,
+                algo=policy.PROBE_ALGO_CANDLE,
+            ),
+            "buy",
+        )
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=100.0,
+                now=100.0 + policy.PROBE_CANDLE_HOLD_SEC,
+                price=1.006,
+                shelf=1.0,
+                trend15="bear",
+                day_chg=10.0,
+                arm_px=1.005,
+                algo=policy.PROBE_ALGO_CANDLE,
+            ),
+            "drop",
+        )
         late_day = policy.probe_pick_setup(
             [],
             quiet5 + [boom, live5],
@@ -1042,6 +1069,19 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.pocket_exit_ready(held, price=need, now=20.0 + policy.POCKET_EXIT_HOLD_SEC))
         self.assertEqual(
             policy.btc_dip_exit_reason(price=need, entry=100.0, exit_arm=held, now=20.0 + policy.POCKET_EXIT_HOLD_SEC),
+            "вершина",
+        )
+        # Откат выше входа — hold обязателен; под водой — сразу (GROVE handoff).
+        still_green = 101.1 * (1.0 - policy.POCKET_EXIT_PULLBACK_PCT / 100.0)
+        self.assertGreater(still_green, 100.0)
+        self.assertFalse(
+            policy.pocket_exit_ready(armed, price=still_green, now=10.0 + 30.0, entry=100.0)
+        )
+        self.assertTrue(
+            policy.pocket_exit_ready(armed, price=99.5, now=10.0 + 30.0, entry=100.0)
+        )
+        self.assertEqual(
+            policy.btc_dip_exit_reason(price=99.5, entry=100.0, exit_arm=armed, now=10.0 + 30.0),
             "вершина",
         )
         kept = policy.update_pocket_exit_arm(held, price=100.2, entry=100.0, now=80.0, qty=1.0)

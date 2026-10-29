@@ -122,7 +122,8 @@ PROBE_CANDLE_TIP_GAP_PCT = 0.35
 PROBE_CANDLE_VOL_MULT = 1.5
 PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 2.5
 PROBE_CANDLE_HOLD_SEC = 5
-PROBE_CANDLE_CHASE_PCT = 0.45
+# Чуть шире: за 5с альт легко +0.5%, иначе снимаем до buy (INIT).
+PROBE_CANDLE_CHASE_PCT = 0.8
 # Дневной разгон сам по себе не стоп: тело/tip режут хай свечи.
 # Раньше +18% убивало INIT/MPLX как раз в момент растущей 5м.
 PROBE_CANDLE_MAX_DAY_PCT = 55.0
@@ -270,7 +271,7 @@ def btc_dip_exit_reason(
         return "стоп"
     if float(swing_low or 0) > 0 and px <= float(swing_low):
         return "дно"
-    if pocket_exit_ready(exit_arm, price=px, now=now):
+    if pocket_exit_ready(exit_arm, price=px, now=now, entry=ent):
         return "вершина"
     return None
 
@@ -858,9 +859,15 @@ def probe_arm_action(
     chase_pct: float | None = None,
 ) -> str:
     """buy — держится над полкой; drop — пробой погас или цена ушла; wait — ещё рано."""
-    if shelf <= 0 or price <= shelf or trend15 != "bull":
-        return "drop"
     name = str(algo or "").strip().lower()
+    if shelf <= 0 or price <= shelf:
+        return "drop"
+    # Candle допускает neutral 15м (как на скане); bear — снять.
+    if name == PROBE_ALGO_CANDLE:
+        if trend15 == "bear":
+            return "drop"
+    elif trend15 != "bull":
+        return "drop"
     if (
         name == PROBE_ALGO_IMPULSE
         and day_chg is not None
@@ -1214,16 +1221,25 @@ def pocket_exit_ready(
     *,
     price: float,
     now: float | None = None,
+    entry: float = 0.0,
 ) -> bool:
-    """Продажа кармана: −0,5% от вершины, и эта вершина уже 5 минут не обновлялась."""
+    """Продажа кармана: −0,5% от вершины, и эта вершина уже 5 минут не обновлялась.
+
+    Если откат уже есть и цена ≤ входа — hold не ждём: иначе течём под водой (GROVE).
+    """
     limits = cfg()
-    if not state or not _bounce_held(state, now, limits.pocket_exit_hold_sec):
+    if not state:
         return False
     high = float(state.get("high") or 0)
     px = float(price or 0)
     if high <= 0 or px <= 0:
         return False
-    return px <= high * (1.0 - limits.pocket_exit_pullback_pct / 100.0) + 1e-12
+    if px > high * (1.0 - limits.pocket_exit_pullback_pct / 100.0) + 1e-12:
+        return False
+    ent = float(entry or 0)
+    if ent > 0 and px <= ent + 1e-12:
+        return True
+    return _bounce_held(state, now, limits.pocket_exit_hold_sec)
 
 
 def position_basis(entry: float, anchor: float | None) -> float:

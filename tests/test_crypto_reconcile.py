@@ -105,6 +105,24 @@ class TestCryptoReconcile(unittest.TestCase):
         ]
         orphans = R.orphan_open_orders(rows, now=now, skip_tickers={"PEPE"}, max_age_sec=90)
         self.assertEqual(orphans, [{"ticker": "CAP", "order_id": "2"}])
+        # Ручной BTC вне only_tickers — не трогаем (реальный баг 29.10).
+        with_btc = rows + [
+            {
+                "symbol": "BTCUSDT",
+                "orderId": "9",
+                "orderStatus": "New",
+                "orderType": "Limit",
+                "createdTime": str(int((now - 200) * 1000)),
+            }
+        ]
+        managed = R.orphan_open_orders(
+            with_btc,
+            now=now,
+            skip_tickers={"PEPE"},
+            only_tickers={"CAP", "SOL"},
+            max_age_sec=90,
+        )
+        self.assertEqual(managed, [{"ticker": "CAP", "order_id": "2"}])
 
 
 if __name__ == "__main__":

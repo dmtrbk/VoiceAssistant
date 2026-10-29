@@ -659,16 +659,26 @@ class CryptoDeskMixin:
         if new_lows != lows:
             write_sleeve_lows(new_lows)
 
-        # Зависшие лимитки (не щуп): отмена после orphan age.
+        # Зависшие лимитки только по ногам стола — ручной BTC/ETH не отменяем.
         try:
             open_rows = self._open_spot_orders()
         except Exception as exc:
             logger.info("[Крипта] reconcile заявки: %s", exc)
             open_rows = []
+        managed = {BTC_DIP_TICKER} | second_pocket_tickers()
+        managed |= {str(t).upper() for t in (alloc or {})}
+        managed |= {str(t).upper() for t in (exits or {})}
+        managed |= {str(t).upper() for t in (lows or {})}
+        try:
+            arms = read_entry_arms()
+            managed |= {str(t).upper() for t in (arms.get("alts") or {})}
+        except Exception:
+            pass
         orphans = orphan_open_orders(
             open_rows,
             now=now,
             skip_tickers=probe_skip,
+            only_tickers=managed,
             max_age_sec=ORPHAN_ORDER_AGE_SEC,
         )
         for item in orphans:

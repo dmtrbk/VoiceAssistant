@@ -165,9 +165,19 @@ def orphan_open_orders(
     now: float,
     skip_tickers: set[str],
     max_age_sec: float = ORPHAN_ORDER_AGE_SEC,
+    only_tickers: set[str] | None = None,
 ) -> list[dict[str, str]]:
-    """Открытые лимитки старше max_age — кандидаты на отмену. Тикеры щупа пропускаем."""
+    """Зависшие лимитки стола старше max_age.
+
+    Щуп — в skip. only_tickers — только ноги кармана/рукава: ручной BTC не трогаем
+    (иначе reconcile через 90с снимает хозяйскую лимитку).
+    """
     skip = {str(t).upper() for t in skip_tickers}
+    allowed = (
+        {str(t).upper() for t in only_tickers if str(t).strip()}
+        if only_tickers is not None
+        else None
+    )
     out: list[dict[str, str]] = []
     for row in rows or []:
         if not isinstance(row, dict):
@@ -181,6 +191,8 @@ def orphan_open_orders(
         symbol = str(row.get("symbol") or "").upper()
         ticker = symbol[:-4] if symbol.endswith("USDT") else symbol
         if not ticker or ticker in skip:
+            continue
+        if allowed is not None and ticker not in allowed:
             continue
         order_id = str(row.get("orderId") or "")
         if not order_id:
