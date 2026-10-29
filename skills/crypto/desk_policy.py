@@ -124,11 +124,10 @@ PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 2.5
 PROBE_CANDLE_HOLD_SEC = 5
 # Чуть шире: за 5с альт легко +0.5%, иначе снимаем до buy (INIT).
 PROBE_CANDLE_CHASE_PCT = 0.8
-# Дневной разгон сам по себе не стоп: тело/tip режут хай свечи.
-# Раньше +18% убивало INIT/MPLX как раз в момент растущей 5м.
-PROBE_CANDLE_MAX_DAY_PCT = 55.0
-# Не брать candle, если уже у хая суток (осталось < этого % до high24h).
-PROBE_CANDLE_MIN_DAY_ROOM_PCT = 2.5
+# Свежий день, не топ gainers: +35% MPLX/GROVE/DIAM = покупка у пика.
+PROBE_CANDLE_MAX_DAY_PCT = 12.0
+# Не брать candle у хая суток — нужен запас хода, не 2.5пп до high24h.
+PROBE_CANDLE_MIN_DAY_ROOM_PCT = 6.0
 PROBE_SPRINT_HOLD_SEC = 30
 PROBE_SPRINT_CHASE_PCT = 5.0
 PROBE_IMPULSE_HOLD_SEC = 8
@@ -371,14 +370,13 @@ def probe_scan_rank(row: dict[str, Any]) -> float:
         return -1.0
     day_room = ((high - price) / high * 100.0) if high > 0 else 0.0
     if chg >= PROBE_DAY_MIN_PCT:
-        # Свежий день в топ. Сильный памп — только если ещё не у хая суток (есть room).
-        if chg <= 12.0:
+        # Свежий зелёный — в топ. Разогнанный памп в хвост (или вне скана у хая).
+        if chg <= PROBE_CANDLE_MAX_DAY_PCT:
             return chg + 4.0
-        if chg <= 18.0:
-            return chg
-        if day_room >= PROBE_CANDLE_MIN_DAY_ROOM_PCT:
-            return 9.0 + min(day_room, 8.0)
-        return max(1.0, 22.0 - chg)
+        if day_room < PROBE_CANDLE_MIN_DAY_ROOM_PCT:
+            return -1.0
+        # Ещё смотрим, но ниже любого свежего дня — иначе DIAM/MPLX заедают слоты.
+        return max(0.5, 5.0 - min(chg - PROBE_CANDLE_MAX_DAY_PCT, 4.0))
     bounce = (price / low - 1.0) * 100.0 if low > 0 else 0.0
     if bounce >= PROBE_BOUNCE_MIN_PCT and high > 0 and price >= high * PROBE_BOUNCE_NEAR_HIGH:
         return bounce
@@ -773,8 +771,8 @@ def probe_pick_setup(
 ) -> dict[str, Any] | None:
     """Первый сработавший: candle → impulse → grind → sprint → shelf.
 
-    Candle режет хай суток по room, не по голому day_chg (иначе INIT/MPLX).
-    Impulse/grind — потолок дня как раньше.
+    Candle: свежий день + room до хая суток (не топ gainers у пика).
+    Impulse/grind — свои потолки дня.
     """
     seq = tuple(order or PROBE_ALGO_ORDER)
     for algo in seq:
