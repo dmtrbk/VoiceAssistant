@@ -92,26 +92,42 @@ PROBE_SHELF_DRIFT_BARS = 8
 PROBE_RUN_PCT = 6.0
 PROBE_MAX_LOSS_PCT = 8.0
 PROBE_SCAN_LIMIT = 10
-PROBE_PERIOD_SEC = 60
-PROBE_ARMED_PERIOD_SEC = 15
+# Чаще сканируем: растущую 5м свечу надо брать в первой половине, не раз в минуту у хая.
+PROBE_PERIOD_SEC = 25
+PROBE_ARMED_PERIOD_SEC = 8
+# После любой продажи щуп не возвращается в ту же монету сразу (KAS: вершина → тот же grind).
+PROBE_REENTRY_HOURS = 2.0
 PROBE_EMA_FAST = 20
 PROBE_EMA_SLOW = 50
 PROBE_SHELF_BARS = 96
-# Несколько реакций щупа: импульс → лестница у хая → спринт по полке → классика 4 мин.
+# Сначала ловим живую свечу, потом импульс/лестницу/полку.
+PROBE_ALGO_CANDLE = "candle"
 PROBE_ALGO_IMPULSE = "impulse"
 PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
 PROBE_ALGO_ORDER = (
+    PROBE_ALGO_CANDLE,
     PROBE_ALGO_IMPULSE,
     PROBE_ALGO_GRIND,
     PROBE_ALGO_SPRINT,
     PROBE_ALGO_SHELF,
 )
+# 5м зелёная свеча: тело уже есть, но ещё не у хая бара.
+PROBE_CANDLE_LOOKBACK = 12
+PROBE_CANDLE_MIN_BODY_PCT = 0.30
+PROBE_CANDLE_MAX_BODY_PCT = 1.40
+PROBE_CANDLE_MAX_BAR_POS = 0.55
+PROBE_CANDLE_TIP_GAP_PCT = 0.35
+PROBE_CANDLE_VOL_MULT = 1.6
+PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 2.0
+PROBE_CANDLE_HOLD_SEC = 5
+PROBE_CANDLE_CHASE_PCT = 0.45
+PROBE_CANDLE_MAX_DAY_PCT = 18.0
 PROBE_SPRINT_HOLD_SEC = 30
 PROBE_SPRINT_CHASE_PCT = 5.0
-PROBE_IMPULSE_HOLD_SEC = 12
-PROBE_IMPULSE_CHASE_PCT = 7.0
+PROBE_IMPULSE_HOLD_SEC = 8
+PROBE_IMPULSE_CHASE_PCT = 2.5
 PROBE_IMPULSE_LOOKBACK = 12
 PROBE_IMPULSE_VOL_MULT = 2.5
 PROBE_IMPULSE_BREAK_MIN_PCT = 3.0
@@ -346,11 +362,16 @@ def probe_scan_rank(row: dict[str, Any]) -> float:
         turn = float(row.get("turnover") or 0)
     except (TypeError, ValueError):
         return -1.0
-    # Сутки +25% щуп пока не отсекает: лестница часто уже там.
+    # Сильный дневной памп не поднимаем в топ — там уже хай, свечу не поймать.
     if turn < PROBE_MIN_TURNOVER_USD or price <= 0:
         return -1.0
     if chg >= PROBE_DAY_MIN_PCT:
-        return chg
+        # Пик интереса ~+3…12%; дальше режем ранг, чтобы candle брал свежие.
+        if chg <= 12.0:
+            return chg + 4.0
+        if chg <= 18.0:
+            return chg
+        return max(1.0, 22.0 - chg)
     bounce = (price / low - 1.0) * 100.0 if low > 0 else 0.0
     if bounce >= PROBE_BOUNCE_MIN_PCT and high > 0 and price >= high * PROBE_BOUNCE_NEAR_HIGH:
         return bounce
@@ -503,6 +524,73 @@ def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     return probe_shelf_setup_daily(bars) or probe_shelf_setup_local(bars)
 
 
+def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
+    """Ещё в первой половине растущей свечи: зелёная, не у хая."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or lo <= 0 or op <= 0 or hi < lo:
+        return False
+    if px <= op + 1e-12:
+        return False
+    body = (px / op - 1.0) * 100.0
+    if body < PROBE_CANDLE_MIN_BODY_PCT or body > PROBE_CANDLE_MAX_BODY_PCT:
+        return False
+    tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
+    if px > tip_cap + 1e-12:
+        return False
+    span = hi - lo
+    if span > 1e-12 and (px - lo) / span > PROBE_CANDLE_MAX_BAR_POS + 1e-12:
+        return False
+    return True
+
+
+def probe_candle_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Ранний вход в живую зелёную 5м свечу: от open, до середины бара.
+
+    Главный щуп: берём разгон свечи, а не хай окна за 4 часа.
+    bars — 5м, от старых к новым; нужен open.
+    Полка — open живой свечи: возврат под open снимает вход.
+    """
+    need = PROBE_CANDLE_LOOKBACK + 2
+    if len(bars) < need:
+        return None
+    forming = bars[-1]
+    prior = bars[-2]
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        price = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        prior_o = float(prior.get("open") or prior.get("close") or 0)
+        prior_c = float(prior.get("close") or 0)
+        vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if not probe_candle_live_ok(price, hi, lo, op):
+        return None
+    if prior_o > 0 and prior_c > prior_o:
+        prior_body = (prior_c / prior_o - 1.0) * 100.0
+        if prior_body > PROBE_CANDLE_PRIOR_MAX_BODY_PCT + 1e-12:
+            return None
+    if not vols:
+        return None
+    typical = _median(vols)
+    if typical <= 0 or vol < typical * PROBE_CANDLE_VOL_MULT:
+        return None
+    # Не догоняем, если уже вышли далеко над хаем окна lookback.
+    try:
+        prior_high = max(float(bar["high"]) for bar in window)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if prior_high > 0 and price > prior_high * (1.0 + PROBE_CANDLE_MAX_BODY_PCT / 100.0):
+        return None
+    return {"shelf": op, "price": price}
+
+
 def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     """5м подножка: объёмный пробой локального хая без тихой суточной полки.
 
@@ -524,6 +612,8 @@ def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         price = float(forming.get("close") or 0)
         break_close = float(breakout.get("close") or 0)
         break_high = float(breakout.get("high") or 0)
+        live_high = float(forming.get("high") or 0)
+        live_low = float(forming.get("low") or 0)
     except (TypeError, ValueError, KeyError):
         return None
     if prior_high <= 0 or price <= 0 or not vols:
@@ -539,6 +629,14 @@ def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         return None
     if price < prior_high:
         return None
+    # Не на кончике живой свечи пробоя.
+    if live_high > 0 and live_low > 0:
+        tip_cap = live_high * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
+        if price > tip_cap + 1e-12:
+            return None
+        span = live_high - live_low
+        if span > 1e-12 and (price - live_low) / span > 0.70 + 1e-12:
+            return None
     return {"shelf": prior_high, "price": price}
 
 
@@ -620,6 +718,11 @@ def probe_grind_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
 def probe_algo_params(algo: str) -> dict[str, float]:
     """hold_sec / chase_pct для алгоритма щупа."""
     name = str(algo or PROBE_ALGO_SHELF).strip().lower() or PROBE_ALGO_SHELF
+    if name == PROBE_ALGO_CANDLE:
+        return {
+            "hold_sec": float(PROBE_CANDLE_HOLD_SEC),
+            "chase_pct": float(PROBE_CANDLE_CHASE_PCT),
+        }
     if name == PROBE_ALGO_IMPULSE:
         return {
             "hold_sec": float(PROBE_IMPULSE_HOLD_SEC),
@@ -648,9 +751,9 @@ def probe_pick_setup(
     order: tuple[str, ...] | list[str] | None = None,
     day_chg: float | None = None,
 ) -> dict[str, Any] | None:
-    """Первый сработавший: impulse → grind → sprint → shelf.
+    """Первый сработавший: candle → impulse → grind → sprint → shelf.
 
-    Impulse не берём, если сутки уже +25% и выше: это покупка у пика дня.
+    Candle/impulse не берём на сильном дневном разгоне — это покупка у пика дня.
     Grind — с +20%: слабее импульс, но тоже поздно заходить в дневной разгон.
     """
     seq = tuple(order or PROBE_ALGO_ORDER)
@@ -663,12 +766,20 @@ def probe_pick_setup(
         ):
             continue
         if (
+            name == PROBE_ALGO_CANDLE
+            and day_chg is not None
+            and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT
+        ):
+            continue
+        if (
             name == PROBE_ALGO_GRIND
             and day_chg is not None
             and float(day_chg) >= PROBE_GRIND_MAX_DAY_PCT
         ):
             continue
-        if name == PROBE_ALGO_IMPULSE:
+        if name == PROBE_ALGO_CANDLE:
+            setup = probe_candle_setup(bars5 or [])
+        elif name == PROBE_ALGO_IMPULSE:
             setup = probe_impulse_setup(bars5 or [])
         elif name == PROBE_ALGO_GRIND:
             setup = probe_grind_setup(bars15)
@@ -696,10 +807,12 @@ def probe_trends_ok(
     """15м бычий, час не медвежий, неделя не слабее −5%.
 
     Grind требует бычий час: нейтральный 1h часто = уже выдохшийся подъём.
+    Candle достаточно 15м bull — ловим свечу, не ждём часовой разгон.
     """
     if trend15 != "bull" or trend1h == "bear":
         return False
-    if str(algo or "").strip().lower() == PROBE_ALGO_GRIND and trend1h != "bull":
+    name = str(algo or "").strip().lower()
+    if name == PROBE_ALGO_GRIND and trend1h != "bull":
         return False
     if day_chg is None:
         return False
@@ -725,10 +838,17 @@ def probe_arm_action(
     """buy — держится над полкой; drop — пробой погас или цена ушла; wait — ещё рано."""
     if shelf <= 0 or price <= shelf or trend15 != "bull":
         return "drop"
+    name = str(algo or "").strip().lower()
     if (
-        str(algo or "").strip().lower() == PROBE_ALGO_IMPULSE
+        name == PROBE_ALGO_IMPULSE
         and day_chg is not None
         and float(day_chg) >= PROBE_IMPULSE_MAX_DAY_PCT
+    ):
+        return "drop"
+    if (
+        name == PROBE_ALGO_CANDLE
+        and day_chg is not None
+        and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT
     ):
         return "drop"
     if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
@@ -781,7 +901,12 @@ def probe_exit_reason(
         return "вершина"
     run = high >= ent * (1.0 + PROBE_RUN_PCT / 100.0)
     name = str(algo or "").strip().lower()
-    footboard = name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPRINT, PROBE_ALGO_GRIND}
+    footboard = name in {
+        PROBE_ALGO_CANDLE,
+        PROBE_ALGO_IMPULSE,
+        PROBE_ALGO_SPRINT,
+        PROBE_ALGO_GRIND,
+    }
     if not run and not footboard:
         if float(entry_low or 0) > 0 and px <= float(entry_low):
             return "дно"

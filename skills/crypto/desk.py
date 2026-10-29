@@ -72,10 +72,13 @@ from .desk_policy import (
     probe_algo_params,
     probe_arm_action,
     probe_exit_reason,
+    probe_candle_live_ok,
     probe_grind_live_ok,
     probe_should_handoff,
+    PROBE_ALGO_CANDLE,
     PROBE_ALGO_GRIND,
     PROBE_MAX_LEGS,
+    PROBE_REENTRY_HOURS,
     pocket_from_probe_max,
     probe_pick_setup,
     probe_quote,
@@ -2048,6 +2051,7 @@ class CryptoDeskMixin:
                 continue
             try:
                 bars.append({
+                    "open": float(row[1]),
                     "high": float(row[2]),
                     "low": float(row[3]),
                     "close": float(row[4]),
@@ -2064,6 +2068,8 @@ class CryptoDeskMixin:
         blocked |= {str(ticker).upper() for ticker in alloc}
         # Убыточный выход (MEGA/HAEDAL) — не сразу обратно в ту же монету.
         blocked |= set(crypto_journal.cooldown_tickers(cfg().cooldown_hours))
+        # Плюсовой выход по вершине тоже: иначе KAS sell→buy за те же секунды.
+        blocked |= set(crypto_journal.recently_sold(PROBE_REENTRY_HOURS))
         try:
             _cash, positions = self._wallet()
         except Exception as exc:
@@ -2162,9 +2168,8 @@ class CryptoDeskMixin:
             and entry > 0
         ):
             # low не тащим: иначе карман2 сразу бьёт «дно» по старому low щупа.
-            # Вершину ловушки можем засеять с peak, если уже был плюс.
-            peak_px = float(state.get("peak") or 0)
-            seed_high = peak_px if peak_px > entry + 1e-12 else 0.0
+            # Вершину сеем даже в минусе (max peak/price): иначе до стопа −10% глухо.
+            seed_high = max(float(state.get("peak") or 0), float(price or 0))
             ok = upsert_second_pocket_leg(
                 ticker=ticker,
                 qty=qty,
@@ -2273,7 +2278,7 @@ class CryptoDeskMixin:
                 trend,
             )
             return
-        # Grind: за hold цена часто доезжает до хая свечи — ещё раз отсекаем tip.
+        # За hold цена часто доезжает до хая — перед buy ещё раз режем tip.
         if str(algo or "") == PROBE_ALGO_GRIND and bars:
             live = bars[-1]
             if not probe_grind_live_ok(
@@ -2288,6 +2293,30 @@ class CryptoDeskMixin:
                     price,
                     float(live.get("high") or 0),
                     float(live.get("low") or 0),
+                )
+                return
+        if str(algo or "") == PROBE_ALGO_CANDLE:
+            # Для candle нужен актуальный 5м бар с open — 15м тренд уже в bars.
+            try:
+                bars5 = self._probe_bars(ticker, "5", 20)
+            except Exception as exc:
+                logger.info("[Крипта] щуп %s 5м tip: %s", ticker, exc)
+                write_probe(drop_arm=ticker)
+                return
+            live = bars5[-1] if bars5 else {}
+            if not probe_candle_live_ok(
+                price,
+                float(live.get("high") or 0),
+                float(live.get("low") or 0),
+                float(live.get("open") or 0),
+            ):
+                write_probe(drop_arm=ticker)
+                logger.info(
+                    "[Крипта] щуп %s снят (candle tip): сейчас %.4g open %.4g high %.4g",
+                    ticker,
+                    price,
+                    float(live.get("open") or 0),
+                    float(live.get("high") or 0),
                 )
                 return
         self._probe_buy(
@@ -2314,7 +2343,7 @@ class CryptoDeskMixin:
             logger.info("[Крипта] щуп %s: кэша мало на 30$", ticker)
             return
         before = float((held_now.get(ticker) or {}).get("qty") or 0)
-        # Подножка: market, иначе импульс уходит пока maker висит.
+        # Свеча/подножка: market — иначе разгон уходит, пока maker висит.
         maker = str(algo or "") in {"", "shelf"}
         self._place_order(ticker, "Buy", quote_usdt=quote, price=price, maker=maker)
         _cash, held = self._cash_and_held()

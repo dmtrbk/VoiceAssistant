@@ -100,7 +100,13 @@ def klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> list[dict[
 
 def as_ohlc(rows: list[dict[str, Any]]) -> list[dict[str, float]]:
     return [
-        {"high": b["high"], "low": b["low"], "close": b["close"], "volume": b["volume"]}
+        {
+            "open": float(b.get("open") or b["close"]),
+            "high": b["high"],
+            "low": b["low"],
+            "close": b["close"],
+            "volume": b["volume"],
+        }
         for b in rows
     ]
 

@@ -355,6 +355,28 @@ def recently_bought(
     return out
 
 
+def recently_sold(
+    hours: float = 2.0,
+    trades: list[dict[str, Any]] | None = None,
+    *,
+    now: float | None = None,
+) -> set[str]:
+    """Любая продажа за окно — щуп не сразу обратно в ту же монету (даже в плюс)."""
+    rows = trades if trades is not None else _read_trades()
+    cutoff = (now if now is not None else time.time()) - max(0.0, hours) * 3600.0
+    out: set[str] = set()
+    for entry in rows:
+        if str(entry.get("side") or "").lower() != "sell":
+            continue
+        epoch = _entry_epoch(entry)
+        if epoch is None or epoch < cutoff:
+            continue
+        ticker = str(entry.get("ticker") or "").upper()
+        if ticker:
+            out.add(ticker)
+    return out
+
+
 def trades_on_msk_day(
     day: datetime | None = None,
     trades: list[dict[str, Any]] | None = None,

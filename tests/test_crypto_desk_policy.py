@@ -579,6 +579,15 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             0,
         )
+        # Свежий день выше разгона +40% — иначе всегда берём хай суток.
+        self.assertGreater(
+            policy.probe_scan_rank({
+                "chg": 7.6, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
+            }),
+            policy.probe_scan_rank({
+                "chg": 40.0, "price": 0.026, "low": 0.017, "high": 0.027, "turnover": 2_000_000,
+            }),
+        )
 
         base = dict(armed_ts=100.0, price=1.06, shelf=1.01, trend15="bull", day_chg=8.0, arm_px=1.05)
         self.assertEqual(policy.probe_arm_action(now=160.0, **base), "wait")
@@ -625,6 +634,7 @@ class TestDeskPolicy(unittest.TestCase):
                 quiet5 + [boom, {**live5, "close": 1.20, "high": 1.21}]
             )
         )
+        # Без open candle молчит → impulse.
         picked = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(60)]
             + [{"high": 1.02, "low": 0.99, "close": 1.0, "volume": 10.0},
@@ -634,6 +644,42 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNotNone(picked)
         assert picked is not None
         self.assertEqual(picked["algo"], policy.PROBE_ALGO_IMPULSE)
+
+        # Candle: зелёная 5м от open, ещё не у хая — главный вход.
+        base5 = [
+            {"open": 1.0, "high": 1.002, "low": 0.998, "close": 1.0, "volume": 10.0}
+            for _ in range(14)
+        ]
+        rising = {
+            "open": 1.0,
+            "high": 1.012,
+            "low": 0.999,
+            "close": 1.006,  # ~0.6% тело, середина бара
+            "volume": 25.0,
+        }
+        self.assertTrue(
+            policy.probe_candle_live_ok(
+                rising["close"], rising["high"], rising["low"], rising["open"]
+            )
+        )
+        candle = policy.probe_candle_setup(base5 + [rising])
+        self.assertIsNotNone(candle)
+        assert candle is not None
+        self.assertAlmostEqual(candle["shelf"], 1.0)
+        tip_candle = {**rising, "close": 1.011, "high": 1.012}
+        self.assertIsNone(policy.probe_candle_setup(base5 + [tip_candle]))
+        late_body = {**rising, "close": 1.02, "high": 1.021}
+        self.assertIsNone(policy.probe_candle_setup(base5 + [late_body]))
+        # Candle раньше impulse в порядке.
+        candle_pick = policy.probe_pick_setup(
+            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+            base5 + [rising],
+            day_chg=5.0,
+        )
+        self.assertIsNotNone(candle_pick)
+        assert candle_pick is not None
+        self.assertEqual(candle_pick["algo"], policy.PROBE_ALGO_CANDLE)
+        self.assertEqual(candle_pick["hold_sec"], policy.PROBE_CANDLE_HOLD_SEC)
         late_day = policy.probe_pick_setup(
             [],
             quiet5 + [boom, live5],
@@ -1182,6 +1228,20 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         ]
         cool = crypto_journal.cooldown_tickers(12.0, trades, now=now)
         self.assertNotIn("BTC", cool)
+
+    def test_probe_reentry_blocks_recent_sell(self):
+        now = time.time()
+        trades = [
+            {"ticker": "KAS", "side": "buy", "quote": 60.0, "price": 0.036, "ts_epoch": now - 3600},
+            {"ticker": "KAS", "side": "sell", "quote": 61.0, "price": 0.037, "ts_epoch": now - 60},
+        ]
+        # Плюсовой sell — обычный cooldown молчит, щуп всё равно ждёт reentry.
+        self.assertNotIn("KAS", crypto_journal.cooldown_tickers(12.0, trades, now=now))
+        self.assertIn("KAS", crypto_journal.recently_sold(policy.PROBE_REENTRY_HOURS, trades, now=now))
+        self.assertNotIn(
+            "KAS",
+            crypto_journal.recently_sold(policy.PROBE_REENTRY_HOURS, trades, now=now + 3 * 3600),
+        )
 
     def test_daily_report_gate(self):
         morning = datetime(2026, 9, 18, 10, 0, tzinfo=_MSK)
@@ -1739,6 +1799,36 @@ class TestDeskAutoUsesScore(unittest.TestCase):
                 swing_low=float(legs[0].get("low") or 0),
             )
         )
+
+    def test_probe_handoff_seeds_exit_high_when_underwater(self):
+        """Пик ниже входа — всё равно сеем вершину, иначе карман2 глух до стопа."""
+        from skills.crypto.common import probe_legs, read_second_pocket_legs, write_probe
+        from skills.crypto.settings import store as settings_store
+
+        settings_store.update(second_on=True)
+        write_probe(
+            ticker="SPX",
+            qty=100.0,
+            entry=0.41,
+            shelf=0.40,
+            arm_px=0.409,
+            peak=0.409,  # ниже входа
+            low=0.408,
+            algo=policy.PROBE_ALGO_GRIND,
+        )
+        bars = [{"high": 0.41, "low": 0.40, "close": 0.401, "volume": 1.0} for _ in range(80)]
+        with (
+            patch.object(self.skill, "_ticker", return_value={"price": 0.401, "chg": -1.0}),
+            patch.object(self.skill, "_probe_bars", return_value=bars),
+            patch("skills.crypto.desk.ma_trend", return_value="bear"),
+        ):
+            self.skill._probe_exit(probe_legs()[0])
+        legs = read_second_pocket_legs()
+        self.assertEqual(len(legs), 1)
+        self.assertEqual(legs[0]["ticker"], "SPX")
+        self.assertEqual(float(legs[0].get("low") or 0), 0.0)
+        # max(peak, price) = max(0.409, 0.401)
+        self.assertAlmostEqual(float(legs[0].get("exit_high") or 0), 0.409)
 
     def test_second_pocket_ignores_probe_low_after_handoff(self):
         from skills.crypto.common import read_second_pocket_legs, upsert_second_pocket_leg
