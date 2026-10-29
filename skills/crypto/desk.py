@@ -61,6 +61,8 @@ from .desk_policy import (
     PROBE_PERIOD_SEC,
     PROBE_ARMED_PERIOD_SEC,
     PROBE_SCAN_LIMIT,
+    PROBE_SCAN_CLASSIC_LIMIT,
+    PROBE_ALGO_ORDER,
     liquid_sleeve_names,
     set_live_sleeve,
     sleeve_names,
@@ -2380,6 +2382,43 @@ class CryptoDeskMixin:
             " (второй)" if len(probe_legs()) > 1 else "",
         )
 
+    def _probe_try_arm(
+        self,
+        row: dict[str, Any],
+        setup: dict[str, Any],
+        bars15: list[dict[str, Any]],
+        hour: list[dict[str, Any]],
+    ) -> bool:
+        """Взвод, если тренд/неделя ок. True — слот занят, скан стоп."""
+        ticker = str(row.get("ticker") or "")
+        week = self._probe_week(ticker)
+        algo = str(setup.get("algo") or "shelf")
+        if week is None or not probe_trends_ok(
+            ma_trend([bar["close"] for bar in bars15]),
+            ma_trend([bar["close"] for bar in hour]),
+            float(row.get("chg") or 0),
+            week_chg=week,
+            algo=algo,
+        ):
+            return False
+        hold = int(float(setup.get("hold_sec") or PROBE_ENTRY_HOLD_SEC))
+        write_probe(
+            arm_ticker=ticker,
+            arm_shelf=float(setup["shelf"]),
+            arm_ts=time.time(),
+            arm_px=float(setup["price"]),
+            arm_algo=algo,
+        )
+        logger.info(
+            "[Крипта] щуп %s %s полка %.4g сейчас %.4g — жду %dс",
+            ticker,
+            algo,
+            setup["shelf"],
+            setup["price"],
+            hold,
+        )
+        return True
+
     def _probe_scan(self) -> None:
         if len(probe_legs()) + len(probe_arms()) >= PROBE_MAX_LEGS:
             return
@@ -2399,10 +2438,37 @@ class CryptoDeskMixin:
                 continue
             ranked.append((rank, row))
         ranked.sort(key=lambda item: item[0], reverse=True)
+        classic = tuple(a for a in PROBE_ALGO_ORDER if a != PROBE_ALGO_CANDLE)
+        # 1) Широкий обзор: только 5м candle — 15м/1ч только если свеча уже живая.
         for _rank, row in ranked[:PROBE_SCAN_LIMIT]:
             ticker = str(row["ticker"])
             try:
-                bars = self._probe_bars(ticker, "15", 120)
+                bars5 = self._probe_bars(ticker, "5", 80)
+            except Exception as exc:
+                logger.info("[Крипта] щуп %s 5м: %s", ticker, exc)
+                continue
+            setup = probe_pick_setup(
+                [],
+                bars5,
+                order=(PROBE_ALGO_CANDLE,),
+                day_chg=float(row.get("chg") or 0),
+                day_high=float(row.get("high") or 0),
+            )
+            if not setup:
+                continue
+            try:
+                bars15 = self._probe_bars(ticker, "15", 120)
+                hour = self._probe_bars(ticker, "60", 80)
+            except Exception as exc:
+                logger.info("[Крипта] щуп %s тренд: %s", ticker, exc)
+                continue
+            if self._probe_try_arm(row, setup, bars15, hour):
+                return
+        # 2) Узкий топ: impulse/grind/sprint/shelf (дороже по свечам).
+        for _rank, row in ranked[:PROBE_SCAN_CLASSIC_LIMIT]:
+            ticker = str(row["ticker"])
+            try:
+                bars15 = self._probe_bars(ticker, "15", 120)
             except Exception as exc:
                 logger.info("[Крипта] щуп %s свечи: %s", ticker, exc)
                 continue
@@ -2412,8 +2478,9 @@ class CryptoDeskMixin:
                 logger.info("[Крипта] щуп %s 5м: %s", ticker, exc)
                 bars5 = []
             setup = probe_pick_setup(
-                bars,
+                bars15,
                 bars5,
+                order=classic,
                 day_chg=float(row.get("chg") or 0),
                 day_high=float(row.get("high") or 0),
             )
@@ -2424,33 +2491,8 @@ class CryptoDeskMixin:
             except Exception as exc:
                 logger.info("[Крипта] щуп %s час: %s", ticker, exc)
                 continue
-            week = self._probe_week(ticker)
-            algo = str(setup.get("algo") or "shelf")
-            if week is None or not probe_trends_ok(
-                ma_trend([bar["close"] for bar in bars]),
-                ma_trend([bar["close"] for bar in hour]),
-                float(row.get("chg") or 0),
-                week_chg=week,
-                algo=algo,
-            ):
-                continue
-            hold = int(float(setup.get("hold_sec") or PROBE_ENTRY_HOLD_SEC))
-            write_probe(
-                arm_ticker=ticker,
-                arm_shelf=float(setup["shelf"]),
-                arm_ts=time.time(),
-                arm_px=float(setup["price"]),
-                arm_algo=algo,
-            )
-            logger.info(
-                "[Крипта] щуп %s %s полка %.4g сейчас %.4g — жду %dс",
-                ticker,
-                algo,
-                setup["shelf"],
-                setup["price"],
-                hold,
-            )
-            return
+            if self._probe_try_arm(row, setup, bars15, hour):
+                return
 
     def _pockets_tick(self) -> None:
         """Раз в минуту SOL: локальный откат; второй карман — только выход переданных ног."""

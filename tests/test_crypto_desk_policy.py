@@ -567,12 +567,27 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             0,
         )
+        # Средний оборот тоже в скан (раньше порог $1M резал почти всё).
+        self.assertGreater(
+            policy.probe_scan_rank({
+                "chg": 2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 300_000,
+            }),
+            0,
+        )
+        self.assertLess(
+            policy.probe_scan_rank({
+                "chg": 2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 100_000,
+            }),
+            0,
+        )
         self.assertLess(
             policy.probe_scan_rank({
                 "chg": -2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
             }),
             0,
         )
+        self.assertGreaterEqual(policy.PROBE_SCAN_LIMIT, 40)
+        self.assertLess(policy.PROBE_SCAN_CLASSIC_LIMIT, policy.PROBE_SCAN_LIMIT)
         # У хая суток (+40%) — вне скана; даже с room памп ниже свежего дня.
         self.assertLess(
             policy.probe_scan_rank({

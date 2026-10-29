@@ -73,8 +73,9 @@ SLEEVE_SKIP = frozenset({
 _live_extra: set[str] = set()
 # Щуп: 30$ на пробой тихой полки. Не слот рукава и не карман.
 PROBE_USD = 30.0
-PROBE_MIN_TURNOVER_USD = 1_000_000.0
-PROBE_DAY_MIN_PCT = 1.0
+# Раньше $1M оставлял ~6 монет на скане; $250k — шире, без пыли.
+PROBE_MIN_TURNOVER_USD = 250_000.0
+PROBE_DAY_MIN_PCT = 0.5
 PROBE_NEAR_HIGH = 0.99
 PROBE_BOUNCE_MIN_PCT = 8.0
 PROBE_BOUNCE_NEAR_HIGH = 0.92
@@ -91,7 +92,9 @@ PROBE_SHELF_DRIFT_PCT = 1.5
 PROBE_SHELF_DRIFT_BARS = 8
 PROBE_RUN_PCT = 6.0
 PROBE_MAX_LOSS_PCT = 8.0
-PROBE_SCAN_LIMIT = 16
+# Сначала candle по широкому списку (только 5м); остальные алго — укороченный топ.
+PROBE_SCAN_LIMIT = 48
+PROBE_SCAN_CLASSIC_LIMIT = 16
 # Чаще сканируем: растущую 5м свечу надо брать в первой половине, не раз в минуту у хая.
 PROBE_PERIOD_SEC = 20
 PROBE_ARMED_PERIOD_SEC = 6
