@@ -2172,16 +2172,19 @@ class CryptoDeskMixin:
             return
         qty = float(state.get("qty") or 0)
         entry = float(state.get("entry") or 0)
-        # Мягкий выход + второй карман on + есть место → передача, не продажа.
+        # Мягкий выход → карман2 только если уже был реальный плюс (ловушка).
+        # Иначе BLEND/GROVE: handoff без профита → течь в hold.
+        seed_high = max(float(state.get("peak") or 0), float(price or 0))
+        peak_gain = (seed_high / entry - 1.0) * 100.0 if entry > 0 else 0.0
+        arm_need = exit_trap_arm_pct(entry=entry, qty=qty) if entry > 0 and qty > 0 else 9e9
         if (
             probe_should_handoff(reason)
             and cfg().second_on
             and qty > 0
             and entry > 0
+            and peak_gain >= arm_need - 1e-6
         ):
             # low не тащим: иначе карман2 сразу бьёт «дно» по старому low щупа.
-            # Вершину сеем даже в минусе (max peak/price): иначе до стопа −10% глухо.
-            seed_high = max(float(state.get("peak") or 0), float(price or 0))
             ok = upsert_second_pocket_leg(
                 ticker=ticker,
                 qty=qty,
@@ -2205,6 +2208,14 @@ class CryptoDeskMixin:
                 "[Крипта] щуп %s: карман2 полон — продаю (%s)",
                 ticker,
                 reason,
+            )
+        elif probe_should_handoff(reason) and entry > 0 and peak_gain < arm_need - 1e-6:
+            logger.info(
+                "[Крипта] щуп %s: без плюса не в карман2 (%s, пик %+.2f%% < %.2f%%) — продаю",
+                ticker,
+                reason,
+                peak_gain,
+                arm_need,
             )
         try:
             _cash, held = self._cash_and_held()

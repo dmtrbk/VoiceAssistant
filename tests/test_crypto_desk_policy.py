@@ -695,25 +695,31 @@ class TestDeskPolicy(unittest.TestCase):
         assert candle_pick is not None
         self.assertEqual(candle_pick["algo"], policy.PROBE_ALGO_CANDLE)
         self.assertEqual(candle_pick["hold_sec"], policy.PROBE_CANDLE_HOLD_SEC)
-        # Свежий день + room — да; уже +35% как MPLX/DIAM — нет (пик).
+        # Свежий день + room — да; +18% с room — да; +35% — нет; мало room — нет.
         fresh = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
             base5 + [rising],
             day_chg=8.0,
-            day_high=1.08,
+            day_high=1.12,
         )
         self.assertIsNotNone(fresh)
         assert fresh is not None
         self.assertEqual(fresh["algo"], policy.PROBE_ALGO_CANDLE)
+        hot_ok = policy.probe_pick_setup(
+            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+            base5 + [rising],
+            day_chg=18.0,
+            day_high=1.12,
+        )
+        self.assertIsNotNone(hot_ok)
         self.assertIsNone(
             policy.probe_pick_setup(
                 [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
                 base5 + [rising],
                 day_chg=35.0,
-                day_high=1.08,
+                day_high=1.12,
             )
         )
-        # Мало room до хая суток — нет.
         self.assertIsNone(
             policy.probe_pick_setup(
                 [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
@@ -804,9 +810,9 @@ class TestDeskPolicy(unittest.TestCase):
             })
         # Откат от хая живой свечи ≥ tip_gap и не верхняя доля бара.
         live_grind = {
-            "high": px * 1.012,
+            "high": px * 1.013,
             "low": px * 0.999,
-            "close": px * 1.003,
+            "close": px * 1.000,  # ≥1.2% от хая, не верх бара
             "volume": 12.0,
         }
         self.assertTrue(
@@ -866,10 +872,22 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.probe_grind_setup(stair + [ripped]))
         flat = [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(16)]
         self.assertIsNone(policy.probe_grind_setup(flat + [live_grind]))
-        self.assertEqual(policy.PROBE_GRIND_TIP_GAP_PCT, 0.8)
-        self.assertEqual(policy.PROBE_GRIND_TIP_FRAC, 0.40)
-        self.assertEqual(policy.PROBE_GRIND_CHASE_PCT, 0.8)
+        self.assertEqual(policy.PROBE_GRIND_TIP_GAP_PCT, 1.2)
+        self.assertEqual(policy.PROBE_GRIND_TIP_FRAC, 0.45)
+        self.assertEqual(policy.PROBE_GRIND_CHASE_PCT, 0.5)
         self.assertEqual(policy.PROBE_GRIND_HOLD_SEC, 10)
+        self.assertEqual(policy.PROBE_GRIND_MAX_DAY_PCT, 18.0)
+        # grind/candle не режем soft «тренд» в мелком минусе (BLEND).
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.0502,
+                entry=0.05085,
+                shelf=0.04921,
+                trend15="bear",
+                peak=0.05094,
+                algo=policy.PROBE_ALGO_GRIND,
+            )
+        )
         self.assertIsNone(
             policy.probe_exit_reason(
                 price=1.02,
@@ -1845,15 +1863,17 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         from skills.crypto.settings import store as settings_store
 
         settings_store.update(second_on=True, pocket_from_probe_max=3)
+        # impulse: run + bear → тренд; пик покрыл ловушку → карман2.
+        # (grind/candle soft-тренд больше не отдают — ждут ловушку.)
         write_probe(
             ticker="PONS",
-            qty=100.0,
-            entry=0.29,
-            shelf=0.28,
-            arm_px=0.29,
-            peak=0.291,
-            low=0.285,
-            algo=policy.PROBE_ALGO_GRIND,
+            qty=60.0,
+            entry=1.0,
+            shelf=0.95,
+            arm_px=1.0,
+            peak=1.08,
+            low=0.99,
+            algo=policy.PROBE_ALGO_IMPULSE,
         )
         placed: list[tuple] = []
 
@@ -1861,12 +1881,11 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             placed.append((ticker, side))
             return f"ok {ticker}"
 
-        bars = [{"high": 0.3, "low": 0.28, "close": 0.288, "volume": 1.0} for _ in range(80)]
+        bars = [{"high": 1.08, "low": 0.95, "close": 0.99, "volume": 1.0} for _ in range(80)]
         with (
-            patch.object(self.skill, "_ticker", return_value={"price": 0.288, "chg": 1.0}),
+            patch.object(self.skill, "_ticker", return_value={"price": 0.99, "chg": -1.0}),
             patch.object(self.skill, "_probe_bars", return_value=bars),
             patch.object(self.skill, "_place_order", side_effect=place),
-            # Без run у grind «ожидание» не бьёт; тренд bear + gain<=0 → тренд.
             patch("skills.crypto.desk.ma_trend", return_value="bear"),
         ):
             self.skill._probe_exit(probe_legs()[0])
@@ -1875,21 +1894,12 @@ class TestDeskAutoUsesScore(unittest.TestCase):
         legs = read_second_pocket_legs()
         self.assertEqual(len(legs), 1)
         self.assertEqual(legs[0]["ticker"], "PONS")
-        self.assertAlmostEqual(legs[0]["qty"], 100.0)
-        # Старый low щупа не тащим — иначе сразу «дно».
+        self.assertAlmostEqual(legs[0]["qty"], 60.0)
         self.assertEqual(float(legs[0].get("low") or 0), 0.0)
-        self.assertAlmostEqual(float(legs[0].get("exit_high") or 0), 0.291)
-        # Карман2 не продаёт по старому дну при той же цене.
-        self.assertIsNone(
-            policy.btc_dip_exit_reason(
-                price=0.288,
-                entry=0.29,
-                swing_low=float(legs[0].get("low") or 0),
-            )
-        )
+        self.assertAlmostEqual(float(legs[0].get("exit_high") or 0), 1.08)
 
-    def test_probe_handoff_seeds_exit_high_when_underwater(self):
-        """Пик ниже входа — всё равно сеем вершину, иначе карман2 глух до стопа."""
+    def test_probe_no_handoff_without_real_peak(self):
+        """Без плюса ловушки — продаём (полка), не тащим в карман2."""
         from skills.crypto.common import probe_legs, read_second_pocket_legs, write_probe
         from skills.crypto.settings import store as settings_store
 
@@ -1898,25 +1908,30 @@ class TestDeskAutoUsesScore(unittest.TestCase):
             ticker="SPX",
             qty=100.0,
             entry=0.41,
-            shelf=0.40,
+            shelf=0.402,
             arm_px=0.409,
-            peak=0.409,  # ниже входа
+            peak=0.409,
             low=0.408,
             algo=policy.PROBE_ALGO_GRIND,
         )
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, base_qty))
+            return f"ok {ticker}"
+
         bars = [{"high": 0.41, "low": 0.40, "close": 0.401, "volume": 1.0} for _ in range(80)]
         with (
             patch.object(self.skill, "_ticker", return_value={"price": 0.401, "chg": -1.0}),
             patch.object(self.skill, "_probe_bars", return_value=bars),
+            patch.object(self.skill, "_cash_and_held", return_value=(100.0, {"SPX": {"qty": 100.0}})),
+            patch.object(self.skill, "_place_order", side_effect=place),
             patch("skills.crypto.desk.ma_trend", return_value="bear"),
         ):
             self.skill._probe_exit(probe_legs()[0])
-        legs = read_second_pocket_legs()
-        self.assertEqual(len(legs), 1)
-        self.assertEqual(legs[0]["ticker"], "SPX")
-        self.assertEqual(float(legs[0].get("low") or 0), 0.0)
-        # max(peak, price) = max(0.409, 0.401)
-        self.assertAlmostEqual(float(legs[0].get("exit_high") or 0), 0.409)
+        self.assertEqual(placed, [("SPX", "Sell", 100.0)])
+        self.assertEqual(probe_legs(), [])
+        self.assertEqual(read_second_pocket_legs(), [])
 
     def test_second_pocket_ignores_probe_low_after_handoff(self):
         from skills.crypto.common import read_second_pocket_legs, upsert_second_pocket_leg

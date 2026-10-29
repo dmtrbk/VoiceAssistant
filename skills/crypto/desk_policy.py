@@ -127,10 +127,10 @@ PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 2.5
 PROBE_CANDLE_HOLD_SEC = 5
 # Чуть шире: за 5с альт легко +0.5%, иначе снимаем до buy (INIT).
 PROBE_CANDLE_CHASE_PCT = 0.8
-# Свежий день, не топ gainers: +35% MPLX/GROVE/DIAM = покупка у пика.
-PROBE_CANDLE_MAX_DAY_PCT = 12.0
-# Не брать candle у хая суток — нужен запас хода, не 2.5пп до high24h.
-PROBE_CANDLE_MIN_DAY_ROOM_PCT = 6.0
+# День может быть горячим, но не у хая суток (room). +35% у пика — нет; +18% с room — да.
+PROBE_CANDLE_MAX_DAY_PCT = 25.0
+# Не брать candle у хая суток — нужен запас хода.
+PROBE_CANDLE_MIN_DAY_ROOM_PCT = 8.0
 PROBE_SPRINT_HOLD_SEC = 30
 PROBE_SPRINT_CHASE_PCT = 5.0
 PROBE_IMPULSE_HOLD_SEC = 8
@@ -140,25 +140,25 @@ PROBE_IMPULSE_VOL_MULT = 2.5
 PROBE_IMPULSE_BREAK_MIN_PCT = 3.0
 PROBE_IMPULSE_BREAK_MAX_PCT = 15.0
 PROBE_IMPULSE_MAX_DAY_PCT = 25.0
-# Grind без дневного потолка ловит уже разогнанные тикеры у хая суток.
-PROBE_GRIND_MAX_DAY_PCT = 20.0
+# Grind: горячее candle нельзя; у хая дня (+25%) — уже догон.
+PROBE_GRIND_MAX_DAY_PCT = 18.0
 # Лестница: ближе к началу хода, не только у самого хая. Свежий пробой +4% — не grind.
 PROBE_GRIND_BARS = 16
 PROBE_GRIND_NEAR_HIGH = 0.97
 PROBE_GRIND_MIN_RISE_PCT = 3.0
 # Окно 4ч уже уехало сильнее — это не свежая лестница, а догон хая.
-PROBE_GRIND_MAX_RISE_PCT = 15.0
-PROBE_GRIND_MAX_EXT_PCT = 6.0
+PROBE_GRIND_MAX_RISE_PCT = 10.0
+PROBE_GRIND_MAX_EXT_PCT = 4.0
 PROBE_GRIND_MAX_BAR_PCT = 8.0
 # Живая свеча — не вертикальный выстрел и не покупка у её хая.
-PROBE_GRIND_MAX_LIVE_BAR_PCT = 2.0
+PROBE_GRIND_MAX_LIVE_BAR_PCT = 1.5
 # Абсолютный откат от high + не в верхней доле диапазона свечи.
-PROBE_GRIND_TIP_GAP_PCT = 0.8
-PROBE_GRIND_TIP_FRAC = 0.40
+PROBE_GRIND_TIP_GAP_PCT = 1.2
+PROBE_GRIND_TIP_FRAC = 0.45
 PROBE_GRIND_FLOOR_BARS = 4
 PROBE_GRIND_HOLD_SEC = 10
 # После взвода почти не догоняем — иначе берём пик той же свечи.
-PROBE_GRIND_CHASE_PCT = 0.8
+PROBE_GRIND_CHASE_PCT = 0.5
 # Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
 TAKE_PROFIT_DAY_PCT = 18.0
 TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем на подъёме
@@ -939,6 +939,10 @@ def probe_exit_reason(
         scratch = float(arm_px or 0) or ent
         if scratch > 0 and px <= scratch:
             return "ожидание"
+    # candle/grind: купить рост → ждать ловушку → продать. Soft «тренд» не режем
+    # (BLEND: −0.3% bear → handoff → потом +20%). Только полка / стоп / вершина.
+    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_GRIND}:
+        return None
     if run and trend15 == "bear":
         return "тренд"
     if not run and gain <= 0 and trend15 != "bull":
