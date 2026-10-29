@@ -377,6 +377,34 @@ def recently_sold(
     return out
 
 
+def last_sell_price(
+    ticker: str,
+    trades: list[dict[str, Any]] | None = None,
+) -> float | None:
+    """Цена последней продажи тикера (для breakout-reentry)."""
+    name = str(ticker or "").upper()
+    if not name:
+        return None
+    rows = trades if trades is not None else _read_trades()
+    best_epoch = -1.0
+    price: float | None = None
+    for entry in rows:
+        if str(entry.get("side") or "").lower() != "sell":
+            continue
+        if str(entry.get("ticker") or "").upper() != name:
+            continue
+        epoch = _entry_epoch(entry)
+        if epoch is None:
+            continue
+        px = float(entry.get("price") or 0)
+        if px <= 0:
+            continue
+        if epoch >= best_epoch:
+            best_epoch = epoch
+            price = px
+    return price
+
+
 def trades_on_msk_day(
     day: datetime | None = None,
     trades: list[dict[str, Any]] | None = None,

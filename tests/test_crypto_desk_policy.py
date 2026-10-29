@@ -695,6 +695,15 @@ class TestDeskPolicy(unittest.TestCase):
         assert candle_pick is not None
         self.assertEqual(candle_pick["algo"], policy.PROBE_ALGO_CANDLE)
         self.assertEqual(candle_pick["hold_sec"], policy.PROBE_CANDLE_HOLD_SEC)
+        self.assertLessEqual(policy.PROBE_CANDLE_HOLD_SEC, 2)
+        # buy_ok терпит уехавший хай; live_ok на mid-bar строже.
+        self.assertTrue(
+            policy.probe_candle_buy_ok(1.008, 1.02, 0.999, 1.0)
+        )
+        self.assertFalse(
+            policy.probe_candle_buy_ok(1.019, 1.02, 0.999, 1.0)
+        )
+        self.assertNotIn(policy.PROBE_ALGO_GRIND, policy.PROBE_ALGO_ORDER)
         # Свежий день + room — да; +18% с room — да; +35% — нет; мало room — нет.
         fresh = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],

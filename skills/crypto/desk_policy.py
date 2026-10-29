@@ -99,11 +99,14 @@ PROBE_SCAN_CLASSIC_LIMIT = 16
 PROBE_PERIOD_SEC = 20
 PROBE_ARMED_PERIOD_SEC = 6
 # После любой продажи щуп не возвращается в ту же монету сразу (KAS: вершина → тот же grind).
-PROBE_REENTRY_HOURS = 2.0
+# Короткий блок: иначе BLEND слили и 2ч не вернулись в памп.
+PROBE_REENTRY_HOURS = 0.75
+# Если цена уже выше продажи на этот % — блок снимаем (продолжение хода).
+PROBE_REENTRY_BREAKOUT_PCT = 2.5
 PROBE_EMA_FAST = 20
 PROBE_EMA_SLOW = 50
 PROBE_SHELF_BARS = 96
-# Сначала ловим живую свечу, потом импульс/лестницу/полку.
+# Сначала живая свеча. Grind сегодня жёг деньги у хая — вне порядка.
 PROBE_ALGO_CANDLE = "candle"
 PROBE_ALGO_IMPULSE = "impulse"
 PROBE_ALGO_GRIND = "grind"
@@ -112,7 +115,6 @@ PROBE_ALGO_SHELF = "shelf"
 PROBE_ALGO_ORDER = (
     PROBE_ALGO_CANDLE,
     PROBE_ALGO_IMPULSE,
-    PROBE_ALGO_GRIND,
     PROBE_ALGO_SPRINT,
     PROBE_ALGO_SHELF,
 )
@@ -124,9 +126,9 @@ PROBE_CANDLE_MAX_BAR_POS = 0.55
 PROBE_CANDLE_TIP_GAP_PCT = 0.35
 PROBE_CANDLE_VOL_MULT = 1.5
 PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 2.5
-PROBE_CANDLE_HOLD_SEC = 5
-# Чуть шире: за 5с альт легко +0.5%, иначе снимаем до buy (INIT).
-PROBE_CANDLE_CHASE_PCT = 0.8
+# 5с hold = CPOOL вечный tip-drop: хай уезжает, bar_pos убивает buy.
+PROBE_CANDLE_HOLD_SEC = 1
+PROBE_CANDLE_CHASE_PCT = 1.2
 # День может быть горячим, но не у хая суток (room). +35% у пика — нет; +18% с room — да.
 PROBE_CANDLE_MAX_DAY_PCT = 25.0
 # Не брать candle у хая суток — нужен запас хода.
@@ -550,6 +552,28 @@ def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_o
         return False
     span = hi - lo
     if span > 1e-12 and (px - lo) / span > PROBE_CANDLE_MAX_BAR_POS + 1e-12:
+        return False
+    return True
+
+
+def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
+    """Перед buy после arm: над open и не вплотную к хаю.
+
+    bar_pos не режем — за hold хай свечи часто уезжает вверх (CPOOL tip-loop).
+    """
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    op = float(live_open or 0)
+    _ = live_low
+    if px <= 0 or hi <= 0 or op <= 0:
+        return False
+    if px <= op + 1e-12:
+        return False
+    body = (px / op - 1.0) * 100.0
+    if body > PROBE_CANDLE_MAX_BODY_PCT * 1.5 + 1e-12:
+        return False
+    tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
+    if px > tip_cap + 1e-12:
         return False
     return True
 

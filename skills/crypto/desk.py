@@ -74,13 +74,14 @@ from .desk_policy import (
     probe_algo_params,
     probe_arm_action,
     probe_exit_reason,
-    probe_candle_live_ok,
+    probe_candle_buy_ok,
     probe_grind_live_ok,
     probe_should_handoff,
     PROBE_ALGO_CANDLE,
     PROBE_ALGO_GRIND,
     PROBE_MAX_LEGS,
     PROBE_REENTRY_HOURS,
+    PROBE_REENTRY_BREAKOUT_PCT,
     pocket_from_probe_max,
     probe_pick_setup,
     probe_quote,
@@ -2080,8 +2081,23 @@ class CryptoDeskMixin:
         blocked |= {str(ticker).upper() for ticker in alloc}
         # Убыточный выход (MEGA/HAEDAL) — не сразу обратно в ту же монету.
         blocked |= set(crypto_journal.cooldown_tickers(cfg().cooldown_hours))
-        # Плюсовой выход по вершине тоже: иначе KAS sell→buy за те же секунды.
-        blocked |= set(crypto_journal.recently_sold(PROBE_REENTRY_HOURS))
+        # Недавняя продажа — блок; если цена уже выше продажи — продолжение хода, пускаем.
+        recent = set(crypto_journal.recently_sold(PROBE_REENTRY_HOURS))
+        if recent:
+            try:
+                tape = {str(r.get("ticker") or "").upper(): r for r in self._tape()}
+            except Exception:
+                tape = {}
+            for ticker in list(recent):
+                sell_px = crypto_journal.last_sell_price(ticker)
+                live = float((tape.get(ticker) or {}).get("price") or 0)
+                if (
+                    sell_px
+                    and live > 0
+                    and live >= sell_px * (1.0 + PROBE_REENTRY_BREAKOUT_PCT / 100.0)
+                ):
+                    recent.discard(ticker)
+            blocked |= recent
         try:
             _cash, positions = self._wallet()
         except Exception as exc:
@@ -2319,7 +2335,7 @@ class CryptoDeskMixin:
                 )
                 return
         if str(algo or "") == PROBE_ALGO_CANDLE:
-            # Для candle нужен актуальный 5м бар с open — 15м тренд уже в bars.
+            # Актуальных 5м: buy_ok мягче live_ok — иначе hold убивает вход (CPOOL).
             try:
                 bars5 = self._probe_bars(ticker, "5", 20)
             except Exception as exc:
@@ -2327,7 +2343,7 @@ class CryptoDeskMixin:
                 write_probe(drop_arm=ticker)
                 return
             live = bars5[-1] if bars5 else {}
-            if not probe_candle_live_ok(
+            if not probe_candle_buy_ok(
                 price,
                 float(live.get("high") or 0),
                 float(live.get("low") or 0),
