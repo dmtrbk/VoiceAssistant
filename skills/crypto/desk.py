@@ -125,6 +125,7 @@ from .desk_policy import (
     watch_snapshot_line,
     watch_stream_tickers,
     WATCH_PERIOD_CALM,
+    WATCH_PERIOD_HOT,
     WATCH_PERIOD_NEAR,
 )
 from . import journal as crypto_journal
@@ -1546,6 +1547,7 @@ class CryptoDeskMixin:
             bands = bands_for(ticker)
             ma = float(bands["ma"]) if bands and bands.get("ma") else None
             exit_high = float((read_sleeve_exits().get(ticker) or {}).get("high") or 0)
+            held_qty = float(pos.get("qty") or 0)
             if price > 0 and book > 0:
                 legs.append({
                     "ticker": ticker,
@@ -1554,7 +1556,7 @@ class CryptoDeskMixin:
                     "ma": ma,
                     "kind": "alt",
                     "exit_high": exit_high,
-                    "qty": qty,
+                    "qty": held_qty,
                 })
                 snap.append(
                     watch_snapshot_line(
@@ -1565,7 +1567,7 @@ class CryptoDeskMixin:
                         kind="alt",
                         exit_high=exit_high,
                         basis=basis,
-                        qty=qty,
+                        qty=held_qty,
                     )
                 )
         dip = read_btc_dip()
@@ -2614,8 +2616,12 @@ class CryptoDeskMixin:
             period = float(getattr(self, "_watch_period_sec", _WATCH_PERIOD_SEC) or _WATCH_PERIOD_SEC)
             if next_desk <= 0:
                 next_desk = next_desk_at(read_alloc_state(), now)
-                next_watch = next_watch_at(period, now)
+                # Взведённая вершина/карман2 — сразу дозор, не ждать сетку 12м (ENA «ниже плюса»).
+                pending_tip = bool(read_sleeve_exits()) or bool(read_second_pocket_legs())
+                next_watch = now if pending_tip else next_watch_at(period, now)
                 next_probe = now
+                if pending_tip:
+                    self._set_watch_tempo(WATCH_PERIOD_HOT)
             wake_at = min(next_desk, next_watch, next_probe)
             tape = getattr(self, "_bybit_tape", None)
             while time.time() < wake_at:

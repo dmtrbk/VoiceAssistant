@@ -1316,7 +1316,12 @@ def alt_exit_ready(
     now: float | None = None,
     qty: float = 0.0,
 ) -> bool:
-    """Продажа рукава: −0,5% от вершины, вершина 2 минуты не обновлялась, плюс ещё ≥ комиссия+$0.50."""
+    """Продажа рукава: −0,5% от вершины после паузы.
+
+    В плюсе — как ловушка (нужен ещё ≥ комиссия+$0.50).
+    Под входом после взведённой вершины — тоже выход: иначе ENA часами
+    «ниже плюса» и течёт до стопа −4%.
+    """
     limits = cfg()
     if not state or not _bounce_held(state, now, limits.sleeve_exit_hold_sec):
         return False
@@ -1328,7 +1333,9 @@ def alt_exit_ready(
     if px > high * (1.0 - limits.sleeve_exit_pullback_pct / 100.0) + 1e-12:
         return False
     gain = (px / ent - 1.0) * 100.0
-    return gain >= exit_trap_arm_pct(entry=ent, qty=qty) - 1e-6
+    if gain >= exit_trap_arm_pct(entry=ent, qty=qty) - 1e-6:
+        return True
+    return px <= ent + 1e-12
 
 
 def alt_exit_reason(

@@ -250,6 +250,22 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             "вершина",
         )
+        # ENA: ловушка была, откат есть, уже под входом — не ждать стоп −4%.
+        self.assertTrue(
+            policy.alt_exit_ready(
+                higher, price=99.5, entry=100.0, now=20.0 + policy.ALT_EXIT_HOLD_SEC, qty=1.0
+            )
+        )
+        self.assertEqual(
+            policy.alt_exit_reason(
+                price=99.5,
+                entry=100.0,
+                exit_arm=higher,
+                now=20.0 + policy.ALT_EXIT_HOLD_SEC,
+                qty=1.0,
+            ),
+            "вершина",
+        )
         self.assertEqual(policy.position_basis(2.0, None), 2.0)
         self.assertEqual(policy.position_basis(2.0, 1.9), 1.9)
         line = policy.watch_snapshot_line("XRP", price=1.85, entry=2.0, kind="alt", basis=1.9)
