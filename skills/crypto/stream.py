@@ -172,6 +172,7 @@ class BybitPublicTape:
                 fired = bool(prev.get("fired"))
                 high_ts = float(spec.get("ts") or time.time())
                 hold = float(spec.get("hold") or 0)
+                deep_pullback = float(spec.get("deep_pullback") or 0)
                 if prev_high > high:
                     high = prev_high
                     high_ts = float(prev.get("high_ts") or high_ts)
@@ -182,6 +183,7 @@ class BybitPublicTape:
                 fresh[name] = {
                     "high": high,
                     "pullback": pullback,
+                    "deep_pullback": deep_pullback,
                     "fired": fired,
                     "high_ts": high_ts,
                     "hold": hold,
@@ -342,10 +344,12 @@ class BybitPublicTape:
             arm["fired"] = False
             return set()
         pullback = float(arm.get("pullback") or 0)
+        deep_pullback = float(arm.get("deep_pullback") or 0)
         hold = float(arm.get("hold") or 0)
         if arm.get("fired") or pullback <= 0:
             return set()
-        if hold > 0 and time.time() - float(arm.get("high_ts") or 0) < hold:
+        deep_hit = deep_pullback > 0 and price <= high * (1.0 - deep_pullback / 100.0) + 1e-12
+        if not deep_hit and hold > 0 and time.time() - float(arm.get("high_ts") or 0) < hold:
             return set()
         if price <= high * (1.0 - pullback / 100.0) + 1e-12:
             arm["fired"] = True

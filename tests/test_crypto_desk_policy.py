@@ -1231,11 +1231,15 @@ class TestDeskPolicy(unittest.TestCase):
             policy.btc_dip_exit_reason(price=need, entry=100.0, exit_arm=held, now=20.0 + policy.POCKET_EXIT_HOLD_SEC),
             "вершина",
         )
-        # Откат выше входа — hold обязателен; под водой — сразу (GROVE handoff).
+        # Откат выше входа (<1% от пика) — hold обязателен; глубокий откат ≥1% или под водой — сразу.
         still_green = 101.1 * (1.0 - policy.POCKET_EXIT_PULLBACK_PCT / 100.0)
         self.assertGreater(still_green, 100.0)
         self.assertFalse(
             policy.pocket_exit_ready(armed, price=still_green, now=10.0 + 30.0, entry=100.0)
+        )
+        deep_drop = 101.1 * (1.0 - policy.POCKET_EXIT_DEEP_PULLBACK_PCT / 100.0)
+        self.assertTrue(
+            policy.pocket_exit_ready(armed, price=deep_drop, now=10.0 + 15.0, entry=100.0)
         )
         self.assertTrue(
             policy.pocket_exit_ready(armed, price=99.5, now=10.0 + 30.0, entry=100.0)

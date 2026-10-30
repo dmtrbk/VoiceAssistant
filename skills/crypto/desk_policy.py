@@ -197,7 +197,8 @@ SUI_DIP_TICKER = "AVA"
 SUI_DIP_USD = 50.0
 # Плюс (комиссия×2 + $0.50) взводит вершину. Продажа — откат от неё, пауза короче входа.
 POCKET_EXIT_PULLBACK_PCT = 0.5
-POCKET_EXIT_HOLD_SEC = 5 * 60
+POCKET_EXIT_DEEP_PULLBACK_PCT = 1.0
+POCKET_EXIT_HOLD_SEC = 60
 BTC_DIP_STOP_PCT = 15.0
 WATCH_MAX_TRADES_PER_HOUR = 2
 WATCH_PERIOD_CALM = 12 * 60
@@ -1413,9 +1414,11 @@ def pocket_exit_ready(
     now: float | None = None,
     entry: float = 0.0,
 ) -> bool:
-    """Продажа кармана: −0,5% от вершины, и эта вершина уже 5 минут не обновлялась.
+    """Продажа кармана: −0,5% от вершины и пауза hold (60с).
 
-    Если откат уже есть и цена ≤ входа — hold не ждём: иначе течём под водой (GROVE).
+    Без ожидания таймера режем сразу, если:
+    - цена откатила ≥ 1.0% от вершины (POCKET_EXIT_DEEP_PULLBACK_PCT);
+    - или цена вернулась ≤ точки входа (не течём под водой).
     """
     limits = cfg()
     if not state:
@@ -1428,6 +1431,8 @@ def pocket_exit_ready(
         return False
     ent = float(entry or 0)
     if ent > 0 and px <= ent + 1e-12:
+        return True
+    if px <= high * (1.0 - POCKET_EXIT_DEEP_PULLBACK_PCT / 100.0) + 1e-12:
         return True
     return _bounce_held(state, now, limits.pocket_exit_hold_sec)
 

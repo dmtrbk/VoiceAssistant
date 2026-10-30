@@ -47,6 +47,7 @@ from .desk_policy import (
     SLEEVE_SKIP,
     _leveraged_base,
     BTC_DIP_TICKER,
+    POCKET_EXIT_DEEP_PULLBACK_PCT,
     btc_dip_quote,
     probe_algo_params,
     probe_arm_action,
@@ -371,6 +372,7 @@ class CryptoDeskMixin:
             exits[BTC_DIP_TICKER] = {
                 "high": exit_high,
                 "pullback": cfg().pocket_exit_pullback_pct,
+                "deep_pullback": POCKET_EXIT_DEEP_PULLBACK_PCT,
                 "hold": float(cfg().pocket_exit_hold_sec),
                 "ts": float(dip.get("exit_ts") or 0),
             }
@@ -383,6 +385,7 @@ class CryptoDeskMixin:
             row = {
                 "high": high,
                 "pullback": cfg().pocket_exit_pullback_pct,
+                "deep_pullback": POCKET_EXIT_DEEP_PULLBACK_PCT,
                 "hold": float(cfg().pocket_exit_hold_sec),
                 "ts": float(pocket_leg.get("exit_ts") or 0),
             }
