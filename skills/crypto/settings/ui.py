@@ -67,22 +67,20 @@ class AllocBar(QWidget):
         super().__init__(parent)
         self.setFixedHeight(10)
         self._pocket = 25.0
-        self._sleeve = 50.0
         self._probe_on = True
 
-    def set_shares(self, pocket: float, sleeve: float, probe_on: bool) -> None:
+    def set_shares(self, pocket: float, probe_on: bool) -> None:
         self._pocket = max(0.0, float(pocket))
-        self._sleeve = max(0.0, float(sleeve))
         self._probe_on = bool(probe_on)
         self.setToolTip(self._label())
         self.update()
 
     def _label(self) -> str:
-        cash = max(0.0, 100.0 - self._pocket - self._sleeve)
-        text = f"Карман {self._pocket:.0f}%, рукав {self._sleeve:.0f}%, кэш {cash:.0f}%"
+        cash = max(0.0, 100.0 - self._pocket)
+        text = f"Карман SOL до {self._pocket:.0f}% счёта, остальное кэш и щупы"
         if self._probe_on:
-            return text + ", щуп"
-        return text
+            return text
+        return text + " (щуп выкл)"
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -91,13 +89,12 @@ class AllocBar(QWidget):
         gap = 3
         height = self.height()
         width = self.width()
-        cash = max(0.0, 100.0 - self._pocket - self._sleeve)
+        cash = max(0.0, 100.0 - self._pocket)
         parts = [("pocket", self._pocket, QColor(palette.accent))]
-        parts.append(("sleeve", self._sleeve, QColor(palette.off_track)))
         if cash > 0.5:
             parts.append(("cash", cash, QColor(palette.divider)))
         if self._probe_on:
-            parts.append(("probe", 6.0, QColor(palette.accent)))
+            parts.append(("probe", 6.0, QColor(palette.off_track)))
         total = sum(share for _name, share, _color in parts) or 1.0
         gaps = gap * (len(parts) - 1)
         usable = max(0, width - gaps)
@@ -114,7 +111,7 @@ class AllocBar(QWidget):
 
 
 class DeskSettingsWindow(QWidget):
-    """Пороги кармана, рукава и щупа. Пишется сразу, стол не перезапускается."""
+    """Пороги кармана и щупа. Пишется сразу, стол не перезапускается."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,8 +125,8 @@ class DeskSettingsWindow(QWidget):
         self._spins: dict[str, QAbstractSpinBox] = {}
         self._hints: dict[str, str] = {}
         self._probe_box: ToggleSwitch | None = None
+        self._pocket_box: ToggleSwitch | None = None
         self._second_box: ToggleSwitch | None = None
-        self._sleeve_box: ToggleSwitch | None = None
         self._second_combo = None
         self._syncing = False
         self._apply_theme()
@@ -157,14 +154,11 @@ class DeskSettingsWindow(QWidget):
         legend.setContentsMargins(0, 0, 0, 0)
         legend.setSpacing(16)
         self._pocket_legend = QLabel()
-        self._sleeve_legend = QLabel()
         self._probe_legend = QLabel()
         self._pocket_legend.setTextFormat(Qt.TextFormat.RichText)
-        self._sleeve_legend.setTextFormat(Qt.TextFormat.RichText)
         self._probe_legend.setTextFormat(Qt.TextFormat.RichText)
         self._probe_legend.setObjectName("chip")
         legend.addWidget(self._pocket_legend)
-        legend.addWidget(self._sleeve_legend)
         legend.addStretch(1)
         legend.addWidget(self._probe_legend)
         alloc.addLayout(legend)
@@ -185,7 +179,6 @@ class DeskSettingsWindow(QWidget):
         cards.setContentsMargins(0, 6, 0, 0)
         cards.setSpacing(10)
         cards.addWidget(self._pocket_card(), 1)
-        cards.addWidget(self._sleeve_card(), 1)
         cards.addWidget(self._probe_card(), 1)
         root.addLayout(cards)
 
@@ -256,6 +249,8 @@ QSpinBox, QDoubleSpinBox {{
         data = current()
         self._syncing = True
         try:
+            if self._pocket_box is not None:
+                self._pocket_box.setChecked(data.pocket_on)
             self._set_spin("pocket_pct", data.pocket_pct)
             self._set_spin("pocket_day_pct", data.pocket_day_pct)
             self._set_spin("pocket_bounce_pct", data.pocket_bounce_pct)
@@ -263,16 +258,6 @@ QSpinBox, QDoubleSpinBox {{
             self._set_spin("pocket_from_probe_max", data.pocket_from_probe_max)
             if self._second_box is not None:
                 self._second_box.setChecked(data.second_on)
-            if self._sleeve_box is not None:
-                self._sleeve_box.setChecked(data.sleeve_on)
-            self._set_spin("sleeve_max_pct", data.sleeve_max_pct)
-            self._set_spin("sleeve_max_names", data.sleeve_max_names)
-            self._set_spin("sleeve_entry_z", data.sleeve_entry_z)
-            self._set_spin("sleeve_bounce_pct", data.sleeve_bounce_pct)
-            self._set_spin("sleeve_chase_pct", data.sleeve_chase_pct)
-            self._set_spin("sleeve_stop_pct", data.sleeve_stop_pct)
-            self._set_spin("sleeve_hold_min", data.sleeve_hold_sec / 60.0)
-            self._set_spin("sleeve_exit_hold_min", data.sleeve_exit_hold_sec / 60.0)
             self._set_spin("probe_usd", data.probe_usd)
             self._set_spin("probe_max_loss_pct", data.probe_max_loss_pct)
             self._set_spin("probe_shelf_range_pct", data.probe_shelf_range_pct)
@@ -280,9 +265,6 @@ QSpinBox, QDoubleSpinBox {{
             self._set_spin("probe_break_max_pct", data.probe_break_max_pct)
             self._set_spin("pocket_hold_min", data.pocket_hold_sec / 60.0)
             self._set_spin("pocket_exit_pullback_pct", data.pocket_exit_pullback_pct)
-            self._set_spin("sleeve_exit_arm_pct", data.sleeve_exit_arm_pct)
-            self._set_spin("sleeve_cancel_z", data.sleeve_cancel_z)
-            self._set_spin("rebalance_pct", data.rebalance_pct)
             self._set_spin("cooldown_hours", data.cooldown_hours)
             if self._probe_box is not None:
                 self._probe_box.setChecked(data.probe_on)
@@ -290,18 +272,13 @@ QSpinBox, QDoubleSpinBox {{
             self._syncing = False
         self._refresh_alloc(data)
         self._set_probe_enabled(data.probe_on)
-        self._set_sleeve_enabled(data.sleeve_on)
+        self._set_pocket_enabled(data.pocket_on)
         self._status.setText(status_line())
-        self._hint.setText("Пока кармана нет, эти деньги не отдаём рукаву.")
+        self._hint.setText("Карман SOL — доля счёта. Щуп — фикс. $ на свечу.")
 
     def _refresh_alloc(self, data: DeskSettings) -> None:
-        sleeve_share = data.sleeve_max_pct if data.sleeve_on else 0.0
-        self._bar.set_shares(data.pocket_pct, sleeve_share, data.probe_on)
+        self._bar.set_shares(data.pocket_pct, data.probe_on)
         self._pocket_legend.setText(f"Карман <b>{data.pocket_pct:.0f}%</b>")
-        if data.sleeve_on:
-            self._sleeve_legend.setText(f"Рукав <b>{data.sleeve_max_pct:.0f}%</b>")
-        else:
-            self._sleeve_legend.setText("Рукав <b>выкл</b>")
         self._probe_legend.setText(f"Щуп <b>${data.probe_usd:.0f}</b>")
         self._probe_legend.setVisible(data.probe_on)
 
@@ -331,14 +308,28 @@ QSpinBox, QDoubleSpinBox {{
         return card, col
 
     def _pocket_card(self) -> QFrame:
-        card, col = self._card("Карман", "Просадка SOL, резерв счёта")
-        self._add_spin(col, "pocket_pct", "Доля", "%", 8, 50, 1, 0, "Пока кармана нет, эти деньги не отдаём рукаву.")
+        card, col = self._card("Карман SOL", "Откат и доля счёта; карман 2 — ноги с щупа")
+        top = card.layout()
+        assert isinstance(top, QVBoxLayout)
+        heading = top.itemAt(0).widget()
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        if heading is not None:
+            top.removeWidget(heading)
+            row.addWidget(heading, 1)
+        box = ToggleSwitch()
+        box.setChecked(False)
+        box.toggled.connect(self._on_pocket_toggled)
+        self._pocket_box = box
+        row.addWidget(box, 0)
+        top.insertLayout(0, row)
+        self._add_spin(col, "pocket_pct", "Доля", "%", 8, 50, 1, 0, "Максимум счёта на карман SOL (пока позиция открыта).")
         self._add_spin(col, "pocket_day_pct", "Просадка дня", "%", -15, -1, 0.5, 1, "Старый порог суток. Вход кармана сейчас — откат 3% от верха 4 часов.")
         self._add_spin(col, "pocket_bounce_pct", "Отскок входа", "%", 0.3, 5, 0.1, 1, "+1% от локального дна. Покупка после закрытия следующей 15м выше этого дна.")
         self._add_spin(col, "pocket_stop_pct", "Стоп", "%", 5, 30, 1, 0, "Запасной стоп на дыре. Обычный срыв кармана — возврат под локальное дно.")
         switch = QHBoxLayout()
         switch.setContentsMargins(0, 8, 0, 0)
-        name = QLabel("Второй карман")
+        name = QLabel("Карман 2 с щупа")
         name.setObjectName("rowTitle")
         box = ToggleSwitch()
         box.setChecked(False)
@@ -362,34 +353,8 @@ QSpinBox, QDoubleSpinBox {{
         col.addStretch(1)
         return card
 
-    def _sleeve_card(self) -> QFrame:
-        card, col = self._card("Рукав", "Нижняя полоса 4ч, равные слоты")
-        top = card.layout()
-        assert isinstance(top, QVBoxLayout)
-        heading = top.itemAt(0).widget()
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        if heading is not None:
-            top.removeWidget(heading)
-            row.addWidget(heading, 1)
-        box = ToggleSwitch()
-        box.setChecked(True)
-        box.toggled.connect(self._on_sleeve_toggled)
-        self._sleeve_box = box
-        row.addWidget(box, 0)
-        top.insertLayout(0, row)
-        self._add_spin(col, "sleeve_max_pct", "Потолок", "%", 20, 92, 1, 0, "Доля счёта на альты. Карман отдельно, остаток — кэш и щупы.")
-        self._add_spin(col, "sleeve_max_names", "Слоты", "", 1, 6, 1, 0, "Не больше стольких ног сразу. Чёрный список занимает слот, пока нога жива.")
-        self._add_spin(col, "sleeve_entry_z", "Вход, z", "", -4, -1, 0.1, 1, "Покупка у нижней полосы, когда z не выше этого порога.")
-        self._add_spin(col, "sleeve_bounce_pct", "Отскок входа", "%", 0.3, 5, 0.1, 1, "Отскок от дна. Без ожидания закрытой свечи.")
-        self._add_spin(col, "sleeve_hold_min", "Пауза дна", "мин", 2, 40, 1, 0, "Сколько минут дно рукава должно держаться перед покупкой.")
-        self._add_spin(col, "sleeve_chase_pct", "Потолок догона", "%", 2, 15, 0.5, 1, "Выше этого % от дна сетап сбрасываем — не догоняем памп.")
-        self._add_spin(col, "sleeve_stop_pct", "Стоп", "%", 2, 20, 0.5, 1, "Запасной стоп на дыре. Обычный срыв рукава — возврат под дно входа.")
-        col.addStretch(1)
-        return card
-
     def _probe_card(self) -> QFrame:
-        card, col = self._card("Щуп", "Пробой полки суток или локальный подскок 2ч, не слот рукава")
+        card, col = self._card("Щуп", "5м зелёная свеча в начале хода — основной инструмент стола")
         top = card.layout()
         assert isinstance(top, QVBoxLayout)
         heading = top.itemAt(0).widget()
@@ -439,11 +404,7 @@ QSpinBox, QDoubleSpinBox {{
         col.setSpacing(0)
         self._add_spin(col, "pocket_hold_min", "Карман, пауза входа", "мин", 2, 40, 1, 0, "Сколько минут дно кармана должно держаться перед покупкой.")
         self._add_spin(col, "pocket_exit_pullback_pct", "Карман, откат выхода", "%", 0.2, 3, 0.1, 1, "Продажа кармана: откат от вершины после короткой паузы.")
-        self._add_spin(col, "sleeve_exit_arm_pct", "Рукав, трейл", "%", 1, 10, 0.5, 1, "Плюс от входа, который взводит вершину рукава.")
-        self._add_spin(col, "sleeve_exit_hold_min", "Рукав, пауза вершины", "мин", 1, 30, 1, 0, "Сколько минут вершина должна стоять перед продажей на откате.")
-        self._add_spin(col, "sleeve_cancel_z", "Рукав, z отмены", "", -2, 0, 0.1, 1, "Если z уже у средней, сетап входа сбрасывается.")
-        self._add_spin(col, "rebalance_pct", "Коридор ребаланса", "%", 2, 15, 0.5, 1, "Внутри коридора стол ногу рукава не трогает.")
-        self._add_spin(col, "cooldown_hours", "Кулдаун", "ч", 1, 48, 1, 0, "После оборота монету не крутим снова сразу.")
+        self._add_spin(col, "cooldown_hours", "Кулдаун щупа", "ч", 1, 48, 1, 0, "После убыточной продажи щуп не возвращается в ту же монету сразу.")
         return box
 
     def _last_row_is_field(self, parent: QVBoxLayout) -> bool:
@@ -525,24 +486,44 @@ QSpinBox, QDoubleSpinBox {{
         value = float(spin.value())
         if key == "pocket_hold_min":
             update(pocket_hold_sec=value * 60.0)
-        elif key == "sleeve_hold_min":
-            update(sleeve_hold_sec=value * 60.0)
-        elif key == "sleeve_exit_hold_min":
-            update(sleeve_exit_hold_sec=value * 60.0)
         else:
             update(**{key: value})
         data = current()
         self._syncing = True
         try:
             self._set_spin("pocket_pct", data.pocket_pct)
-            self._set_spin("sleeve_max_pct", data.sleeve_max_pct)
-            self._set_spin("sleeve_bounce_pct", data.sleeve_bounce_pct)
-            self._set_spin("sleeve_chase_pct", data.sleeve_chase_pct)
             self._set_spin("probe_break_min_pct", data.probe_break_min_pct)
             self._set_spin("probe_break_max_pct", data.probe_break_max_pct)
         finally:
             self._syncing = False
         self._refresh_alloc(data)
+
+    def _on_pocket_toggled(self, checked: bool) -> None:
+        if self._syncing:
+            return
+        update(pocket_on=checked)
+        data = current()
+        self._set_pocket_enabled(data.pocket_on)
+        self._refresh_alloc(data)
+        self._status.setText(status_line())
+        self._hint.setText(
+            "Карман SOL ищет откат."
+            if checked
+            else "SOL выключен — только выход по открытой ноге, новых входов нет."
+        )
+
+    def _set_pocket_enabled(self, on: bool) -> None:
+        for key in (
+            "pocket_pct",
+            "pocket_day_pct",
+            "pocket_bounce_pct",
+            "pocket_stop_pct",
+            "pocket_hold_min",
+            "pocket_exit_pullback_pct",
+        ):
+            spin = self._spins.get(key)
+            if spin is not None:
+                spin.setEnabled(on)
 
     def _on_second_toggled(self, checked: bool) -> None:
         if self._syncing:
@@ -563,7 +544,7 @@ QSpinBox, QDoubleSpinBox {{
         if read_second_pocket_legs():
             return
         arms = read_entry_arms()
-        write_entry_arms(arms["alts"], arms.get("pocket"), sui=False)
+        write_entry_arms({}, arms.get("pocket"), sui=False)
 
     def _on_probe_toggled(self, checked: bool) -> None:
         if self._syncing:
@@ -573,29 +554,7 @@ QSpinBox, QDoubleSpinBox {{
         self._set_probe_enabled(data.probe_on)
         self._refresh_alloc(data)
         self._status.setText(status_line())
-        self._hint.setText("Щуп сканирует полки." if data.probe_on else "Щуп выключен. Стол его не сканирует.")
-
-    def _on_sleeve_toggled(self, checked: bool) -> None:
-        if self._syncing:
-            return
-        update(sleeve_on=checked)
-        if not checked:
-            self._clear_sleeve_arms()
-        data = current()
-        self._set_sleeve_enabled(data.sleeve_on)
-        self._refresh_alloc(data)
-        self._status.setText(status_line())
-        self._hint.setText(
-            "Рукав ищет отскок от нижней полосы."
-            if data.sleeve_on
-            else "Рукав выключен. Новые альты не беру, открытые ещё веду."
-        )
-
-    def _clear_sleeve_arms(self) -> None:
-        from skills.crypto.common import read_entry_arms, write_entry_arms
-
-        arms = read_entry_arms()
-        write_entry_arms({}, arms.get("pocket"))
+        self._hint.setText("Щуп сканирует ленту." if data.probe_on else "Щуп выключен.")
 
     def _set_probe_enabled(self, on: bool) -> None:
         for key in (
@@ -604,23 +563,6 @@ QSpinBox, QDoubleSpinBox {{
             "probe_shelf_range_pct",
             "probe_break_min_pct",
             "probe_break_max_pct",
-        ):
-            spin = self._spins.get(key)
-            if spin is not None:
-                spin.setEnabled(on)
-
-    def _set_sleeve_enabled(self, on: bool) -> None:
-        for key in (
-            "sleeve_max_pct",
-            "sleeve_max_names",
-            "sleeve_entry_z",
-            "sleeve_bounce_pct",
-            "sleeve_hold_min",
-            "sleeve_chase_pct",
-            "sleeve_stop_pct",
-            "sleeve_exit_arm_pct",
-            "sleeve_exit_hold_min",
-            "sleeve_cancel_z",
         ):
             spin = self._spins.get(key)
             if spin is not None:

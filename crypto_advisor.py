@@ -73,14 +73,9 @@ def run(
     skill = skill or CryptoSkill()
     skill._reload_env()
     rows = skill.desk_candidates()
-    alloc, why = skill.ai_pick_alloc(rows)
-    if why:
-        advice = why
-    elif alloc:
-        advice = "Я бы держал эти доли на споте, без плеча."
-    else:
-        advice = "Сейчас лучше кэш в тетере, чем набирать монеты вслепую."
-    text = compose_message(advice, alloc, rows)
+    _alloc, why = skill.ai_pick_alloc(rows)
+    advice = why or "Автостол торгует щупом и карманом; портфельный alloc отключён."
+    text = compose_message(advice, {}, rows)
     if to_telegram is None:
         to_telegram = telegram_configured()
     if to_stdout:

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from skills.crypto import desk_policy as policy
+from skills.crypto import desk_policy_legacy as policy_legacy
 from skills.crypto.settings import store as settings_store
 from skills.crypto.settings.schema import DEFAULTS, from_payload, merge_settings
 
@@ -29,7 +30,7 @@ class TestDeskSettings(unittest.TestCase):
         self.assertEqual(data.pocket_pct, DEFAULTS.pocket_pct)
         self.assertEqual(data.sleeve_max_pct, DEFAULTS.sleeve_max_pct)
         self.assertTrue(data.probe_on)
-        self.assertTrue(data.sleeve_on)
+        self.assertFalse(data.sleeve_on)
         self.assertFalse(data.second_on)
         self.assertEqual(data.second_ticker, "AVA")
         self.assertEqual(data.pocket_from_probe_max, 3)
@@ -45,7 +46,7 @@ class TestDeskSettings(unittest.TestCase):
         loaded = settings_store.current()
         self.assertEqual(loaded.pocket_pct, 30.0)
         self.assertEqual(policy.btc_dip_quote(1000.0), 300.0)
-        self.assertEqual(policy.cash_floor_pct(btc_chg_7=1.0, btc_chg_day=0.5), 30.0)
+        self.assertEqual(policy_legacy.cash_floor_pct(btc_chg_7=1.0, btc_chg_day=0.5), 30.0)
 
     def test_clamp_and_reset(self):
         settings_store.update(probe_usd=500, pocket_bounce_pct=0.01)
@@ -64,8 +65,8 @@ class TestDeskSettings(unittest.TestCase):
     def test_sleeve_off_blocks_score(self):
         settings_store.update(sleeve_on=False)
         self.assertFalse(settings_store.current().sleeve_on)
-        self.assertEqual(policy.alt_slot_pct(), 0.0)
-        alloc, why = policy.score_alloc(
+        self.assertEqual(policy_legacy.alt_slot_pct(), 0.0)
+        alloc, why = policy_legacy.score_alloc(
             [{"ticker": "ENA", "bb_z": -2.8, "chg": -5.0, "turnover": 1e7}]
         )
         self.assertEqual(alloc, {})

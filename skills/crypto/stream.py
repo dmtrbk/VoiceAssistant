@@ -11,7 +11,7 @@ import time
 from typing import Any
 
 from .common import _QUOTE, _testnet
-from .desk_policy import WATCH_PERIOD_CALM, watch_period_sec
+from .desk_policy_legacy import WATCH_PERIOD_CALM, watch_period_sec
 
 logger = logging.getLogger(__name__)
 

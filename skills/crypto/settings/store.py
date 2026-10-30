@@ -62,7 +62,6 @@ def status_line() -> str:
     from skills.crypto.common import (
         probe_arms,
         probe_legs,
-        read_alloc_state,
         read_btc_dip,
         read_probe,
         read_second_pocket_legs,
@@ -72,19 +71,15 @@ def status_line() -> str:
     pocket = read_btc_dip()
     second_legs = read_second_pocket_legs()
     probe = read_probe()
-    state = read_alloc_state() or {}
-    alloc = state.get("alloc") if isinstance(state.get("alloc"), dict) else {}
-    sleeve = len(alloc)
-    parts = ["Карман открыт" if float(pocket.get("qty") or 0) > 0 else "Карман закрыт"]
+    if not data.pocket_on:
+        parts = ["Карман SOL выкл"]
+    else:
+        parts = ["Карман открыт" if float(pocket.get("qty") or 0) > 0 else "Карман закрыт"]
     if second_legs:
         names = ", ".join(str(leg["ticker"]) for leg in second_legs)
         parts.append(f"Карман2 {names}")
     elif not data.second_on:
-        parts.append("Второй выключен")
-    if not data.sleeve_on:
-        parts.append("Рукав выключен")
-    else:
-        parts.append(f"Рукав {sleeve} из {int(data.sleeve_max_names)}")
+        parts.append("Карман2 выкл")
     if not data.probe_on:
         parts.append("Щуп выключен")
     else:

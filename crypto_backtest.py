@@ -22,7 +22,7 @@ from pathlib import Path
 
 import requests
 
-from skills.crypto.desk_policy import (
+from skills.crypto.desk_policy_legacy import (
     ALT_BB_ENTRY_Z,
     ALT_EXIT_MIN_GAIN_PCT,
     ALT_STOP_LOSS_PCT,

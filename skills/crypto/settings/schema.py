@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, fields, replace
 
 @dataclass(frozen=True)
 class DeskSettings:
+    pocket_on: bool = False
     pocket_pct: float = 25.0
     pocket_day_pct: float = -3.0
     pocket_bounce_pct: float = 1.0
@@ -19,7 +20,7 @@ class DeskSettings:
     second_on: bool = False
     second_ticker: str = "AVA"  # устарело: тикер приходит с щупа
     pocket_from_probe_max: int = 3
-    sleeve_on: bool = True
+    sleeve_on: bool = False  # устарело: рукав снят
     sleeve_max_pct: float = 50.0
     sleeve_max_names: int = 2
     sleeve_entry_z: float = -2.5
@@ -76,7 +77,7 @@ _LIMITS: dict[str, tuple[float, float]] = {
 }
 
 _INT_FIELDS = frozenset({"sleeve_max_names", "pocket_from_probe_max"})
-_BOOL_FIELDS = frozenset({"probe_on", "second_on", "sleeve_on"})
+_BOOL_FIELDS = frozenset({"probe_on", "second_on", "sleeve_on", "pocket_on"})
 _CHOICES: dict[str, tuple[str, ...]] = {"second_ticker": ("SUI", "AVA")}
 _KEYS = {item.name for item in fields(DeskSettings)}
 
@@ -130,6 +131,7 @@ def merge_settings(base: DeskSettings, **changes: object) -> DeskSettings:
 def to_payload(data: DeskSettings) -> dict[str, object]:
     return {
         "pocket": {
+            "on": data.pocket_on,
             "pct": data.pocket_pct,
             "day_pct": data.pocket_day_pct,
             "bounce_pct": data.pocket_bounce_pct,
@@ -186,6 +188,7 @@ def from_payload(raw: object) -> DeskSettings:
     probe = raw.get("probe") if isinstance(raw.get("probe"), dict) else {}
     risk = raw.get("risk") if isinstance(raw.get("risk"), dict) else {}
     mapped = {
+        "pocket_on": pocket.get("on"),
         "pocket_pct": pocket.get("pct"),
         "pocket_day_pct": pocket.get("day_pct"),
         "pocket_bounce_pct": pocket.get("bounce_pct"),

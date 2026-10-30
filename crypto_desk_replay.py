@@ -28,11 +28,10 @@ from skills.crypto.desk_policy import (
     _median,
     cfg,
     ma_trend,
-    pick_alts,
     probe_arm_action,
     probe_exit_reason,
-    score_alloc,
 )
+from skills.crypto.desk_policy_legacy import pick_alts, score_alloc
 
 API = "https://api.bybit.com/v5/market/kline"
 FEE_SIDE = 0.0018
