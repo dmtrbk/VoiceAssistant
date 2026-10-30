@@ -2950,8 +2950,9 @@ class TestManualTrap(unittest.TestCase):
         self.assertNotIn("ETH", policy.MANUAL_TRAP_SKIP)
 
     def test_claim_manual_skips_btc_takes_diam(self):
-        from skills.crypto.common import read_second_pocket_legs
+        from skills.crypto.common import read_second_pocket_legs, write_probe
 
+        write_probe(ticker="PEPE", qty=50.0, entry=0.1, shelf=0.09, peak=0.1)
         with (
             patch.object(self.skill, "_manual_entry_px", return_value=0.005),
             patch.object(self.skill, "_spot_buy_vwap", return_value=0.005),
@@ -2961,12 +2962,14 @@ class TestManualTrap(unittest.TestCase):
                     "BTC": {"ticker": "BTC", "qty": 0.01, "price": 100_000.0, "value": 1000.0},
                     "DIAM": {"ticker": "DIAM", "qty": 2000.0, "price": 0.005, "value": 10.0},
                     "DOOD": {"ticker": "DOOD", "qty": 100.0, "price": 0.1, "value": 10.0},
+                    "PEPE": {"ticker": "PEPE", "qty": 50.0, "price": 0.1, "value": 5.0},
                 }
             )
         legs = {leg["ticker"]: leg for leg in read_second_pocket_legs()}
         self.assertIn("DIAM", legs)
+        self.assertIn("DOOD", legs)  # даже если была в bought.json — свободна от щупа, берём под ловушку
         self.assertNotIn("BTC", legs)
-        self.assertNotIn("DOOD", legs)  # desk-bought, не ручная
+        self.assertNotIn("PEPE", legs)  # занята активной ногой щупа
         self.assertTrue(any("DIAM" in n for n in notes))
 
     def test_claim_does_not_duplicate(self):

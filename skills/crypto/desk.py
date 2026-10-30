@@ -1356,9 +1356,8 @@ class CryptoDeskMixin:
         self,
         positions: dict[str, dict[str, Any]],
     ) -> list[str]:
-        """Ручные ноги (не BTC) — в карман2 под ловушку вершины."""
+        """Любые свободные ноги на балансе (кроме BTC и активных щупа/SOL-dip) — в карман2 под ловушку вершины."""
         notes: list[str] = []
-        self._ensure_desk_bought(set(positions))
         probe_qty: dict[str, float] = {}
         for leg in probe_legs():
             coin = str(leg.get("ticker") or "").upper()
@@ -1374,8 +1373,6 @@ class CryptoDeskMixin:
                 or coin in SLEEVE_SKIP
                 or _leveraged_base(coin)
             ):
-                continue
-            if not self._is_owner_position(coin):
                 continue
             held = float(pos.get("qty") or 0)
             price = float(pos.get("price") or 0)
