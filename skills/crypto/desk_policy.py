@@ -147,9 +147,9 @@ PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 5.0
 # 5с hold = CPOOL вечный tip-drop: хай уезжает, bar_pos убивает buy.
 PROBE_CANDLE_HOLD_SEC = 1
 PROBE_CANDLE_CHASE_PCT = 1.2
-# Запас хода до хая суток ≥ 6% (пускает MPLX/PEPE/DOOD/INIT, режет TRX у пика), без перегрева ≥25%.
-PROBE_CANDLE_MAX_DAY_PCT = 25.0
-PROBE_CANDLE_MIN_DAY_ROOM_PCT = 6.0
+# Запас хода до хая суток ≥ 1% (пускает BIRB/EDGE/MPLX/PEPE/DOOD/INIT), без перегрева ≥45%.
+PROBE_CANDLE_MAX_DAY_PCT = 45.0
+PROBE_CANDLE_MIN_DAY_ROOM_PCT = 1.0
 PROBE_CANDLE_MAX_DAY_DROP_PCT = 28.0
 PROBE_SPRINT_HOLD_SEC = 30
 PROBE_SPRINT_CHASE_PCT = 5.0

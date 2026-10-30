@@ -800,12 +800,12 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertGreaterEqual(policy.PROBE_CANDLE_MIN_BODY_PCT, 0.6)
         weak = {**rising, "close": 1.004, "high": 1.012}
         self.assertIsNone(policy.probe_candle_setup(base5 + [weak]))
-        # Свежий день + room ≥ 6% — да; +18% с room — да; +35% — нет; у самого пика суток — нет.
+        # Свежий день + room ≥ 1% — да; +35% с room — да; +48% — нет; у самого пика суток (<1%) — нет.
         fresh = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
             base5 + [rising],
             day_chg=8.0,
-            day_high=1.08,
+            day_high=1.02,
         )
         self.assertIsNotNone(fresh)
         assert fresh is not None
@@ -813,7 +813,7 @@ class TestDeskPolicy(unittest.TestCase):
         hot_ok = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
             base5 + [rising],
-            day_chg=18.0,
+            day_chg=35.0,
             day_high=1.12,
         )
         self.assertIsNotNone(hot_ok)
@@ -821,7 +821,7 @@ class TestDeskPolicy(unittest.TestCase):
             policy.probe_pick_setup(
                 [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
                 base5 + [rising],
-                day_chg=35.0,
+                day_chg=48.0,
                 day_high=1.12,
             )
         )
