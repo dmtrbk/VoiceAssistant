@@ -571,11 +571,11 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(
             policy.probe_trends_ok("bull", "bull", 8.0, algo=policy.PROBE_ALGO_GRIND)
         )
-        self.assertGreater(
+        self.assertLess(
             policy.probe_scan_rank({
                 "chg": -18.0, "price": 0.108, "low": 0.071, "high": 0.111, "turnover": 5_000_000,
             }),
-            0,
+            policy.PROBE_DAY_MIN_PCT,
         )
         self.assertGreater(
             policy.probe_scan_rank({
@@ -583,42 +583,72 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             0,
         )
-        # Средний оборот тоже в скан (раньше порог $1M резал почти всё).
+        # Средний и тонкий оборот в скан (DIAM ~$48k раньше резался порогом $250k).
         self.assertGreater(
             policy.probe_scan_rank({
                 "chg": 2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 300_000,
             }),
             0,
         )
-        self.assertLess(
+        self.assertGreater(
             policy.probe_scan_rank({
-                "chg": 2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 100_000,
+                "chg": 30.0, "price": 0.0045, "low": 0.003, "high": 0.005, "turnover": 46_000,
             }),
             0,
         )
         self.assertLess(
+            policy.probe_scan_rank({
+                "chg": 2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 10_000,
+            }),
+            0,
+        )
+        self.assertAlmostEqual(
             policy.probe_scan_rank({
                 "chg": -2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
             }),
-            0,
+            -2.0,
         )
-        self.assertGreaterEqual(policy.PROBE_SCAN_LIMIT, 40)
-        self.assertLess(policy.PROBE_SCAN_CLASSIC_LIMIT, policy.PROBE_SCAN_LIMIT)
-        # У хая суток (+40%) — вне скана; даже с room памп ниже свежего дня.
         self.assertLess(
+            policy.probe_scan_rank({
+                "chg": -4.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
+            }),
+            policy.PROBE_DAY_MIN_PCT,
+        )
+        self.assertGreaterEqual(policy.PROBE_SCAN_LIMIT, 100)
+        self.assertLess(policy.PROBE_SCAN_CLASSIC_LIMIT, policy.PROBE_SCAN_LIMIT)
+        self.assertEqual(
             policy.probe_scan_rank({
                 "chg": 40.0, "price": 0.0265, "low": 0.017, "high": 0.027, "turnover": 2_000_000,
             }),
-            0,
+            40.0,
         )
         self.assertGreater(
             policy.probe_scan_rank({
-                "chg": 7.6, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
-            }),
-            policy.probe_scan_rank({
                 "chg": 36.0, "price": 0.066, "low": 0.048, "high": 0.084, "turnover": 2_000_000,
             }),
+            policy.probe_scan_rank({
+                "chg": 7.6, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
+            }),
         )
+        ranked = policy.probe_scan_ranked_rows([
+            {"ticker": "A", "chg": 3.0, "price": 1.0, "turnover": 500_000},
+            {"ticker": "B", "chg": 12.0, "price": 1.0, "turnover": 500_000},
+            {"ticker": "C", "chg": 8.0, "price": 1.0, "turnover": 500_000},
+            {"ticker": "D", "chg": 20.0, "price": 1.0, "turnover": 500_000},
+            {"ticker": "E", "chg": 1.0, "price": 1.0, "turnover": 500_000},
+            {"ticker": "F", "chg": 15.0, "price": 1.0, "turnover": 500_000},
+        ], limit=6)
+        self.assertEqual(
+            [str(r[1]["ticker"]) for r in ranked[:5]],
+            ["D", "F", "B", "C", "A"],
+        )
+        self.assertGreaterEqual(policy.PROBE_SCAN_MANDATORY_TOP, 5)
+        mild_red = policy.probe_scan_ranked_rows([
+            {"ticker": "RED", "chg": -2.0, "price": 1.0, "turnover": 500_000},
+            {"ticker": "DEAD", "chg": -4.0, "price": 1.0, "turnover": 500_000},
+            {"ticker": "UP", "chg": 1.0, "price": 1.0, "turnover": 500_000},
+        ])
+        self.assertEqual([str(r[1]["ticker"]) for r in mild_red], ["UP", "RED"])
 
         base = dict(armed_ts=100.0, price=1.06, shelf=1.01, trend15="bull", day_chg=8.0, arm_px=1.05)
         self.assertEqual(policy.probe_arm_action(now=160.0, **base), "wait")

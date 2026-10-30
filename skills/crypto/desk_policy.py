@@ -73,9 +73,12 @@ SLEEVE_SKIP = frozenset({
 _live_extra: set[str] = set()
 # Щуп: 30$ на пробой тихой полки. Не слот рукава и не карман.
 PROBE_USD = 30.0
-# Раньше $1M оставлял ~6 монет на скане; $250k — шире, без пыли.
-PROBE_MIN_TURNOVER_USD = 250_000.0
-PROBE_DAY_MIN_PCT = 0.5
+# Раньше $1M/~$250k резали пыльные папы (DIAM ~$48k при day +30…50%).
+# $25k — почти весь spot USDT с day ≥ пола; ниже — совсем мёртвый стакан.
+PROBE_MIN_TURNOVER_USD = 25_000.0
+# Ниже 0.5% сутки 29.10 резали INIT-контекст и оставляли PARTI 18:25 (−$3.28).
+# Пол −3% на полном scan: щуп +$1.04, этой сделки нет.
+PROBE_DAY_MIN_PCT = -3.0
 PROBE_NEAR_HIGH = 0.99
 PROBE_BOUNCE_MIN_PCT = 8.0
 PROBE_BOUNCE_NEAR_HIGH = 0.92
@@ -93,8 +96,11 @@ PROBE_SHELF_DRIFT_BARS = 8
 PROBE_RUN_PCT = 6.0
 PROBE_MAX_LOSS_PCT = 8.0
 # Сначала candle по широкому списку (только 5м); остальные алго — укороченный топ.
-PROBE_SCAN_LIMIT = 48
+# При floor $25k кандидатов ~120–130 — лимит почти = вся очередь, не топ-48.
+PROBE_SCAN_LIMIT = 128
 PROBE_SCAN_CLASSIC_LIMIT = 16
+# Топ-N по росту за 24ч всегда первыми в очереди щупа (candle + classic).
+PROBE_SCAN_MANDATORY_TOP = 8
 # Чаще сканируем: растущую 5м свечу надо брать в первой половине, не раз в минуту у хая.
 PROBE_PERIOD_SEC = 20
 PROBE_ARMED_PERIOD_SEC = 6
@@ -361,30 +367,37 @@ def probe_should_handoff(reason: str | None) -> bool:
 
 
 def probe_scan_rank(row: dict[str, Any]) -> float:
-    """Кого смотреть: зелёный день или отскок от суточного дна, ещё не уехавший от хая."""
+    """Сортировка scan: рост за 24ч (chg %), только ликвидные и day ≥ PROBE_DAY_MIN_PCT."""
     try:
         chg = float(row.get("chg") or 0)
         price = float(row.get("price") or 0)
-        low = float(row.get("low") or 0)
-        high = float(row.get("high") or 0)
         turn = float(row.get("turnover") or 0)
     except (TypeError, ValueError):
-        return -1.0
-    if turn < PROBE_MIN_TURNOVER_USD or price <= 0:
-        return -1.0
-    day_room = ((high - price) / high * 100.0) if high > 0 else 0.0
-    if chg >= PROBE_DAY_MIN_PCT:
-        # Свежий зелёный — в топ. Разогнанный памп в хвост (или вне скана у хая).
-        if chg <= PROBE_CANDLE_MAX_DAY_PCT:
-            return chg + 4.0
-        if day_room < PROBE_CANDLE_MIN_DAY_ROOM_PCT:
-            return -1.0
-        # Ещё смотрим, но ниже любого свежего дня — иначе DIAM/MPLX заедают слоты.
-        return max(0.5, 5.0 - min(chg - PROBE_CANDLE_MAX_DAY_PCT, 4.0))
-    bounce = (price / low - 1.0) * 100.0 if low > 0 else 0.0
-    if bounce >= PROBE_BOUNCE_MIN_PCT and high > 0 and price >= high * PROBE_BOUNCE_NEAR_HIGH:
-        return bounce
-    return -1.0
+        return float("-inf")
+    if turn < PROBE_MIN_TURNOVER_USD or price <= 0 or chg < PROBE_DAY_MIN_PCT:
+        return float("-inf")
+    return chg
+
+
+def probe_scan_ranked_rows(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+) -> list[tuple[float, dict[str, Any]]]:
+    """Список для щупа: по убыванию 24h %; первые PROBE_SCAN_MANDATORY_TOP — обязательный прогон."""
+    cap = int(PROBE_SCAN_LIMIT if limit is None else limit)
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for row in rows:
+        score = probe_scan_rank(row)
+        if score < PROBE_DAY_MIN_PCT:
+            continue
+        scored.append((score, row))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if len(scored) <= cap:
+        return scored
+    head = scored[:PROBE_SCAN_MANDATORY_TOP]
+    tail = scored[PROBE_SCAN_MANDATORY_TOP:cap]
+    return head + tail
 
 
 def probe_quote() -> float:

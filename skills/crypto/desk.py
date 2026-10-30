@@ -2463,7 +2463,7 @@ class CryptoDeskMixin:
             if not ticker or ticker in blocked or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
                 continue
             rank = probe_scan_rank(row)
-            if rank < 0:
+            if rank < PROBE_DAY_MIN_PCT:
                 continue
             ranked.append((rank, row))
         ranked.sort(key=lambda item: item[0], reverse=True)
