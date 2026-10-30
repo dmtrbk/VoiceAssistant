@@ -53,6 +53,9 @@ from .common import (
 from .desk_policy import (
     ALT_BB_INTERVAL,
     ALT_HELD_MIN_USD,
+    MANUAL_TRAP_SKIP,
+    MANUAL_TRAP_MAX_LEGS,
+    manual_trap_free_qty,
     ALT_MIN_HOLD_HOURS,
     DESK_ALT_SLEEVE,
     PROBE_DAY_MIN_PCT,
@@ -2525,8 +2528,158 @@ class CryptoDeskMixin:
             if self._probe_try_arm(row, setup, bars15, hour):
                 return
 
+    def _spot_buy_vwap(self, ticker: str, need_qty: float) -> float | None:
+        """Средняя цена ручной покупки по свежим fill Bybit (spot)."""
+        need = float(need_qty or 0)
+        if need <= 0:
+            return None
+        try:
+            data = self._signed(
+                "GET",
+                "/v5/execution/list",
+                {
+                    "category": "spot",
+                    "symbol": self._symbol(ticker),
+                    "limit": "50",
+                },
+            )
+        except Exception as exc:
+            logger.info("[Крипта] ловушка %s история сделок: %s", ticker, exc)
+            return None
+        rows = (data.get("result") or {}).get("list") or []
+        got = 0.0
+        cost = 0.0
+        for row in rows:
+            if str(row.get("side") or "").lower() != "buy":
+                continue
+            try:
+                px = float(row.get("execPrice") or 0)
+                qty = float(row.get("execQty") or 0)
+            except (TypeError, ValueError):
+                continue
+            if px <= 0 or qty <= 0:
+                continue
+            take = min(qty, need - got)
+            cost += take * px
+            got += take
+            if got + 1e-12 >= need:
+                break
+        if got <= 0 or cost <= 0:
+            return None
+        return cost / got
+
+    def _manual_entry_px(self, ticker: str, qty: float, mark: float) -> float:
+        """Вход для ловушки: VWAP по бирже, иначе mark (хуже — ловушка от текущей)."""
+        vwap = self._spot_buy_vwap(ticker, qty)
+        if vwap and vwap > 0:
+            return float(vwap)
+        # Журнал стола — если покупка шла через Jarvis.
+        try:
+            trades = crypto_journal._read_trades()
+        except Exception:
+            trades = []
+        got = 0.0
+        cost = 0.0
+        for row in reversed(list(trades or [])):
+            if str(row.get("ticker") or "").upper() != ticker:
+                continue
+            if str(row.get("side") or "").lower() != "buy":
+                continue
+            try:
+                px = float(row.get("price") or 0)
+                q = float(row.get("qty") or 0)
+            except (TypeError, ValueError):
+                continue
+            if px <= 0 or q <= 0:
+                continue
+            take = min(q, float(qty) - got)
+            cost += take * px
+            got += take
+            if got + 1e-12 >= float(qty):
+                break
+        if got > 0 and cost > 0:
+            return cost / got
+        return float(mark or 0)
+
+    def _claim_manual_trap_legs(
+        self,
+        positions: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        """Ручные ноги (не BTC) — в карман2 под ловушку вершины."""
+        notes: list[str] = []
+        self._ensure_desk_bought(set(positions))
+        probe_qty: dict[str, float] = {}
+        for leg in probe_legs():
+            coin = str(leg.get("ticker") or "").upper()
+            if coin:
+                probe_qty[coin] = probe_qty.get(coin, 0.0) + float(leg.get("qty") or 0)
+        dip_qty = float(read_btc_dip().get("qty") or 0)
+        pocketed = {str(leg["ticker"]) for leg in read_second_pocket_legs()}
+        for ticker, pos in positions.items():
+            coin = str(ticker or "").upper()
+            if (
+                not coin
+                or coin in MANUAL_TRAP_SKIP
+                or coin in SLEEVE_SKIP
+                or _leveraged_base(coin)
+            ):
+                continue
+            if not self._is_owner_position(coin):
+                continue
+            held = float(pos.get("qty") or 0)
+            price = float(pos.get("price") or 0)
+            value = float(pos.get("value") or 0) or held * price
+            if held <= 0 or value < ALT_HELD_MIN_USD:
+                continue
+            target = manual_trap_free_qty(
+                held,
+                probe_qty=float(probe_qty.get(coin) or 0),
+                pocket_qty=0.0,
+                dip_qty=dip_qty if coin == BTC_DIP_TICKER else 0.0,
+            )
+            if target * price < max(_MIN_QUOTE, ALT_HELD_MIN_USD):
+                continue
+            # Уже в кармане2 — подтянуть qty к свободному остатку (минус щуп/SOL-dip).
+            if coin in pocketed:
+                reserved = second_pocket_qty(coin)
+                if abs(target - reserved) > max(1e-8, reserved * 1e-6):
+                    book = next(
+                        (leg for leg in read_second_pocket_legs() if str(leg["ticker"]) == coin),
+                        None,
+                    )
+                    if book:
+                        update_second_pocket_leg(
+                            coin,
+                            qty=target,
+                            entry=float(book.get("entry") or 0),
+                            low=float(book.get("low") or 0),
+                            exit_high=float(book.get("exit_high") or 0),
+                            exit_ts=float(book.get("exit_ts") or 0),
+                        )
+                        notes.append(f"{coin} qty→{target:.6g}")
+                continue
+            entry = self._manual_entry_px(coin, target, price)
+            if entry <= 0:
+                continue
+            ok = upsert_second_pocket_leg(
+                ticker=coin,
+                qty=target,
+                entry=entry,
+                max_legs=MANUAL_TRAP_MAX_LEGS,
+            )
+            if ok:
+                notes.append(f"{coin} вход {entry:.6g} qty {target:.6g}")
+                logger.info(
+                    "[Крипта] ловушка вручную %s: qty %.6g вход %.6g (нужен +%.2f%%)",
+                    coin,
+                    target,
+                    entry,
+                    exit_trap_arm_pct(entry=entry, qty=target),
+                )
+        return notes
+
     def _pockets_tick(self) -> None:
-        """Раз в минуту SOL: локальный откат; второй карман — только выход переданных ног."""
+        """Раз в минуту SOL: локальный откат; второй карман — handoff и ручные ноги."""
         if not getattr(self, "_api_key", ""):
             return
         with common._TRADE_LOCK:
@@ -2543,6 +2696,9 @@ class CryptoDeskMixin:
                 for item in positions_list
                 if item.get("ticker")
             }
+            claim_notes = self._claim_manual_trap_legs(positions)
+            if claim_notes:
+                logger.info("[Крипта] ловушка вручную: %s", "; ".join(claim_notes))
             for pocket_leg in read_second_pocket_legs():
                 coin = str(pocket_leg["ticker"])
                 if coin not in prices:

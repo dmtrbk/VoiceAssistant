@@ -361,6 +361,23 @@ def pocket_from_probe_max() -> int:
     return max(1, int(cfg().pocket_from_probe_max))
 
 
+# Ручные покупки (кроме BTC) сажаем в карман2 под ту же ловушку вершины.
+MANUAL_TRAP_SKIP = frozenset({"BTC"})
+MANUAL_TRAP_MAX_LEGS = 32
+
+
+def manual_trap_free_qty(
+    held_qty: float,
+    *,
+    probe_qty: float = 0.0,
+    pocket_qty: float = 0.0,
+    dip_qty: float = 0.0,
+) -> float:
+    """Сколько монет на балансе ещё не учтено щупом/карманом — кандидат на ловушку."""
+    free = float(held_qty or 0) - float(probe_qty or 0) - float(pocket_qty or 0) - float(dip_qty or 0)
+    return free if free > 1e-12 else 0.0
+
+
 def probe_should_handoff(reason: str | None) -> bool:
     """Мягкий выход щупа — отдать ногу во второй карман, не продавать."""
     return str(reason or "") in PROBE_HANDOFF_REASONS

@@ -2864,5 +2864,69 @@ class TestBybitTape(unittest.TestCase):
         self.assertEqual(tape.consume_signals(), "свеча")
 
 
+class TestManualTrap(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for name, attr in (
+            ("holds.json", "_HOLD_PATH"),
+            ("bought.json", "_BOUGHT_PATH"),
+            ("second_pocket.json", "_SECOND_POCKET_PATH"),
+            ("probe.json", "_PROBE_PATH"),
+            ("btc_dip.json", "_BTC_DIP_PATH"),
+            ("trades.json", "_TRADE_PATH"),
+        ):
+            path = os.path.join(self.tmp.name, name)
+            patcher = patch(f"skills.crypto.common.{attr}", path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.skill = CryptoSkill()
+        self.skill._desk_bought_ready = True
+        self.skill._desk_bought = {"DOOD"}
+        self.skill._manual_holds = {"BTC", "ETH"}
+        self.skill._api_key = "x"
+
+    def test_free_qty_subtracts_managed(self):
+        self.assertAlmostEqual(
+            policy.manual_trap_free_qty(100.0, probe_qty=30.0, pocket_qty=10.0, dip_qty=5.0),
+            55.0,
+        )
+        self.assertEqual(policy.manual_trap_free_qty(10.0, probe_qty=10.0), 0.0)
+        self.assertIn("BTC", policy.MANUAL_TRAP_SKIP)
+        self.assertNotIn("ETH", policy.MANUAL_TRAP_SKIP)
+
+    def test_claim_manual_skips_btc_takes_diam(self):
+        from skills.crypto.common import read_second_pocket_legs
+
+        with (
+            patch.object(self.skill, "_manual_entry_px", return_value=0.005),
+            patch.object(self.skill, "_spot_buy_vwap", return_value=0.005),
+        ):
+            notes = self.skill._claim_manual_trap_legs(
+                {
+                    "BTC": {"ticker": "BTC", "qty": 0.01, "price": 100_000.0, "value": 1000.0},
+                    "DIAM": {"ticker": "DIAM", "qty": 2000.0, "price": 0.005, "value": 10.0},
+                    "DOOD": {"ticker": "DOOD", "qty": 100.0, "price": 0.1, "value": 10.0},
+                }
+            )
+        legs = {leg["ticker"]: leg for leg in read_second_pocket_legs()}
+        self.assertIn("DIAM", legs)
+        self.assertNotIn("BTC", legs)
+        self.assertNotIn("DOOD", legs)  # desk-bought, не ручная
+        self.assertTrue(any("DIAM" in n for n in notes))
+
+    def test_claim_does_not_duplicate(self):
+        from skills.crypto.common import read_second_pocket_legs, upsert_second_pocket_leg
+
+        upsert_second_pocket_leg(ticker="DIAM", qty=2000.0, entry=0.005, max_legs=32)
+        with patch.object(self.skill, "_manual_entry_px", return_value=0.006):
+            self.skill._claim_manual_trap_legs(
+                {"DIAM": {"ticker": "DIAM", "qty": 2000.0, "price": 0.005, "value": 10.0}}
+            )
+        legs = read_second_pocket_legs()
+        self.assertEqual(len(legs), 1)
+        self.assertAlmostEqual(legs[0]["entry"], 0.005)
+
+
 if __name__ == "__main__":
     unittest.main()
