@@ -20,22 +20,21 @@ from typing import Any
 
 from skills.crypto import desk_policy as P
 from skills.crypto.desk_policy import (
-    ALT_BB_INTERVAL,
     BTC_DIP_TICKER,
-    DESK_ALT_SLEEVE,
+    PROBE_DAY_MIN_PCT,
     PROBE_MAX_LEGS,
     PROBE_SCAN_LIMIT,
-    alt_exit_reason,
-    alt_slot_pct,
+    PROBE_SCAN_MANDATORY_TOP,
+    probe_scan_ranked_rows,
     btc_dip_exit_reason,
     btc_dip_quote,
     cfg,
-    is_risk_off,
     pocket_bounce_ready,
     pocket_dip_held,
     pocket_dip_pending,
     pocket_swing,
     probe_arm_action,
+    probe_candle_buy_ok,
     probe_exit_reason,
     probe_should_handoff,
     pocket_from_probe_max,
@@ -44,11 +43,18 @@ from skills.crypto.desk_policy import (
     probe_reserve_quote,
     probe_scan_rank,
     probe_trends_ok,
+    update_pocket_exit_arm,
+    update_pocket_swing_arm,
+)
+from skills.crypto.desk_policy_legacy import (
+    ALT_BB_INTERVAL,
+    DESK_ALT_SLEEVE,
+    alt_exit_reason,
+    alt_slot_pct,
+    is_risk_off,
     update_alt_arm,
     update_alt_exit_arm,
     update_exclusions,
-    update_pocket_exit_arm,
-    update_pocket_swing_arm,
 )
 from skills.crypto.indicators import bollinger
 
@@ -356,19 +362,24 @@ def build_scan(extra: list[str]) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             continue
         rank = probe_scan_rank(row)
-        if rank < 0:
+        if rank < PROBE_DAY_MIN_PCT:
             continue
         ranked.append((rank, base, row["chg"]))
     ranked.sort(reverse=True)
     scan: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for _rank, base, chg in ranked:
+    for _rank, base, chg in ranked[:PROBE_SCAN_MANDATORY_TOP]:
         if base in seen:
             continue
         seen.add(base)
         scan.append({"ticker": base, "symbol": base + "USDT", "chg": chg})
+    for _rank, base, chg in ranked:
         if len(scan) >= 20:
             break
+        if base in seen:
+            continue
+        seen.add(base)
+        scan.append({"ticker": base, "symbol": base + "USDT", "chg": chg})
     for name in extra:
         if name not in seen:
             scan.append({"ticker": name, "symbol": name + "USDT", "chg": 0.0})
@@ -736,6 +747,25 @@ def main() -> int:
                 if len(book.open_kinds("probe")) >= PROBE_MAX_LEGS:
                     continue
                 bars5 = window_upto(series[arm.ticker]["5"], ts, 5)
+                if arm.algo == P.PROBE_ALGO_CANDLE and bars5:
+                    live5 = bars5[-1]
+                    if not probe_candle_buy_ok(
+                        price,
+                        float(live5.get("high") or 0),
+                        float(live5.get("low") or 0),
+                        float(live5.get("open") or 0),
+                    ):
+                        book.log(
+                            ts,
+                            "drop",
+                            arm.ticker,
+                            kind="probe",
+                            px=price,
+                            quote=0.0,
+                            algo=arm.algo,
+                            reason="candle tip",
+                        )
+                        continue
                 low = float(bars5[-1]["low"]) if bars5 else price
                 if buy(
                     book,
@@ -762,28 +792,32 @@ def main() -> int:
                 leg.ticker for leg in book.legs
             } | {arm.ticker for arm in book.probe_arms} | blacklist | set(P.SLEEVE_SKIP)
 
-            ranked_now: list[tuple[float, str]] = []
+            probe_rows: list[dict[str, Any]] = []
             for row in scan:
                 ticker = row["ticker"]
                 if ticker in blocked or ticker not in series:
                     continue
                 price = prices.get(ticker) or 0
                 day = day_chg_at(series[ticker]["15"], ts, price) or 0.0
-                # turnover proxy: live rank uses tape; здесь day% как грубый rank
                 bars15 = window_upto(series[ticker]["15"], ts, 100)
                 if len(bars15) < 10 or price <= 0:
                     continue
                 high = max(float(b["high"]) for b in bars15[-96:]) if len(bars15) >= 10 else price
                 low = min(float(b["low"]) for b in bars15[-96:]) if len(bars15) >= 10 else price
-                turn = 2_000_000.0  # выше порога; точный оборот на истории не восстанавливаем
-                rank = probe_scan_rank(
-                    {"chg": day, "price": price, "high": high, "low": low, "turnover": turn}
+                turn = 2_000_000.0
+                probe_rows.append(
+                    {
+                        "ticker": ticker,
+                        "chg": day,
+                        "price": price,
+                        "high": high,
+                        "low": low,
+                        "turnover": turn,
+                    }
                 )
-                if rank < 0:
-                    continue
-                ranked_now.append((rank, ticker))
-            ranked_now.sort(reverse=True)
-            for _rank, ticker in ranked_now[:PROBE_SCAN_LIMIT]:
+            ranked_now = probe_scan_ranked_rows(probe_rows)
+            for _rank, prow in ranked_now:
+                ticker = str(prow["ticker"])
                 if book.probe_count() >= PROBE_MAX_LEGS:
                     break
                 bars15 = window_upto(series[ticker]["15"], ts, 130)

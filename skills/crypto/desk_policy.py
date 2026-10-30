@@ -1,11 +1,15 @@
 # skills/crypto/desk_policy.py
-# Правила автостола: режим рынка, скоринг, коридор, фильтры. Без сети и Groq.
-# Каркас этики: robotics_laws.py — приказы хозяина (настройки/.env), без вреда человеку, беречь стол.
+# Правила щупа и кармана. Рукав/alloc — desk_policy_legacy.py.
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from typing import Any
+
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROBE_TUNE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe_tune.json")
 
 # Рукав альтов: до 50% счёта, 2 слота. Карман SOL 25%. Остаток — кэш и щупы.
 # Берём только на провале у нижней полосы.
@@ -102,7 +106,7 @@ PROBE_SCAN_CLASSIC_LIMIT = 16
 # Топ-N по росту за 24ч всегда первыми в очереди щупа (candle + classic).
 PROBE_SCAN_MANDATORY_TOP = 8
 # Чаще сканируем: растущую 5м свечу надо брать в первой половине, не раз в минуту у хая.
-PROBE_PERIOD_SEC = 20
+PROBE_PERIOD_SEC = 10
 PROBE_ARMED_PERIOD_SEC = 6
 # После любой продажи щуп не возвращается в ту же монету сразу (KAS: вершина → тот же grind).
 # Короткий блок: иначе BLEND слили и 2ч не вернулись в памп.
@@ -120,24 +124,33 @@ PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
 PROBE_ALGO_ORDER = (PROBE_ALGO_CANDLE,)
-# 5м зелёная свеча: тело уже есть, но ещё не у хая бара.
+# 5м зелёная свеча: ловим начало восходящей свечи от open, без верхнего фитиля (слива).
 PROBE_CANDLE_LOOKBACK = 12
-# 0,25% ловил шум (CSPR/BICO +0,5%). INIT был +1,3% от open.
+# 0,25% ловил шум (CSPR/BICO +0,5%). INIT был +0,67…1,3% от open.
 PROBE_CANDLE_MIN_BODY_PCT = 0.6
 PROBE_CANDLE_MAX_BODY_PCT = 2.0
-PROBE_CANDLE_MAX_BAR_POS = 0.55
-PROBE_CANDLE_TIP_GAP_PCT = 0.35
+# Начало/середина восходящей свечи (pos 0.35..0.65):
+# продавленные сверху фитили (PARTI 18:20 pos=0.32, BLEND 13:25 pos=0.20, DOOD pos=0.21)
+# и покупка на самом пике бара (pos > 0.65) отсекаются.
+PROBE_CANDLE_MIN_BAR_POS = 0.35
+PROBE_CANDLE_MAX_BAR_POS = 0.65
+# Верхний фитиль ≤ 0.90% от open, отступ от кончика high ≥ 0.25%; нижний пролив под open ≤ 0.80%.
+PROBE_CANDLE_MAX_WICK_PCT = 0.90
+PROBE_CANDLE_MAX_DIP_PCT = 0.80
+PROBE_CANDLE_TIP_GAP_PCT = 0.25
+# В первые минуты 5м свечи нормируем порог объёма по доле прошедшего времени (min 0.30 бара).
+PROBE_CANDLE_MIN_ELAPSED_FRAC = 0.30
 # Касание open — фитиль той же свечи, не провал. Полка — только уход под open.
 PROBE_CANDLE_SHELF_BREAK_PCT = 0.4
 PROBE_CANDLE_VOL_MULT = 1.5
-PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 2.5
+PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 5.0
 # 5с hold = CPOOL вечный tip-drop: хай уезжает, bar_pos убивает buy.
 PROBE_CANDLE_HOLD_SEC = 1
 PROBE_CANDLE_CHASE_PCT = 1.2
-# День может быть горячим, но не у хая суток (room). +35% у пика — нет; +18% с room — да.
+# Запас хода до хая суток ≥ 6% (пускает MPLX/PEPE/DOOD/INIT, режет TRX у пика), без перегрева ≥25%.
 PROBE_CANDLE_MAX_DAY_PCT = 25.0
-# Не брать candle у хая суток — нужен запас хода.
-PROBE_CANDLE_MIN_DAY_ROOM_PCT = 8.0
+PROBE_CANDLE_MIN_DAY_ROOM_PCT = 6.0
+PROBE_CANDLE_MAX_DAY_DROP_PCT = 28.0
 PROBE_SPRINT_HOLD_SEC = 30
 PROBE_SPRINT_CHASE_PCT = 5.0
 PROBE_IMPULSE_HOLD_SEC = 8
@@ -207,6 +220,46 @@ def cfg():
     from skills.crypto.settings import current
 
     return current()
+
+
+def read_probe_tune() -> dict[str, Any]:
+    try:
+        with open(_PROBE_TUNE_PATH, encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if isinstance(raw, dict):
+            return raw
+    except Exception:
+        pass
+    return {"tier": 1, "baseline_lifetime": None}
+
+
+def probe_tune_tier() -> int:
+    return max(1, min(4, int(read_probe_tune().get("tier") or 1)))
+
+
+def probe_period_sec() -> float:
+    if probe_tune_tier() >= 2:
+        return 6.0
+    return float(PROBE_PERIOD_SEC)
+
+
+def probe_scan_algo_order() -> tuple[str, ...]:
+    tier = probe_tune_tier()
+    if tier >= 3:
+        return (PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE)
+    return PROBE_ALGO_ORDER
+
+
+def probe_candle_prior_max_body_pct() -> float:
+    if probe_tune_tier() >= 4:
+        return 6.0
+    return float(PROBE_CANDLE_PRIOR_MAX_BODY_PCT)
+
+
+def probe_candle_min_body_pct() -> float:
+    if probe_tune_tier() >= 4:
+        return 0.4
+    return float(PROBE_CANDLE_MIN_BODY_PCT)
 
 
 def update_exclusions(
@@ -390,7 +443,7 @@ def probe_scan_rank(row: dict[str, Any]) -> float:
         price = float(row.get("price") or 0)
         turn = float(row.get("turnover") or 0)
     except (TypeError, ValueError):
-        return float("-inf")
+        return -1.0
     if turn < PROBE_MIN_TURNOVER_USD or price <= 0 or chg < PROBE_DAY_MIN_PCT:
         return float("-inf")
     return chg
@@ -418,8 +471,49 @@ def probe_scan_ranked_rows(
 
 
 def probe_quote() -> float:
-    """Щуп: фиксированные 30$, не доля счёта."""
+    """Щуп: базовый размер ноги из настроек (обычно 30$)."""
     return float(cfg().probe_usd)
+
+
+PROBE_BOOST_USD = 60.0
+PROBE_BOOST_MIN_GAIN_PCT = 3.0
+
+
+def probe_legs_boost_ok(
+    legs: list[dict[str, Any]],
+    prices: dict[str, float],
+) -> bool:
+    """Две открытые ноги в уверенном плюсе — третью можно увеличить до PROBE_BOOST_USD."""
+    if len(legs) != 2:
+        return False
+    for leg in legs:
+        ticker = str(leg.get("ticker") or "").upper()
+        try:
+            entry = float(leg.get("entry") or 0)
+            price = float(prices.get(ticker) or 0)
+        except (TypeError, ValueError):
+            return False
+        if entry <= 0 or price <= 0:
+            return False
+        gain = (price / entry - 1.0) * 100.0
+        if gain + 1e-9 < PROBE_BOOST_MIN_GAIN_PCT:
+            return False
+    return True
+
+
+def probe_quote_for_buy(
+    *,
+    legs: list[dict[str, Any]] | None = None,
+    prices: dict[str, float] | None = None,
+) -> float:
+    """1–2-я нога — база из настроек; 3-я — $60, если обе предыдущие ≥ PROBE_BOOST_MIN_GAIN_PCT%."""
+    base = probe_quote()
+    legs = list(legs or [])
+    if len(legs) != 2:
+        return base
+    if prices and probe_legs_boost_ok(legs, prices):
+        return max(base, float(PROBE_BOOST_USD))
+    return base
 
 
 def probe_reserve_quote(*, open_legs: int, pending: int = 0) -> float:
@@ -429,7 +523,13 @@ def probe_reserve_quote(*, open_legs: int, pending: int = 0) -> float:
     opened = max(0, int(open_legs))
     waiting = max(0, int(pending))
     want = PROBE_MAX_LEGS if opened + waiting >= 1 else 1
-    return probe_quote() * max(0, want - opened)
+    slots = max(0, want - opened)
+    if slots <= 0:
+        return 0.0
+    unit = probe_quote()
+    if opened >= 2:
+        unit = max(unit, float(PROBE_BOOST_USD))
+    return unit * slots
 
 
 def ema_last(values: list[float], period: int) -> float | None:
@@ -564,7 +664,7 @@ def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
 
 
 def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
-    """Ещё в первой половине растущей свечи: зелёная, не у хая."""
+    """Начало восходящей свечи: тело 0.6..2.0% от open, цена в верхней части бара без слива."""
     px = float(price or 0)
     hi = float(live_high or 0)
     lo = float(live_low or 0)
@@ -574,26 +674,35 @@ def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_o
     if px <= op + 1e-12:
         return False
     body = (px / op - 1.0) * 100.0
-    if body < PROBE_CANDLE_MIN_BODY_PCT or body > PROBE_CANDLE_MAX_BODY_PCT:
+    min_body = probe_candle_min_body_pct()
+    if body < min_body or body > PROBE_CANDLE_MAX_BODY_PCT + 1e-12:
+        return False
+    # Откат сверху от high свечи (верхний фитиль) — признак уже продавленной свечи.
+    upper_wick = (hi - px) / op * 100.0
+    if upper_wick > PROBE_CANDLE_MAX_WICK_PCT + 1e-12:
         return False
     tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
     if px > tip_cap + 1e-12:
         return False
+    # Глубокий пролив под open — не чистый старт восходящей свечи.
+    if lo < op:
+        dip = (op - lo) / op * 100.0
+        if dip > PROBE_CANDLE_MAX_DIP_PCT + 1e-12:
+            return False
     span = hi - lo
-    if span > 1e-12 and (px - lo) / span > PROBE_CANDLE_MAX_BAR_POS + 1e-12:
-        return False
+    if span > 1e-12:
+        pos = (px - lo) / span
+        if pos < PROBE_CANDLE_MIN_BAR_POS - 1e-12 or pos > PROBE_CANDLE_MAX_BAR_POS + 1e-12:
+            return False
     return True
 
 
 def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
-    """Перед buy после arm: над open и не вплотную к хаю.
-
-    bar_pos не режем — за hold хай свечи часто уезжает вверх (CPOOL tip-loop).
-    """
+    """Перед buy после arm: свеча всё ещё восходящая, не у самого кончика и без слива."""
     px = float(price or 0)
     hi = float(live_high or 0)
+    lo = float(live_low or 0)
     op = float(live_open or 0)
-    _ = live_low
     if px <= 0 or hi <= 0 or op <= 0:
         return False
     if px <= op + 1e-12:
@@ -604,14 +713,21 @@ def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_op
     tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
     if px > tip_cap + 1e-12:
         return False
+    if lo > 0 and hi > lo + 1e-12:
+        if (px - lo) / (hi - lo) < PROBE_CANDLE_MIN_BAR_POS - 1e-12:
+            return False
     return True
 
 
-def probe_candle_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
-    """Ранний вход в живую зелёную 5м свечу: от open, до середины бара.
+def probe_candle_setup(
+    bars: list[dict[str, Any]],
+    *,
+    now: float | None = None,
+) -> dict[str, float] | None:
+    """Ранний вход в живую восходящую 5м свечу от open.
 
-    Главный щуп: берём разгон свечи, а не хай окна за 4 часа.
-    bars — 5м, от старых к новым; нужен open.
+    Главный щуп: берём старт восходящей свечи без верхнего фитиля (слива).
+    bars — 5м, от старых к новым; нужен open (опционально ts старта бара).
     Полка — open живой свечи: возврат под open снимает вход.
     """
     need = PROBE_CANDLE_LOOKBACK + 2
@@ -626,6 +742,7 @@ def probe_candle_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         lo = float(forming.get("low") or 0)
         price = float(forming.get("close") or 0)
         vol = float(forming.get("volume") or 0)
+        bar_ts = float(forming.get("ts") or 0)
         prior_o = float(prior.get("open") or prior.get("close") or 0)
         prior_c = float(prior.get("close") or 0)
         vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
@@ -633,14 +750,22 @@ def probe_candle_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         return None
     if not probe_candle_live_ok(price, hi, lo, op):
         return None
+    # Выход вверх над телом предыдущей свечи (не внутри красной свечи).
+    if prior_o > 0 and prior_c > 0 and price <= max(prior_o, prior_c) - 1e-12:
+        return None
     if prior_o > 0 and prior_c > prior_o:
         prior_body = (prior_c / prior_o - 1.0) * 100.0
-        if prior_body > PROBE_CANDLE_PRIOR_MAX_BODY_PCT + 1e-12:
+        if prior_body > probe_candle_prior_max_body_pct() + 1e-12:
             return None
     if not vols:
         return None
     typical = _median(vols)
-    if typical <= 0 or vol < typical * PROBE_CANDLE_VOL_MULT:
+    elapsed_frac = 1.0
+    if now is not None and bar_ts > 0:
+        elapsed = float(now) - bar_ts
+        if 0.0 <= elapsed < 300.0:
+            elapsed_frac = max(PROBE_CANDLE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
+    if typical <= 0 or vol < typical * PROBE_CANDLE_VOL_MULT * elapsed_frac:
         return None
     # Не догоняем, если уже вышли далеко над хаем окна lookback.
     try:
@@ -653,7 +778,7 @@ def probe_candle_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
 
 
 def probe_candle_day_ok(*, price: float, day_high: float, day_chg: float | None) -> bool:
-    """День может быть горячим; у самого хая суток candle не берём."""
+    """Топ по росту идут у хая суток; отсекаем только перегретый излёт (≥25%) и глубокий слив с пика (>18%)."""
     if day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
         return False
     hi = float(day_high or 0)
@@ -661,6 +786,8 @@ def probe_candle_day_ok(*, price: float, day_high: float, day_chg: float | None)
     if hi <= 0 or px <= 0:
         return True
     room = (hi - px) / hi * 100.0
+    if room > PROBE_CANDLE_MAX_DAY_DROP_PCT + 1e-12:
+        return False
     return room >= PROBE_CANDLE_MIN_DAY_ROOM_PCT - 1e-12
 
 
@@ -704,7 +831,7 @@ def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         return None
     # Не на кончике живой свечи пробоя.
     if live_high > 0 and live_low > 0:
-        tip_cap = live_high * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
+        tip_cap = live_high * (1.0 - 0.35 / 100.0)
         if price > tip_cap + 1e-12:
             return None
         span = live_high - live_low
@@ -824,11 +951,12 @@ def probe_pick_setup(
     order: tuple[str, ...] | list[str] | None = None,
     day_chg: float | None = None,
     day_high: float | None = None,
+    now: float | None = None,
 ) -> dict[str, Any] | None:
     """Первый сработавший по order. Живой стол: только candle.
 
     Impulse/sprint/shelf остаются для явного order= в тестах.
-    Candle: свежий день + room до хая суток (не топ gainers у пика).
+    Candle: живой старт 5м свечи среди растущих монет.
     """
     seq = tuple(order or PROBE_ALGO_ORDER)
     for algo in seq:
@@ -846,7 +974,7 @@ def probe_pick_setup(
         ):
             continue
         if name == PROBE_ALGO_CANDLE:
-            setup = probe_candle_setup(bars5 or [])
+            setup = probe_candle_setup(bars5 or [], now=now)
             if setup and not probe_candle_day_ok(
                 price=float(setup.get("price") or 0),
                 day_high=float(day_high or 0),
@@ -1016,22 +1144,6 @@ def pocket_cash_reserve(equity: float, *, pocket_open: bool) -> float:
     return btc_dip_quote(equity)
 
 
-def alt_slot_pct(sleeve_pct: float | None = None, max_names: int | None = None) -> float:
-    limits = cfg()
-    if not limits.sleeve_on and sleeve_pct is None:
-        return 0.0
-    sleeve = limits.sleeve_max_pct if sleeve_pct is None else float(sleeve_pct)
-    names = limits.sleeve_max_names if max_names is None else int(max_names)
-    return round(max(0.0, sleeve) / max(1, names), 1)
-
-
-def alt_entry_ok(bb_z: Any) -> bool:
-    """Новый альт / докуп: цена у нижней полосы 4h."""
-    if bb_z is None:
-        return False
-    return float(bb_z) <= cfg().sleeve_entry_z
-
-
 def _arm_low(state: dict[str, Any] | None, price: float, now: float) -> dict[str, float]:
     """Новое дно сбрасывает таймер: отскок считается только после паузы."""
     px = float(price)
@@ -1123,6 +1235,20 @@ def update_pocket_arm(
     if state is None:
         return {"low": px, "ts": float(now)}
     return _arm_low(state, px, now)
+
+
+def pocket_entry_trends_ok(
+    *,
+    trend15: str,
+    trend1h: str,
+    week_chg: float | None,
+) -> bool:
+    """Карман SOL: не покупать в медвежьем 15m/1h и при неделе ≤ EXCLUDE_ENTER_CHG7."""
+    if trend15 == "bear" or trend1h == "bear":
+        return False
+    if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
+        return False
+    return True
 
 
 def pocket_bounce_ready(
@@ -1314,622 +1440,6 @@ def position_basis(entry: float, anchor: float | None) -> float:
     return float(entry or 0)
 
 
-def update_alt_exit_arm(
-    state: dict[str, Any] | None,
-    *,
-    price: float,
-    entry: float,
-    now: float,
-    qty: float = 0.0,
-) -> dict[str, float] | None:
-    """Плюс ≥ комиссия×2+$0.50 запоминает вершину рукава. Новая вершина сбрасывает таймер.
 
-    Ниже порога ловушка ещё не взведена. Уже взведенная не снимается.
-    """
-    px = float(price or 0)
-    ent = float(entry or 0)
-    if px <= 0 or ent <= 0:
-        if state is None:
-            return None
-        return {"high": float(state["high"]), "ts": float(state.get("ts") or now)}
-    gain = (px / ent - 1.0) * 100.0
-    if state is None:
-        if gain < exit_trap_arm_pct(entry=ent, qty=qty) - 1e-6:
-            return None
-        return {"high": px, "ts": float(now)}
-    high = float(state.get("high") or 0)
-    if px > high + 1e-12:
-        return {"high": px, "ts": float(now)}
-    return {"high": high, "ts": float(state.get("ts") or now)}
-
-
-def alt_exit_ready(
-    state: dict[str, Any] | None,
-    *,
-    price: float,
-    entry: float,
-    now: float | None = None,
-    qty: float = 0.0,
-) -> bool:
-    """Продажа рукава: −0,5% от вершины после паузы.
-
-    В плюсе — как ловушка (нужен ещё ≥ комиссия+$0.50).
-    Под входом после взведённой вершины — тоже выход: иначе ENA часами
-    «ниже плюса» и течёт до стопа −4%.
-    """
-    limits = cfg()
-    if not state or not _bounce_held(state, now, limits.sleeve_exit_hold_sec):
-        return False
-    high = float(state.get("high") or 0)
-    px = float(price or 0)
-    ent = float(entry or 0)
-    if high <= 0 or px <= 0 or ent <= 0:
-        return False
-    if px > high * (1.0 - limits.sleeve_exit_pullback_pct / 100.0) + 1e-12:
-        return False
-    gain = (px / ent - 1.0) * 100.0
-    if gain >= exit_trap_arm_pct(entry=ent, qty=qty) - 1e-6:
-        return True
-    return px <= ent + 1e-12
-
-
-def alt_exit_reason(
-    *,
-    price: float,
-    entry: float,
-    exit_arm: dict[str, Any] | None = None,
-    now: float | None = None,
-    ma: float | None = None,
-    swing_low: float = 0.0,
-    qty: float = 0.0,
-) -> str | None:
-    """Выход альта: стоп на дыре, обычный срыв — возврат под дно входа, плюс — откат от вершины."""
-    del ma
-    px = float(price or 0)
-    ent = float(entry or 0)
-    if px <= 0 or ent <= 0:
-        return None
-    gain = (px / ent - 1.0) * 100.0
-    # Ровно −stop% в float чуть больше порога — иначе стоп молчит.
-    if gain <= -cfg().sleeve_stop_pct + 1e-6:
-        return "стоп"
-    if float(swing_low or 0) > 0 and px <= float(swing_low):
-        return "дно"
-    if alt_exit_ready(exit_arm, price=px, entry=ent, now=now, qty=qty):
-        return "вершина"
-    return None
-
-
-def alt_sleeve_qty_for_exit(
-    *,
-    ticker: str,
-    held_qty: float,
-    pocket_qty: float,
-    price: float,
-    min_trade_usd: float,
-) -> float:
-    """Объём для альтового выхода: без кармана и без щупа, и без пыли ниже min_trade."""
-    del ticker
-    qty = max(0.0, float(held_qty or 0) - max(0.0, float(pocket_qty or 0)))
-    px = float(price or 0)
-    if px <= 0 or qty <= 0:
-        return 0.0
-    if qty * px + 1e-9 < float(min_trade_usd):
-        return 0.0
-    return qty
-
-
-def _held_value(row: dict[str, Any]) -> float:
-    if row.get("held_value") is not None:
-        return float(row.get("held_value") or 0)
-    return float(row.get("held") or 0) * float(row.get("price") or 0)
-
-
-
-def is_risk_off(*, btc_chg_7: float | None, btc_chg_day: float | None) -> bool:
-    """Слабый BTC: новые альты не берём, уже купленные держим до своего выхода."""
-    if btc_chg_7 is not None and btc_chg_7 <= BTC_RISK_OFF_7D:
-        return True
-    if (
-        btc_chg_7 is not None
-        and btc_chg_7 < 0
-        and btc_chg_day is not None
-        and btc_chg_day <= BTC_RISK_OFF_DAY
-    ):
-        return True
-    return False
-
-
-def cash_floor_pct(*, btc_chg_7: float | None, btc_chg_day: float | None) -> float:
-    """Доля кэша: bull ниже, норма 25%, risk-off — 100% (вызывающий обычно уже в кэш)."""
-    if is_risk_off(btc_chg_7=btc_chg_7, btc_chg_day=btc_chg_day):
-        return 100.0
-    if btc_chg_7 is not None and btc_chg_7 >= BTC_BULL_7D:
-        if btc_chg_day is None or btc_chg_day > -1.0:
-            return DESK_CASH_FLOOR_BULL_PCT
-    return cfg().pocket_pct
-
-
-def band_pct_for(ticker: str) -> float:
-    """Коридор ребаланса рукава."""
-    del ticker
-    return cfg().rebalance_pct
-
-
-def filter_auto_candidates(
-    rows: list[dict[str, Any]],
-    *,
-    held: set[str],
-    watchlist: list[str],
-    cooldown: set[str] | None = None,
-) -> list[dict[str, Any]]:
-    """Узкий список для автостола: рукав альта + watch + позиции."""
-    cool = {str(t).upper() for t in (cooldown or set())}
-    held_u = {str(t).upper() for t in held}
-    watch_u = [str(t).upper() for t in watchlist]
-    allow = sleeve_names() | held_u | set(watch_u)
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for row in rows:
-        ticker = str(row.get("ticker") or "").upper()
-        if not ticker or ticker in seen or ticker not in allow:
-            continue
-        if ticker in cool and ticker not in held_u:
-            continue
-        turnover = float(row.get("turnover") or 0)
-        # Уже держанное не режем по обороту — иначе не сможем довести ребаланс.
-        if ticker not in held_u:
-            if turnover > 0 and turnover < MIN_TURNOVER_USD:
-                continue
-        seen.add(ticker)
-        out.append(row)
-    return out
-
-
-def pick_alts(
-    rows: list[dict[str, Any]],
-    *,
-    sleeve_pct: float | None = None,
-    max_names: int | None = None,
-    excluded: set[str] | None = None,
-    blacklist: set[str] | None = None,
-) -> dict[str, float]:
-    """Рукав: держанные до выхода + новые у нижней полосы, кроме исключений.
-
-    Чёрный список не даёт новой покупки, но живая нога занимает слот. Исключение по неделе держанное не трогает.
-    """
-    limits = cfg()
-    sleeve_pct = limits.sleeve_max_pct if sleeve_pct is None else float(sleeve_pct)
-    max_names = limits.sleeve_max_names if max_names is None else int(max_names)
-    slot = alt_slot_pct(sleeve_pct, max_names)
-    if slot <= 0:
-        return {}
-    blocked = {str(t).upper() for t in (excluded or set())}
-    banned = {str(t).upper() for t in (blacklist or set())}
-    alts = [r for r in rows if str(r.get("ticker") or "").upper() in sleeve_names()]
-    held_all = [
-        r for r in alts
-        if _held_value(r) >= ALT_HELD_MIN_USD
-    ]
-    banned_held = [r for r in held_all if str(r["ticker"]).upper() in banned]
-    held = sorted(
-        (r for r in held_all if str(r["ticker"]).upper() not in banned),
-        key=_held_value,
-        reverse=True,
-    )
-    held_t = {str(r["ticker"]).upper() for r in held_all}
-    fresh = sorted(
-        (
-            r for r in alts
-            if str(r["ticker"]).upper() not in held_t
-            and str(r["ticker"]).upper() not in blocked
-            and str(r["ticker"]).upper() not in banned
-            and alt_entry_ok(r.get("bb_z"))
-        ),
-        key=lambda r: float(r["bb_z"]),
-    )
-    room = max(0, int(max_names) - len(banned_held))
-    picked = (held + fresh)[:room]
-    return {str(r["ticker"]).upper(): slot for r in picked}
-
-
-def score_alloc(
-    candidates: list[dict[str, Any]],
-    *,
-    cash_floor_pct: float | None = None,
-    alt_sleeve_pct: float | None = None,
-    alt_max_names: int | None = None,
-    excluded: set[str] | None = None,
-    blacklist: set[str] | None = None,
-) -> tuple[dict[str, float], str]:
-    """Рукав альтов (Боллинджер 4h). Недобор и исключения остаются кэшем."""
-    limits = cfg()
-    if cash_floor_pct is None:
-        cash_floor_pct = limits.pocket_pct
-    if not limits.sleeve_on and alt_sleeve_pct is None:
-        return {}, "Рукав выключен."
-    if alt_sleeve_pct is None:
-        alt_sleeve_pct = limits.sleeve_max_pct
-    if alt_max_names is None:
-        alt_max_names = limits.sleeve_max_names
-    floor = max(0.0, min(100.0, float(cash_floor_pct)))
-    if floor >= 100.0:
-        return {}, "Рынок слабый — держу кэш."
-    sleeve = max(0.0, min(float(alt_sleeve_pct), 100.0 - floor))
-    alt_rows = [
-        row for row in candidates
-        if str(row.get("ticker") or "").upper() in sleeve_names()
-    ]
-    banned = {str(t).upper() for t in (blacklist or set())}
-    alt_alloc = pick_alts(
-        alt_rows,
-        sleeve_pct=sleeve,
-        max_names=alt_max_names,
-        excluded=excluded,
-        blacklist=banned,
-    )
-    if not alt_alloc:
-        return {}, "Держу кэш: нет альтов у нижней полосы."
-    body = "альты " + ", ".join(f"{k} {int(round(v))}%" for k, v in alt_alloc.items())
-    blocked = {str(t).upper() for t in (excluded or set())}
-    if blocked:
-        body += "; исключения " + ", ".join(sorted(blocked))
-    if banned:
-        body += "; чёрный список " + ", ".join(sorted(banned))
-    return alt_alloc, f"Скор-стол: {body}, кэш ≥ {int(floor)}%."
-
-
-def drift_usd(current: float, target: float) -> float:
-    return abs(current - target)
-
-
-def should_rebalance_leg(
-    *,
-    current_value: float,
-    target_value: float,
-    equity: float,
-    band_pct: float | None = None,
-    min_trade_usd: float,
-    day_chg: float | None = None,
-    take_profit_pct: float | None = None,
-) -> bool:
-    """Коридор: не трогаем ногу, пока отклонение меньше max(band% equity, min_trade).
-
-    Take-profit: сильный дневной памп при избытке над целью — фиксируем даже внутри band.
-    """
-    excess = float(current_value) - float(target_value)
-    if band_pct is None:
-        band_pct = cfg().rebalance_pct
-    tp = TAKE_PROFIT_DAY_PCT if take_profit_pct is None else float(take_profit_pct)
-    if (
-        day_chg is not None
-        and float(day_chg) >= tp
-        and excess >= float(min_trade_usd)
-    ):
-        return True
-    equity = max(float(equity), 1.0)
-    band = max(equity * (band_pct / 100.0), float(min_trade_usd))
-    return drift_usd(current_value, target_value) >= band
-
-
-def watch_stream_tickers(
-    *,
-    held_values: dict[str, float],
-    pocket_open: bool,
-    min_usd: float = ALT_HELD_MIN_USD,
-) -> set[str]:
-    """Держанные ноги рукава выше пыли + SOL, если открыт карман."""
-    out = {
-        str(ticker).upper()
-        for ticker, value in (held_values or {}).items()
-        if str(ticker).upper() in sleeve_names() and float(value or 0) >= float(min_usd)
-    }
-    if pocket_open:
-        out.add(BTC_DIP_TICKER)
-    return out
-
-
-def watch_rate_ok(
-    watch_trades: list[float] | None,
-    *,
-    now: float | None = None,
-    max_per_hour: int = WATCH_MAX_TRADES_PER_HOUR,
-) -> bool:
-    """Не больше max_per_hour сделок дозора за последний час. Только входы, не стопы."""
-    current = time.time() if now is None else float(now)
-    cutoff = current - 3600.0
-    recent = [float(ts) for ts in (watch_trades or []) if float(ts) >= cutoff]
-    return len(recent) < max(0, int(max_per_hour))
-
-
-def watch_period_sec(
-    *,
-    legs: list[dict[str, Any]],
-    calm: int = WATCH_PERIOD_CALM,
-    near: int = WATCH_PERIOD_NEAR,
-    hot: int = WATCH_PERIOD_HOT,
-) -> int:
-    """12 мин спокойно; 60 с у стопа или когда рукав/карман ведёт вершину."""
-    period = int(calm)
-    for leg in legs:
-        px = float(leg.get("price") or 0)
-        ent = float(leg.get("entry") or 0)
-        if px <= 0 or ent <= 0:
-            continue
-        gain = (px / ent - 1.0) * 100.0
-        kind = str(leg.get("kind") or "alt")
-        limits = cfg()
-        arm = exit_trap_arm_pct(entry=ent, qty=float(leg.get("qty") or 0))
-        if kind == "pocket":
-            if float(leg.get("exit_high") or 0) > 0:
-                return int(hot)
-            if gain >= arm - NEAR_TP_PCT:
-                return int(hot)
-            if gain <= -limits.pocket_stop_pct + NEAR_SL_PCT:
-                return int(hot)
-            continue
-        if float(leg.get("exit_high") or 0) > 0:
-            return int(hot)
-        if gain >= arm - NEAR_TP_PCT:
-            return int(hot)
-        if gain <= -limits.sleeve_stop_pct + NEAR_SL_PCT:
-            return int(hot)
-    return period
-
-
-def watch_snapshot_line(
-    ticker: str,
-    *,
-    price: float,
-    entry: float,
-    ma: float | None = None,
-    kind: str = "alt",
-    exit_high: float = 0.0,
-    basis: float = 0.0,
-    qty: float = 0.0,
-) -> str:
-    """Одна нога дозора: avg, цена, дистанция до стопа/тейка."""
-    name = str(ticker or "?").upper()
-    px = float(price or 0)
-    ent = float(entry or 0)
-    rule = position_basis(ent, basis)
-    if px <= 0 or ent <= 0:
-        return f"{name} px={px:.4g} avg=?"
-    book = (px / ent - 1.0) * 100.0
-    gain = (px / rule - 1.0) * 100.0 if rule > 0 else book
-    arm = exit_trap_arm_pct(entry=rule or ent, qty=qty)
-    bits = [f"{name} px={px:.4g} avg={ent:.4g} {book:+.2f}%"]
-    if rule > 0 and abs(rule - ent) / ent > 1e-6:
-        bits.append(f"отсчёт {rule:.4g} {gain:+.2f}%")
-    if kind == "pocket":
-        hi = float(exit_high or 0)
-        stop = cfg().pocket_stop_pct
-        if hi > 0:
-            need = hi * (1.0 - cfg().pocket_exit_pullback_pct / 100.0)
-            bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + stop:.1f}пп")
-        else:
-            bits.append(f"до ловушки {arm - gain:+.2f}пп до стопа {gain + stop:.1f}пп")
-    else:
-        hi = float(exit_high or 0)
-        limits = cfg()
-        if hi > 0:
-            pull = hi * (1.0 - limits.sleeve_exit_pullback_pct / 100.0)
-            floor = rule * (1.0 + arm / 100.0)
-            need = pull if pull >= floor else floor
-            bits.append(f"верх {hi:.4g} откат до {need:.4g} до стопа {gain + limits.sleeve_stop_pct:.1f}пп")
-        else:
-            bits.append(
-                f"до ловушки {arm - gain:+.2f}пп до стопа {gain + limits.sleeve_stop_pct:.1f}пп"
-            )
-        if ma and float(ma) > 0:
-            bits.append(f"MA {px / float(ma) - 1.0:+.2%}")
-    return " ".join(bits)
-
-
-def should_watch_take_profit(
-    *,
-    day_chg: float | None,
-    current_value: float,
-    target_value: float,
-    min_trade_usd: float,
-    tp_pct: float = WATCH_TP_DAY_PCT,
-) -> bool:
-    excess = float(current_value) - float(target_value)
-    if excess < float(min_trade_usd):
-        return False
-    if day_chg is None:
-        return False
-    return float(day_chg) >= float(tp_pct)
-
-
-def should_watch_dip_buy(
-    *,
-    ticker: str,
-    day_chg: float | None,
-    current_value: float,
-    target_value: float,
-    min_trade_usd: float,
-    dip_pct: float | None = None,
-    bb_z: float | None = None,
-    excluded: set[str] | None = None,
-) -> bool:
-    """Новый альт у нижней полосы. Держанный не усредняем, исключённый не берём."""
-    del dip_pct
-    t = str(ticker or "").upper()
-    if t not in sleeve_names() or t in {str(x).upper() for x in (excluded or set())}:
-        return False
-    del day_chg
-    gap = float(target_value) - float(current_value)
-    if gap < float(min_trade_usd):
-        return False
-    return float(current_value) < ALT_HELD_MIN_USD and alt_entry_ok(bb_z)
-
-
-def pick_watch_alt_entries(
-    bands: dict[str, dict[str, float] | None],
-    *,
-    target_alloc: dict[str, float],
-    held_alts: set[str],
-    blocked: set[str],
-    max_names: int | None = None,
-    excluded: set[str] | None = None,
-) -> list[str]:
-    """Дозор: новые альты у нижней полосы 4h, пока в рукаве есть свободные слоты."""
-    if max_names is None:
-        max_names = cfg().sleeve_max_names
-    banned = {str(t).upper() for t in (excluded or set())}
-    taken = {t for t in target_alloc if t in sleeve_names()} | set(held_alts)
-    room = max(0, int(max_names) - len(taken))
-    if room <= 0:
-        return []
-    ready = [
-        (float(b["z"]), t)
-        for t, b in bands.items()
-        if t in sleeve_names()
-        and t not in taken
-        and t not in blocked
-        and t not in banned
-        and b
-        and alt_entry_ok(b.get("z"))
-    ]
-    ready.sort()
-    return [t for _z, t in ready[:room]]
-
-
-def trail_pct_for(ticker: str) -> float | None:
-    """Дистанция трейла дозора (% от пика). None — ногу не ведём."""
-    del ticker
-    return TRAIL_ALT_PCT
-
-
-def calculate_trailing_stop(
-    *,
-    price: float,
-    entry: float,
-    peak: float | None = None,
-    prev_stop: float | None = None,
-    stoploss_pct: float = 10.0,
-    trail_pct: float | None = None,
-    positive_trail_pct: float | None = None,
-    offset_pct: float = 0.0,
-    only_offset: bool = False,
-) -> dict[str, Any]:
-    """Трейлинг-стоп в духе Freqtrade `ft_stoploss_adjust` / Trailing Stop Loss.
-
-    Отличия от Freqtrade (явно):
-    - У Freqtrade `stoploss` / `trailing_stop_positive` — доли (−0.10, 0.02).
-      У нас проценты стола: 10.0 = −10%, 2.0 = −2% от пика (как sleeve_stop_pct).
-    - Только long spot: нет `is_short`, нет leverage.
-    - Нет объекта Trade и `adjust_stop_loss`: возвращаем снимок для JSON/дозора.
-    - Стоп для long только поднимается (не ослабевает), как у Freqtrade.
-    - `only_offset` ≈ `trailing_only_offset_is_reached`: до offset стоп статичен
-      от входа; после — тянется от пика.
-    - `positive_trail_pct` ≈ `trailing_stop_positive`: более тугой трейл после offset.
-    - `hit` считаем по текущей цене (live); в бэктесте Freqtrade сверяет high/low свечи.
-
-    Пример (Freqtrade docs → наши %): entry=100, stoploss_pct=10, trail как 10%,
-    peak=102 → stop=91.8; при positive_trail_pct=2 и offset_pct=3, peak=103.5 → stop=101.43.
-    """
-    px = float(price or 0)
-    ent = float(entry or 0)
-    if ent <= 0 and px > 0:
-        ent = px
-    if px <= 0 or ent <= 0:
-        return {
-            "entry": max(ent, 0.0),
-            "peak": max(float(peak or 0), ent, 0.0),
-            "stop": float(prev_stop or 0),
-            "trail_pct": float(stoploss_pct or 0),
-            "gain_pct": 0.0,
-            "trailing": False,
-            "hit": False,
-        }
-
-    # Freqtrade: bound = high для long в бэктесте; в live — current_rate.
-    # У нас peak = max(предыдущий high, entry, текущая цена).
-    hi = max(float(peak or 0), ent, px)
-    # gain от пика для решения «какой trail %», как bound_profit у Freqtrade.
-    peak_gain_pct = (hi / ent - 1.0) * 100.0
-    gain_pct = (px / ent - 1.0) * 100.0
-
-    base_trail = float(stoploss_pct if trail_pct is None else trail_pct)
-    base_trail = max(0.0, base_trail)
-    pos_trail = None if positive_trail_pct is None else max(0.0, float(positive_trail_pct))
-    offset = max(0.0, float(offset_pct or 0))
-
-    # Статический стоп от входа: Freqtrade initial adjust_stop_loss(open_rate, stoploss).
-    initial_stop = ent * (1.0 - base_trail / 100.0)
-
-    # trailing_only_offset_is_reached: до offset не двигаем стоп от пика.
-    can_trail = (not only_offset) or (peak_gain_pct + 1e-12 >= offset)
-
-    # Freqtrade: если profit > offset и задан trailing_stop_positive — берём его как дистанцию.
-    active_trail = base_trail
-    if (
-        can_trail
-        and pos_trail is not None
-        and peak_gain_pct + 1e-12 >= offset
-    ):
-        active_trail = pos_trail
-
-    if can_trail:
-        # stop = peak * (1 - trail%): аналог adjust_stop_loss(bound, stop_loss_value).
-        trailed = hi * (1.0 - active_trail / 100.0)
-        # Стоп только ужесточаем (для long — только вверх).
-        stop = max(initial_stop, trailed, float(prev_stop or 0))
-        trailing = True
-    else:
-        stop = max(initial_stop, float(prev_stop or 0))
-        trailing = False
-
-    hit = px <= stop + 1e-12
-    return {
-        "entry": ent,
-        "peak": hi,
-        "stop": stop,
-        "trail_pct": active_trail if trailing else base_trail,
-        "gain_pct": gain_pct,
-        "trailing": trailing,
-        "hit": hit,
-    }
-
-
-def update_trail_leg(
-    *,
-    price: float,
-    entry: float,
-    high: float | None = None,
-    armed: bool = False,
-    arm_pct: float = TRAIL_ARM_PCT,
-    trail_pct: float = 6.0,
-    prev_stop: float | None = None,
-    positive_trail_pct: float | None = None,
-) -> dict[str, Any]:
-    """Обновить водяную марку. hit=True — цена пробила подтягивающийся стоп.
-
-    Обёртка над calculate_trailing_stop: arm_pct → only_offset / offset_pct.
-    До взвода hit не ставим (старый контракт дозора), даже если цена ниже
-    начального stoploss от входа.
-    """
-    out = calculate_trailing_stop(
-        price=price,
-        entry=entry,
-        peak=high,
-        prev_stop=prev_stop,
-        stoploss_pct=float(trail_pct),
-        trail_pct=float(trail_pct),
-        positive_trail_pct=positive_trail_pct,
-        offset_pct=float(arm_pct),
-        only_offset=True,
-    )
-    is_armed = bool(armed) or bool(out["trailing"])
-    return {
-        "entry": out["entry"],
-        "high": out["peak"],
-        "armed": is_armed,
-        "stop": out["stop"],
-        "hit": bool(out["hit"]) and is_armed,
-        "gain_pct": out["gain_pct"],
-        "trailing": out["trailing"],
-        "trail_pct": out["trail_pct"],
-    }
+def watch_period_sec(**kwargs: Any) -> float:
+    return float(WATCH_PERIOD_CALM)
