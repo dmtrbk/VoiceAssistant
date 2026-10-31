@@ -825,12 +825,21 @@ class TestDeskPolicy(unittest.TestCase):
                 day_high=1.12,
             )
         )
+        # У самого пика суток (<1%) — нет; глубокий слив с хая (>28%) — нет.
         self.assertIsNone(
             policy.probe_pick_setup(
                 [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
                 base5 + [rising],
                 day_chg=8.0,
                 day_high=1.01,
+            )
+        )
+        self.assertIsNone(
+            policy.probe_pick_setup(
+                [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+                base5 + [rising],
+                day_chg=8.0,
+                day_high=1.50,
             )
         )
         self.assertTrue(
@@ -1127,11 +1136,48 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.probe_quote(), 30.0)
         self.assertTrue(policy.probe_should_handoff("ожидание"))
         self.assertTrue(policy.probe_should_handoff("тренд"))
+        self.assertTrue(policy.probe_should_handoff("застой"))
         self.assertFalse(policy.probe_should_handoff("дно"))
         self.assertFalse(policy.probe_should_handoff("полка"))
         self.assertFalse(policy.probe_should_handoff("стоп"))
         self.assertFalse(policy.probe_should_handoff("вершина"))
         self.assertEqual(policy.pocket_from_probe_max(), 3)
+        # BASED $30: пик +2.035% взвёл ловушку, откат -0.5% до +1.44% закрывает в плюс («вершина»).
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.05445,
+                entry=0.053678,
+                shelf=0.05279,
+                trend15="bull",
+                peak=0.05477,
+                algo=policy.PROBE_ALGO_CANDLE,
+                qty=558.89,
+            ),
+            "вершина",
+        )
+        # Спящая нога щупа ≥ 2ч → «застой» (handoff в карман2).
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.3143,
+                entry=0.3174,
+                shelf=0.314,
+                trend15="neutral",
+                peak=0.3199,
+                algo=policy.PROBE_ALGO_CANDLE,
+                qty=94.5,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_CANDLE_STALE_SEC + 1.0,
+            ),
+            "застой",
+        )
+        # В кармане2 нога со щупа (scratch=True) закрывается в безубыток при -0.20% и выше.
+        self.assertIsNone(
+            policy.btc_dip_exit_reason(price=0.995, entry=1.0, scratch=True)
+        )
+        self.assertEqual(
+            policy.btc_dip_exit_reason(price=0.9985, entry=1.0, scratch=True),
+            "безубыток",
+        )
 
     def test_btc_dip_rules(self):
         self.assertTrue(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))

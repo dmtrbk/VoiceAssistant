@@ -688,7 +688,7 @@ def _parse_second_pocket_leg(raw: Any) -> dict[str, Any] | None:
         exit_high = 0.0
         exit_ts = 0.0
         low = 0.0
-    return {
+    out: dict[str, Any] = {
         "ticker": ticker,
         "qty": qty,
         "entry": entry,
@@ -696,6 +696,9 @@ def _parse_second_pocket_leg(raw: Any) -> dict[str, Any] | None:
         "exit_ts": exit_ts,
         "low": max(low, 0.0),
     }
+    if bool(raw.get("scratch")):
+        out["scratch"] = True
+    return out
 
 
 def read_second_pocket_legs(path: str | None = None) -> list[dict[str, Any]]:
@@ -758,6 +761,8 @@ def write_second_pocket_legs(
             row["exit_ts"] = float(leg.get("exit_ts") or 0)
         if float(leg.get("low") or 0) > 0:
             row["low"] = float(leg["low"])
+        if bool(leg.get("scratch")):
+            row["scratch"] = True
         clean.append(row)
     if not clean:
         try:
@@ -798,6 +803,7 @@ def upsert_second_pocket_leg(
     low: float = 0.0,
     exit_high: float = 0.0,
     exit_ts: float = 0.0,
+    scratch: bool = False,
     max_legs: int | None = None,
     path: str | None = None,
 ) -> bool:
@@ -816,7 +822,7 @@ def upsert_second_pocket_leg(
             break
     if found is None and len(legs) >= max(1, limit):
         return False
-    row = {
+    row: dict[str, Any] = {
         "ticker": coin,
         "qty": float(qty),
         "entry": float(entry),
@@ -824,6 +830,8 @@ def upsert_second_pocket_leg(
         "exit_high": max(0.0, float(exit_high or 0)),
         "exit_ts": float(exit_ts or 0),
     }
+    if scratch:
+        row["scratch"] = True
     if found is None:
         legs.append(row)
     else:
@@ -838,6 +846,8 @@ def upsert_second_pocket_leg(
         row["low"] = float(low or 0) or float(prev.get("low") or 0)
         row["exit_high"] = max(float(exit_high or 0), float(prev.get("exit_high") or 0))
         row["exit_ts"] = float(exit_ts or prev.get("exit_ts") or 0)
+        if scratch or bool(prev.get("scratch")):
+            row["scratch"] = True
         legs[found] = row
     write_second_pocket_legs(legs, path=path)
     return True
@@ -950,6 +960,7 @@ def _probe_leg_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
         "arm_px": _num("arm_px"),
         "peak": _num("peak"),
         "low": _num("low"),
+        "ts": _num("ts"),
         "algo": str(raw.get("algo") or "").strip().lower(),
     }
 
@@ -1103,6 +1114,7 @@ def write_probe(
     arm_algo: str = "",
     peak: float = 0.0,
     low: float = 0.0,
+    ts: float = 0.0,
     algo: str = "",
     drop: str = "",
     drop_arm: str = "",
@@ -1136,9 +1148,11 @@ def write_probe(
     name = _normalize_ticker(ticker)
     if name and float(qty) > 0 and float(entry) > 0:
         prev_algo = ""
+        prev_ts = 0.0
         for leg in legs:
             if leg["ticker"] == name:
                 prev_algo = str(leg.get("algo") or "")
+                prev_ts = float(leg.get("ts") or 0)
                 break
         legs = [leg for leg in legs if leg["ticker"] != name]
         legs.append({
@@ -1149,6 +1163,7 @@ def write_probe(
             "arm_px": float(arm_px or 0),
             "peak": float(peak or 0),
             "low": float(low or 0),
+            "ts": float(ts or prev_ts or time.time()),
             "algo": str(algo or prev_algo or "").strip().lower(),
         })
         arms = [arm for arm in arms if arm["ticker"] != name]

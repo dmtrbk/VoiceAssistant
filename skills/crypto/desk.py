@@ -48,11 +48,13 @@ from .desk_policy import (
     _leveraged_base,
     BTC_DIP_TICKER,
     POCKET_EXIT_DEEP_PULLBACK_PCT,
+    PROBE_CANDLE_SHELF_BREAK_PCT,
     btc_dip_quote,
     probe_algo_params,
     probe_arm_action,
     probe_exit_reason,
     probe_candle_buy_ok,
+    probe_candle_day_ok,
     probe_grind_live_ok,
     probe_should_handoff,
     PROBE_ALGO_CANDLE,
@@ -542,6 +544,7 @@ class CryptoDeskMixin:
                 exit_arm=exit_state,
                 now=now,
                 swing_low=float(leg.get("low") or 0),
+                scratch=bool(leg.get("scratch")),
             )
             if not reason or price <= 0:
                 if exit_state and price > 0:
@@ -767,8 +770,16 @@ class CryptoDeskMixin:
             pass
         return True
 
-    def _probe_bars(self, ticker: str, interval: str, limit: int) -> list[dict[str, float]]:
-        cache_sec = 2.0 if str(interval) == "5" else None
+    def _probe_bars(
+        self,
+        ticker: str,
+        interval: str,
+        limit: int,
+        *,
+        cache_sec: float | None = None,
+    ) -> list[dict[str, float]]:
+        if cache_sec is None:
+            cache_sec = 8.0 if str(interval) == "5" else None
         data = self._public_get(
             "/v5/market/kline",
             {
@@ -907,31 +918,41 @@ class CryptoDeskMixin:
             entry_low=float(state.get("low") or 0),
             algo=leg_algo,
             qty=float(state.get("qty") or 0),
+            opened_ts=float(state.get("ts") or 0),
+            now=time.time(),
         )
         if not reason:
             return
         qty = float(state.get("qty") or 0)
         entry = float(state.get("entry") or 0)
-        # Мягкий выход → карман2 только если уже был реальный плюс (ловушка).
-        # Иначе BLEND/GROVE: handoff без профита → течь в hold.
+        shelf = float(state.get("shelf") or 0)
+        # Мягкий выход → карман2 только если уже был реальный плюс (ловушка),
+        # либо если нога застряла в щупе («застой») — освобождаем слот щупа под минимальный выход в кармане2.
         seed_high = max(float(state.get("peak") or 0), float(price or 0))
         peak_gain = (seed_high / entry - 1.0) * 100.0 if entry > 0 else 0.0
         arm_need = exit_trap_arm_pct(entry=entry, qty=qty) if entry > 0 and qty > 0 else 9e9
+        is_stale = reason == "застой"
+        has_trap_peak = peak_gain >= arm_need - 1e-6
         if (
             probe_should_handoff(reason)
             and cfg().second_on
             and qty > 0
             and entry > 0
-            and peak_gain >= arm_need - 1e-6
+            and (has_trap_peak or is_stale)
         ):
-            # low не тащим: иначе карман2 сразу бьёт «дно» по старому low щупа.
+            shelf_floor = (
+                shelf * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0)
+                if is_stale and shelf > 0
+                else 0.0
+            )
             ok = upsert_second_pocket_leg(
                 ticker=ticker,
                 qty=qty,
                 entry=entry,
-                low=0.0,
-                exit_high=seed_high,
-                exit_ts=time.time() if seed_high > 0 else 0.0,
+                low=shelf_floor,
+                exit_high=0.0 if is_stale else seed_high,
+                exit_ts=0.0 if is_stale else (time.time() if seed_high > 0 else 0.0),
+                scratch=is_stale,
                 max_legs=pocket_from_probe_max(),
             )
             if ok:
@@ -1061,7 +1082,7 @@ class CryptoDeskMixin:
         if str(algo or "") == PROBE_ALGO_CANDLE:
             # Актуальных 5м: buy_ok мягче live_ok — иначе hold убивает вход (CPOOL).
             try:
-                bars5 = self._probe_bars(ticker, "5", 20)
+                bars5 = self._probe_bars(ticker, "5", 20, cache_sec=2.0)
             except Exception as exc:
                 logger.info("[Крипта] щуп %s 5м tip: %s", ticker, exc)
                 write_probe(drop_arm=ticker)
@@ -1219,14 +1240,22 @@ class CryptoDeskMixin:
             return False
 
         # 1) Широкий обзор: только 5м candle — 15м/1h только если свеча уже живая.
-        for _rank, row in ranked[:PROBE_SCAN_LIMIT]:
+        for scan_idx, (_rank, row) in enumerate(ranked[:PROBE_SCAN_LIMIT]):
             if _arm_slots_left() <= 0:
                 break
             ticker = str(row["ticker"])
             if ticker in blocked:
                 continue
+            if not probe_candle_day_ok(
+                price=float(row.get("price") or 0),
+                day_high=float(row.get("high") or 0),
+                day_chg=float(row.get("chg") or 0),
+            ):
+                continue
             try:
-                bars5 = self._probe_bars(ticker, "5", 80)
+                bars5 = self._probe_bars(
+                    ticker, "5", 80, cache_sec=15.0 if scan_idx < 24 else 90.0
+                )
             except Exception as exc:
                 logger.info("[Крипта] щуп %s 5м: %s", ticker, exc)
                 continue
@@ -1564,14 +1593,14 @@ class CryptoDeskMixin:
                 next_report = time.time() + _DESK_PERIOD_SEC
             if now >= next_probe:
                 try:
+                    self._pockets_tick()
+                except Exception as exc:
+                    logger.warning("[Крипта] карманы: %s", exc)
+                try:
                     self._probe_cycle()
                     self._sync_tape_symbols()
                 except Exception as exc:
                     logger.warning("[Крипта] щуп: %s", exc)
-                try:
-                    self._pockets_tick()
-                except Exception as exc:
-                    logger.warning("[Крипта] карманы: %s", exc)
                 armed = bool(probe_arms())
                 gap = PROBE_ARMED_PERIOD_SEC if armed else probe_period_sec()
                 next_probe = time.time() + gap

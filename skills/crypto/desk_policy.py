@@ -24,8 +24,10 @@ PROBE_MAX_LEGS = 3
 POCKET_FROM_PROBE_MAX = 3
 # Мягкий выход щупа → передача во второй карман; жёсткий — продажа.
 # «дно» не передаём: цена уже у low щупа — карман2 сразу резал бы тем же дном.
-PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд"})
+PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд", "застой"})
 PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "дно"})
+PROBE_CANDLE_STALE_SEC = 2 * 3600
+POCKET_SCRATCH_PCT = -0.20
 DESK_CASH_FLOOR_PCT = 25.0
 DESK_CASH_FLOOR_BULL_PCT = 8.0
 REBALANCE_BAND_PCT = 6.0
@@ -147,7 +149,7 @@ PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 5.0
 # 5с hold = CPOOL вечный tip-drop: хай уезжает, bar_pos убивает buy.
 PROBE_CANDLE_HOLD_SEC = 1
 PROBE_CANDLE_CHASE_PCT = 1.2
-# Запас хода до хая суток ≥ 1% (пускает BIRB/EDGE/MPLX/PEPE/DOOD/INIT), без перегрева ≥45%.
+# Запас хода до хая суток ≥ 1% (режет BR/PORTAL под самым пиком, пускает BLUR/BEAM/BIRB/EDGE), без перегрева ≥45%.
 PROBE_CANDLE_MAX_DAY_PCT = 45.0
 PROBE_CANDLE_MIN_DAY_ROOM_PCT = 1.0
 PROBE_CANDLE_MAX_DAY_DROP_PCT = 28.0
@@ -323,6 +325,7 @@ def btc_dip_exit_reason(
     exit_arm: dict[str, Any] | None = None,
     now: float | None = None,
     swing_low: float = 0.0,
+    scratch: bool = False,
 ) -> str | None:
     """Стоп −15% на дыре. Обычный срыв — возврат под локальное дно. Плюс закрываем откатом от вершины."""
     px = float(price or 0)
@@ -336,6 +339,8 @@ def btc_dip_exit_reason(
         return "дно"
     if pocket_exit_ready(exit_arm, price=px, now=now, entry=ent):
         return "вершина"
+    if scratch and gain >= POCKET_SCRATCH_PCT - 1e-6:
+        return "безубыток"
     return None
 
 
@@ -1082,11 +1087,14 @@ def probe_exit_reason(
     entry_low: float = 0.0,
     algo: str = "",
     qty: float = 0.0,
+    opened_ts: float = 0.0,
+    now: float | None = None,
 ) -> str | None:
     """Стоп и полка. Плюс — ловушка: пик ≥ комиссия×2+$0.50, продажа на откате −0,5%.
 
     Пока ловушка не взведена: shelf режется «ожиданием»/«дном»; подножка
     impulse/sprint/grind эти срезы не берёт. Большой ход (+PROBE_RUN) ещё и медвежьим 15м.
+    Если нога висит без выхода ≥ PROBE_CANDLE_STALE_SEC — «застой» (handoff в карман2).
     """
     px = float(price or 0)
     ent = float(entry or 0)
@@ -1111,9 +1119,15 @@ def probe_exit_reason(
     if (
         peak_gain >= arm_pct - 1e-6
         and px <= high * (1.0 - cfg().pocket_exit_pullback_pct / 100.0) + 1e-12
-        and gain >= arm_pct - 1e-6
+        and gain >= 2.0 * EXIT_FEE_SIDE * 100.0 - 1e-6
     ):
         return "вершина"
+    if (
+        float(opened_ts or 0) > 0
+        and now is not None
+        and float(now) - float(opened_ts) >= PROBE_CANDLE_STALE_SEC
+    ):
+        return "застой"
     run = high >= ent * (1.0 + PROBE_RUN_PCT / 100.0)
     footboard = name in {
         PROBE_ALGO_CANDLE,
