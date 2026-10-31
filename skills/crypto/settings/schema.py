@@ -34,7 +34,7 @@ class DeskSettings:
     sleeve_exit_hold_sec: float = 2 * 60
     sleeve_stop_pct: float = 4.0
     probe_on: bool = True
-    probe_usd: float = 30.0
+    probe_usd: float = 40.0
     probe_max_loss_pct: float = 8.0
     probe_shelf_range_pct: float = 12.0
     probe_break_min_pct: float = 4.0

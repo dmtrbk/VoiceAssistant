@@ -55,6 +55,7 @@ from .desk_policy import (
     probe_exit_reason,
     probe_candle_buy_ok,
     probe_candle_day_ok,
+    probe_daily_loss_blocked,
     probe_grind_live_ok,
     probe_should_handoff,
     PROBE_ALGO_CANDLE,
@@ -1213,6 +1214,9 @@ class CryptoDeskMixin:
     def _probe_scan(self) -> None:
         if len(probe_legs()) + len(probe_arms()) >= PROBE_MAX_LEGS:
             return
+        if probe_daily_loss_blocked(crypto_journal.daily_realized_pnl()):
+            logger.info("[Крипта] щуп стоп на сегодня: достигнут дневной лимит убытка")
+            return
         try:
             tape = self._tape()
         except Exception as exc:
@@ -1250,6 +1254,7 @@ class CryptoDeskMixin:
                 price=float(row.get("price") or 0),
                 day_high=float(row.get("high") or 0),
                 day_chg=float(row.get("chg") or 0),
+                stair=True,
             ):
                 continue
             try:

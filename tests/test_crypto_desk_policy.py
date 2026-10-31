@@ -794,6 +794,30 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_candle_buy_ok(1.003, 1.02, 0.999, 1.0)
         )
+        # Плотная ступенька (body 0.5%, wick 0.05%, pos 0.90) проходит buy_ok.
+        self.assertTrue(
+            policy.probe_candle_buy_ok(1.005, 1.0055, 1.000, 1.000)
+        )
+        # Ступенька из 3 зелёных 5м баров (как TREE/BIRB/WET): проходит setup и допускает room ≥ 0.3%.
+        stair_bars = base5[:-2] + [
+            {"open": 1.000, "high": 1.004, "low": 1.000, "close": 1.003, "volume": 12.0},
+            {"open": 1.003, "high": 1.008, "low": 1.003, "close": 1.007, "volume": 20.0},
+            {"open": 1.007, "high": 1.011, "low": 1.007, "close": 1.0105, "volume": 18.0},
+        ]
+        stair_setup = policy.probe_candle_setup(stair_bars)
+        self.assertIsNotNone(stair_setup)
+        assert stair_setup is not None
+        self.assertAlmostEqual(stair_setup["shelf"], 1.003)
+        self.assertEqual(stair_setup.get("stair"), 1.0)
+        stair_pick = policy.probe_pick_setup(
+            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+            stair_bars,
+            day_chg=7.2,
+            day_high=1.015,
+        )
+        self.assertIsNotNone(stair_pick)
+        self.assertFalse(policy.probe_daily_loss_blocked(-5.5))
+        self.assertTrue(policy.probe_daily_loss_blocked(-6.0))
         self.assertEqual(policy.PROBE_ALGO_ORDER, (policy.PROBE_ALGO_CANDLE,))
         self.assertNotIn(policy.PROBE_ALGO_GRIND, policy.PROBE_ALGO_ORDER)
         self.assertNotIn(policy.PROBE_ALGO_IMPULSE, policy.PROBE_ALGO_ORDER)
@@ -1133,7 +1157,7 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             "полка",
         )
-        self.assertEqual(policy.probe_quote(), 30.0)
+        self.assertEqual(policy.probe_quote(), 40.0)
         self.assertTrue(policy.probe_should_handoff("ожидание"))
         self.assertTrue(policy.probe_should_handoff("тренд"))
         self.assertTrue(policy.probe_should_handoff("застой"))
@@ -1296,10 +1320,10 @@ class TestDeskPolicy(unittest.TestCase):
         )
         kept = policy.update_pocket_exit_arm(held, price=100.2, entry=100.0, now=80.0, qty=1.0)
         self.assertEqual(kept["high"], 104.0)
-        # $50 нога: порог выше (~1.36%), $200 — ниже (~0.61%).
-        self.assertAlmostEqual(policy.exit_trap_arm_pct(cost_usd=100.0), 0.86, places=2)
-        self.assertGreater(policy.exit_trap_arm_pct(cost_usd=50.0), 1.2)
-        self.assertLess(policy.exit_trap_arm_pct(cost_usd=200.0), 0.7)
+        # $40 нога: порог ~1.11%, $100 — 0.66%, $200 — 0.51%.
+        self.assertAlmostEqual(policy.exit_trap_arm_pct(cost_usd=100.0), 0.66, places=2)
+        self.assertGreater(policy.exit_trap_arm_pct(cost_usd=40.0), 1.0)
+        self.assertLess(policy.exit_trap_arm_pct(cost_usd=200.0), 0.6)
 
     def test_watch_stream_tickers_skips_dust(self):
         self.assertEqual(

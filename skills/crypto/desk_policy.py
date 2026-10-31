@@ -66,9 +66,9 @@ ALT_CHASE_PCT = 5.0
 ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
 # Суточный потолок +25% остался только у impulse: уже разогнанную свечу не догоняем.
-# Ловушка: круг комиссий (taker 0,18% × 2) + полдоллара сверх.
+# Ловушка: круг комиссий (taker 0,18% × 2) + $0.30 сверх.
 EXIT_FEE_SIDE = 0.0018
-EXIT_TRAP_EXTRA_USD = 0.50
+EXIT_TRAP_EXTRA_USD = 0.30
 EXIT_TRAP_DEFAULT_COST_USD = 100.0
 
 # Стейблы не рукав, даже если оборот большой. Базовый список остаётся всегда.
@@ -77,8 +77,8 @@ SLEEVE_SKIP = frozenset({
     "TUSD", "USDD", "PYUSD", "USDY", "USDP", "GUSD", "EURC", "EUR", "USD",
 })
 _live_extra: set[str] = set()
-# Щуп: 30$ на пробой тихой полки. Не слот рукава и не карман.
-PROBE_USD = 30.0
+# Щуп: 40$ на пробой тихой полки / свечи. Не слот рукава и не карман.
+PROBE_USD = 40.0
 # Раньше $1M/~$250k резали пыльные папы (DIAM ~$48k при day +30…50%).
 # $25k — почти весь spot USDT с day ≥ пола; ниже — совсем мёртвый стакан.
 PROBE_MIN_TURNOVER_USD = 25_000.0
@@ -153,6 +153,20 @@ PROBE_CANDLE_CHASE_PCT = 1.2
 PROBE_CANDLE_MAX_DAY_PCT = 45.0
 PROBE_CANDLE_MIN_DAY_ROOM_PCT = 1.0
 PROBE_CANDLE_MAX_DAY_DROP_PCT = 28.0
+# Ступенька (3 зелёных 5м бара подряд с растущими low и close, как TREE/BIRB/WET/MPLX):
+# на 3-м баре цена идёт плотно у верха (pos ≥ 0.70, wick ≤ 0.30%), допускаем room ≥ 0.3%.
+PROBE_STAIR_MIN_RISE_PCT = 0.70
+PROBE_STAIR_MAX_RISE_PCT = 2.40
+PROBE_STAIR_MIN_BODY_PCT = 0.20
+PROBE_STAIR_MAX_BODY_PCT = 1.50
+PROBE_STAIR_MIN_BAR_POS = 0.70
+PROBE_STAIR_MAX_WICK_PCT = 0.30
+PROBE_STAIR_MAX_DIP_PCT = 0.35
+PROBE_STAIR_VOL2_MULT = 1.5
+PROBE_STAIR_VOL_MIN_MULT = 1.1
+PROBE_STAIR_MIN_DAY_ROOM_PCT = 0.3
+# Жёсткий дневной риск-лимит (Daily Max Drawdown) на новые входы щупа (~1.35% от депозита $440).
+PROBE_DAILY_MAX_LOSS_USD = 6.0
 PROBE_SPRINT_HOLD_SEC = 30
 PROBE_SPRINT_CHASE_PCT = 5.0
 PROBE_IMPULSE_HOLD_SEC = 8
@@ -704,7 +718,7 @@ def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_o
 
 
 def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
-    """Перед buy после arm: свеча всё ещё восходящая, не у самого кончика и без слива."""
+    """Перед buy после arm: свеча всё ещё восходящая, не у самого кончика (кроме плотной ступеньки) и без слива."""
     px = float(price or 0)
     hi = float(live_high or 0)
     lo = float(live_low or 0)
@@ -716,13 +730,76 @@ def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_op
     body = (px / op - 1.0) * 100.0
     if body > PROBE_CANDLE_MAX_BODY_PCT * 1.5 + 1e-12:
         return False
+    upper_wick = (hi - px) / op * 100.0
+    pos = (px - lo) / (hi - lo) if (lo > 0 and hi > lo + 1e-12) else 1.0
+    tight_stair = (
+        PROBE_STAIR_MIN_BODY_PCT <= body <= PROBE_STAIR_MAX_BODY_PCT + 1e-12
+        and upper_wick <= PROBE_STAIR_MAX_WICK_PCT + 1e-12
+        and pos >= PROBE_STAIR_MIN_BAR_POS - 1e-12
+    )
     tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
-    if px > tip_cap + 1e-12:
+    if px > tip_cap + 1e-12 and not tight_stair:
         return False
     if lo > 0 and hi > lo + 1e-12:
-        if (px - lo) / (hi - lo) < PROBE_CANDLE_MIN_BAR_POS - 1e-12:
+        if pos < PROBE_CANDLE_MIN_BAR_POS - 1e-12:
             return False
     return True
+
+
+def _probe_staircase_setup(
+    bars: list[dict[str, Any]],
+    *,
+    typical_vol: float,
+    elapsed_frac: float = 1.0,
+) -> dict[str, float] | None:
+    """Ступенька из 3 зелёных 5м свечей с растущими close и непадающими low (TREE, BIRB, WET, MPLX)."""
+    if len(bars) < 3 or typical_vol <= 0:
+        return None
+    b2, prior, forming = bars[-3], bars[-2], bars[-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        p_op = float(prior.get("open") or 0)
+        p_lo = float(prior.get("low") or 0)
+        p_cl = float(prior.get("close") or 0)
+        p_vol = float(prior.get("volume") or 0)
+        b2_op = float(b2.get("open") or 0)
+        b2_lo = float(b2.get("low") or 0)
+        b2_cl = float(b2.get("close") or 0)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if min(op, hi, lo, px, p_op, p_lo, p_cl, b2_op, b2_lo, b2_cl) <= 0 or hi < lo:
+        return None
+    if not (px > op and p_cl > p_op and b2_cl >= b2_op):
+        return None
+    if not (px > p_cl > b2_cl):
+        return None
+    if lo < p_lo - 1e-12 or p_lo < b2_lo - 1e-12:
+        return None
+    rise3 = (px / b2_op - 1.0) * 100.0
+    if rise3 < PROBE_STAIR_MIN_RISE_PCT - 1e-12 or rise3 > PROBE_STAIR_MAX_RISE_PCT + 1e-12:
+        return None
+    body = (px / op - 1.0) * 100.0
+    if body < PROBE_STAIR_MIN_BODY_PCT - 1e-12 or body > PROBE_STAIR_MAX_BODY_PCT + 1e-12:
+        return None
+    span = hi - lo
+    pos = (px - lo) / span if span > 1e-12 else 1.0
+    if pos < PROBE_STAIR_MIN_BAR_POS - 1e-12:
+        return None
+    wick = (hi - px) / op * 100.0
+    if wick > PROBE_STAIR_MAX_WICK_PCT + 1e-12:
+        return None
+    if lo < op and (op - lo) / op * 100.0 > PROBE_STAIR_MAX_DIP_PCT + 1e-12:
+        return None
+    vol2_avg = (vol + p_vol) / 2.0
+    if vol2_avg < typical_vol * PROBE_STAIR_VOL2_MULT * elapsed_frac:
+        return None
+    if vol < typical_vol * PROBE_STAIR_VOL_MIN_MULT * elapsed_frac:
+        return None
+    return {"shelf": p_op, "price": px, "stair": 1.0}
 
 
 def probe_candle_setup(
@@ -730,11 +807,12 @@ def probe_candle_setup(
     *,
     now: float | None = None,
 ) -> dict[str, float] | None:
-    """Ранний вход в живую восходящую 5м свечу от open.
+    """Ранний вход в живую восходящую 5м свечу от open либо в 3-свечную ступеньку.
 
-    Главный щуп: берём старт восходящей свечи без верхнего фитиля (слива).
+    Главный щуп: берём старт восходящей свечи без верхнего фитиля (слива)
+    или устойчивую ступеньку из 3 зелёных 5м баров подряд с объёмом.
     bars — 5м, от старых к новым; нужен open (опционально ts старта бара).
-    Полка — open живой свечи: возврат под open снимает вход.
+    Полка — open живой свечи (для ступеньки — open предыдущей свечи).
     """
     need = PROBE_CANDLE_LOOKBACK + 2
     if len(bars) < need:
@@ -754,37 +832,45 @@ def probe_candle_setup(
         vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
     except (TypeError, ValueError, KeyError):
         return None
-    if not probe_candle_live_ok(price, hi, lo, op):
-        return None
-    # Выход вверх над телом предыдущей свечи (не внутри красной свечи).
-    if prior_o > 0 and prior_c > 0 and price <= max(prior_o, prior_c) - 1e-12:
-        return None
-    if prior_o > 0 and prior_c > prior_o:
-        prior_body = (prior_c / prior_o - 1.0) * 100.0
-        if prior_body > probe_candle_prior_max_body_pct() + 1e-12:
-            return None
     if not vols:
         return None
     typical = _median(vols)
+    if typical <= 0:
+        return None
     elapsed_frac = 1.0
     if now is not None and bar_ts > 0:
         elapsed = float(now) - bar_ts
         if 0.0 <= elapsed < 300.0:
             elapsed_frac = max(PROBE_CANDLE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
-    if typical <= 0 or vol < typical * PROBE_CANDLE_VOL_MULT * elapsed_frac:
-        return None
-    # Не догоняем, если уже вышли далеко над хаем окна lookback.
     try:
         prior_high = max(float(bar["high"]) for bar in window)
     except (TypeError, ValueError, KeyError):
         return None
     if prior_high > 0 and price > prior_high * (1.0 + PROBE_CANDLE_MAX_BODY_PCT / 100.0):
         return None
-    return {"shelf": op, "price": price}
+    if prior_o > 0 and prior_c > prior_o:
+        prior_body = (prior_c / prior_o - 1.0) * 100.0
+        if prior_body > probe_candle_prior_max_body_pct() + 1e-12:
+            return None
+    # 1) Классический старт одиночной 5м свечи (внутри бара 0.35..0.65).
+    if (
+        probe_candle_live_ok(price, hi, lo, op)
+        and (prior_o <= 0 or prior_c <= 0 or price > max(prior_o, prior_c) - 1e-12)
+        and vol >= typical * PROBE_CANDLE_VOL_MULT * elapsed_frac
+    ):
+        return {"shelf": op, "price": price}
+    # 2) Ступенька из 3 зелёных 5м свечей подряд (staircase breakout).
+    return _probe_staircase_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
 
 
-def probe_candle_day_ok(*, price: float, day_high: float, day_chg: float | None) -> bool:
-    """Топ по росту идут у хая суток; отсекаем только перегретый излёт (≥25%) и глубокий слив с пика (>18%)."""
+def probe_candle_day_ok(
+    *,
+    price: float,
+    day_high: float,
+    day_chg: float | None,
+    stair: bool = False,
+) -> bool:
+    """Топ по росту идут у хая суток; отсекаем перегрев ≥45% и глубокий слив с пика (>28%)."""
     if day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
         return False
     hi = float(day_high or 0)
@@ -794,7 +880,15 @@ def probe_candle_day_ok(*, price: float, day_high: float, day_chg: float | None)
     room = (hi - px) / hi * 100.0
     if room > PROBE_CANDLE_MAX_DAY_DROP_PCT + 1e-12:
         return False
-    return room >= PROBE_CANDLE_MIN_DAY_ROOM_PCT - 1e-12
+    min_room = PROBE_STAIR_MIN_DAY_ROOM_PCT if stair else PROBE_CANDLE_MIN_DAY_ROOM_PCT
+    return room >= min_room - 1e-12
+
+
+def probe_daily_loss_blocked(daily_realized_usd: float | None) -> bool:
+    """Жёсткий дневной стоп (Daily Max Drawdown): при убытке за сутки ≤ -PROBE_DAILY_MAX_LOSS_USD новые щупы стоп."""
+    if daily_realized_usd is None:
+        return False
+    return float(daily_realized_usd) <= -PROBE_DAILY_MAX_LOSS_USD + 1e-9
 
 
 def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
@@ -985,6 +1079,7 @@ def probe_pick_setup(
                 price=float(setup.get("price") or 0),
                 day_high=float(day_high or 0),
                 day_chg=day_chg,
+                stair=bool(setup.get("stair")),
             ):
                 continue
         elif name == PROBE_ALGO_IMPULSE:

@@ -35,7 +35,7 @@ class TestDeskSettings(unittest.TestCase):
         self.assertEqual(data.second_ticker, "AVA")
         self.assertEqual(data.pocket_from_probe_max, 3)
         self.assertEqual(policy.btc_dip_quote(1000.0), 250.0)
-        self.assertEqual(policy.probe_quote(), 30.0)
+        self.assertEqual(policy.probe_quote(), 40.0)
 
     def test_update_links_pocket_and_sleeve(self):
         data = settings_store.update(pocket_pct=30)

@@ -423,6 +423,47 @@ def trades_on_msk_day(
     return out
 
 
+def daily_realized_pnl(
+    day: datetime | None = None,
+    trades: list[dict[str, Any]] | None = None,
+) -> float:
+    """Зафиксированный PnL по закрытым продажам за календарный день МСК (FIFO-cost)."""
+    day = day or datetime.now(_MSK)
+    start = day.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    end = (day.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()
+    rows = trades if trades is not None else _read_trades()
+    lots: dict[str, dict[str, float]] = {}
+    day_pnl = 0.0
+    for entry in rows:
+        ticker = str(entry.get("ticker") or "").upper()
+        side = str(entry.get("side") or "").lower()
+        quote = float(entry.get("quote") or 0)
+        price = float(entry.get("price") or 0)
+        if not ticker or price <= 0 or quote <= 0:
+            continue
+        qty = quote / price
+        lot = lots.setdefault(ticker, {"qty": 0.0, "cost": 0.0})
+        if side == "buy":
+            lot["qty"] += qty
+            lot["cost"] += quote
+            continue
+        if side != "sell" or lot["qty"] <= 0:
+            continue
+        sell_qty = min(qty, lot["qty"])
+        avg = lot["cost"] / lot["qty"]
+        cost_sold = avg * sell_qty
+        proceeds = quote * (sell_qty / qty)
+        epoch = _entry_epoch(entry)
+        if epoch is not None and start <= epoch < end:
+            day_pnl += proceeds - cost_sold
+        lot["qty"] -= sell_qty
+        lot["cost"] -= cost_sold
+        if lot["qty"] < 1e-12:
+            lot["qty"] = 0.0
+            lot["cost"] = 0.0
+    return round(day_pnl, 2)
+
+
 def format_daily_pnl_report(
     trades: list[dict[str, Any]] | None = None,
     lifetime: float | None = None,
