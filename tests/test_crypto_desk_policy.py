@@ -1166,6 +1166,17 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.probe_should_handoff("стоп"))
         self.assertFalse(policy.probe_should_handoff("вершина"))
         self.assertEqual(policy.pocket_from_probe_max(), 3)
+        self.assertEqual(policy.PROBE_MAX_LEGS, 4)
+        best_leg = policy.pick_second_pocket_leg_for_funding(
+            [
+                {"ticker": "AGLD", "qty": 160.0, "entry": 0.1872},
+                {"ticker": "SQD", "qty": 1533.0, "entry": 0.01957},
+            ],
+            {"AGLD": 0.1840, "SQD": 0.01945},
+        )
+        self.assertIsNotNone(best_leg)
+        assert best_leg is not None
+        self.assertEqual(best_leg["ticker"], "SQD")
         # BASED $30: пик +2.035% взвёл ловушку, откат -0.5% до +1.44% закрывает в плюс («вершина»).
         self.assertEqual(
             policy.probe_exit_reason(
@@ -1511,7 +1522,10 @@ class TestDeskPolicy(unittest.TestCase):
 
     def test_probe_reserve_and_boost_quote(self):
         q = policy.probe_quote()
-        self.assertEqual(policy.probe_reserve_quote(open_legs=2), max(q, policy.PROBE_BOOST_USD))
+        self.assertEqual(
+            policy.probe_reserve_quote(open_legs=policy.PROBE_MAX_LEGS - 1),
+            max(q, policy.PROBE_BOOST_USD),
+        )
         legs = [
             {"ticker": "AAA", "entry": 100.0, "qty": 1.0},
             {"ticker": "BBB", "entry": 50.0, "qty": 1.0},

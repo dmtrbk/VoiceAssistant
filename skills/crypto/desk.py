@@ -50,6 +50,7 @@ from .desk_policy import (
     POCKET_EXIT_DEEP_PULLBACK_PCT,
     PROBE_CANDLE_SHELF_BREAK_PCT,
     btc_dip_quote,
+    pick_second_pocket_leg_for_funding,
     probe_algo_params,
     probe_arm_action,
     probe_exit_reason,
@@ -1125,6 +1126,59 @@ class CryptoDeskMixin:
                 continue
         return out
 
+    def _free_second_pocket_for_probe(self, need_usd: float) -> float:
+        """Если кэша + Earn не хватает на новый щуп — продать ногу из кармана2 с наименьшим убытком."""
+        for _ in range(len(read_second_pocket_legs())):
+            free_cash, held_now = self._cash_and_held()
+            if free_cash * common._BUY_CASH_BUFFER >= need_usd * 0.9:
+                return free_cash
+            sec_legs = read_second_pocket_legs()
+            if not sec_legs:
+                break
+            sec_prices: dict[str, float] = {}
+            for leg in sec_legs:
+                coin = str(leg.get("ticker") or "").upper()
+                if not coin:
+                    continue
+                px = float((held_now.get(coin) or {}).get("price") or 0)
+                if px <= 0:
+                    try:
+                        px = float(self._ticker(coin).get("price") or 0)
+                    except Exception:
+                        px = 0.0
+                if px > 0:
+                    sec_prices[coin] = px
+            best = pick_second_pocket_leg_for_funding(sec_legs, sec_prices)
+            if not best:
+                break
+            coin = str(best["ticker"]).upper()
+            qty = float(best.get("qty") or 0)
+            entry = float(best.get("entry") or 0)
+            px = float(sec_prices.get(coin) or 0)
+            held_qty = float((held_now.get(coin) or {}).get("qty") or 0)
+            sell_qty = min(qty, held_qty)
+            if sell_qty <= 0 or px <= 0:
+                drop_second_pocket_leg(coin)
+                self._drop_anchor(coin)
+                continue
+            pnl_usd = (px - entry) * sell_qty
+            try:
+                self._place_order(coin, "Sell", base_qty=sell_qty, price=px, maker=False)
+            except Exception as exc:
+                logger.info("[Крипта] карман2 %s разгрузка под щуп не прошла: %s", coin, exc)
+                break
+            drop_second_pocket_leg(coin)
+            self._drop_anchor(coin)
+            logger.info(
+                "[Крипта] карман2 %s: продал %.6g по %.4g (%+.2f$) под новый щуп",
+                coin,
+                sell_qty,
+                px,
+                pnl_usd,
+            )
+        free_cash, _held = self._cash_and_held()
+        return free_cash
+
     def _probe_buy(
         self,
         ticker: str,
@@ -1138,6 +1192,10 @@ class CryptoDeskMixin:
         legs = probe_legs()
         want = probe_quote_for_buy(legs=legs, prices=self._probe_leg_prices(legs))
         quote = min(want, free_cash * common._BUY_CASH_BUFFER)
+        if quote < want * 0.9:
+            free_cash = self._free_second_pocket_for_probe(want)
+            _, held_now = self._cash_and_held()
+            quote = min(want, free_cash * common._BUY_CASH_BUFFER)
         if quote < want * 0.9:
             logger.info("[Крипта] щуп %s: кэша мало на %.0f$", ticker, want)
             return

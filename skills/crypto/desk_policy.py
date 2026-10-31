@@ -19,7 +19,7 @@ DESK_ALT_SLEEVE = frozenset({
 })
 ALT_SLEEVE_MAX_PCT = 50.0
 ALT_MAX_NAMES = 2
-PROBE_MAX_LEGS = 3
+PROBE_MAX_LEGS = 4
 # Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
 POCKET_FROM_PROBE_MAX = 3
 # Мягкий выход щупа → передача во второй карман; жёсткий — продажа.
@@ -330,6 +330,32 @@ def exit_trap_arm_pct(
         cost = EXIT_TRAP_DEFAULT_COST_USD
     need = cost * (2.0 * EXIT_FEE_SIDE) + EXIT_TRAP_EXTRA_USD
     return need / cost * 100.0
+
+
+def pick_second_pocket_leg_for_funding(
+    legs: list[dict[str, Any]],
+    prices: dict[str, float],
+) -> dict[str, Any] | None:
+    """Выбрать ногу кармана2 с наименьшим убытком (или плюсом) для освобождения кэша под щуп."""
+    best_leg: dict[str, Any] | None = None
+    best_pnl_usd = float("-inf")
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            continue
+        ticker = str(leg.get("ticker") or "").upper()
+        try:
+            qty = float(leg.get("qty") or 0)
+            entry = float(leg.get("entry") or 0)
+            px = float(prices.get(ticker) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not ticker or qty <= 0 or entry <= 0 or px <= 0:
+            continue
+        pnl_usd = (px - entry) * qty
+        if pnl_usd > best_pnl_usd:
+            best_pnl_usd = pnl_usd
+            best_leg = leg
+    return best_leg
 
 
 def btc_dip_exit_reason(
