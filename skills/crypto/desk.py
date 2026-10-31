@@ -1200,9 +1200,16 @@ class CryptoDeskMixin:
             logger.info("[Крипта] щуп %s: кэша мало на %.0f$", ticker, want)
             return
         before = float((held_now.get(ticker) or {}).get("qty") or 0)
+        seen_fill = getattr(self, "_last_fill", None)
         # Свеча/подножка: market — иначе разгон уходит, пока maker висит.
         maker = str(algo or "") in {"", "shelf"}
         self._place_order(ticker, "Buy", quote_usdt=quote, price=price, maker=maker)
+        fill = getattr(self, "_last_fill", None)
+        spent_quote = (
+            float(fill.get("quote") or 0)
+            if fill is not seen_fill and isinstance(fill, dict) and float(fill.get("quote") or 0) > 0
+            else quote
+        )
         _cash, held = self._cash_and_held()
         after = float((held.get(ticker) or {}).get("qty") or 0)
         bought = after - before
@@ -1211,7 +1218,7 @@ class CryptoDeskMixin:
         write_probe(
             ticker=ticker,
             qty=bought,
-            entry=quote / bought,
+            entry=spent_quote / bought,
             shelf=shelf,
             arm_px=arm_px or price,
             peak=price,
