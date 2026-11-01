@@ -1301,6 +1301,7 @@ def probe_exit_reason(
         float(opened_ts or 0) > 0
         and now is not None
         and float(now) - float(opened_ts) >= PROBE_CANDLE_STALE_SEC
+        and gain < arm_pct - 1e-6
     ):
         return "застой"
     run = high >= ent * (1.0 + PROBE_RUN_PCT / 100.0)
