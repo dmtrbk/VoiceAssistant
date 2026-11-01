@@ -53,6 +53,7 @@ from .desk_policy import (
     pick_second_pocket_leg_for_funding,
     probe_algo_params,
     probe_arm_action,
+    probe_book_buy_ok,
     probe_exit_reason,
     probe_candle_buy_ok,
     probe_candle_day_ok,
@@ -1091,9 +1092,29 @@ class CryptoDeskMixin:
                 write_probe(drop_arm=ticker)
                 return
             live = bars5[-1] if bars5 else {}
+            arm_px = float(state.get("arm_px") or 0)
+            check_px = price
+            try:
+                book = self._book(ticker)
+                bid = float(book.get("bid") or 0)
+                ask = float(book.get("ask") or 0)
+            except Exception:
+                bid = ask = 0.0
+            if not probe_book_buy_ok(bid=bid, ask=ask, arm_px=arm_px):
+                write_probe(drop_arm=ticker)
+                logger.info(
+                    "[Крипта] щуп %s снят (спред/ask): bid %.4g ask %.4g взвод %.4g",
+                    ticker,
+                    bid,
+                    ask,
+                    arm_px,
+                )
+                return
+            if ask > 0:
+                check_px = max(price, ask)
             if not probe_candle_buy_ok(
-                price,
-                float(live.get("high") or 0),
+                check_px,
+                max(float(live.get("high") or 0), check_px),
                 float(live.get("low") or 0),
                 float(live.get("open") or 0),
             ):
@@ -1101,7 +1122,7 @@ class CryptoDeskMixin:
                 logger.info(
                     "[Крипта] щуп %s снят (candle tip): сейчас %.4g open %.4g high %.4g",
                     ticker,
-                    price,
+                    check_px,
                     float(live.get("open") or 0),
                     float(live.get("high") or 0),
                 )

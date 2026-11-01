@@ -815,6 +815,16 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(
             policy.probe_candle_buy_ok(1.005, 1.0055, 1.000, 1.000)
         )
+        # Контроль спреда и проскальзывания ask (GROVE: 0.007281 -> ask 0.007409).
+        self.assertTrue(
+            policy.probe_book_buy_ok(bid=0.00727, ask=0.00729, arm_px=0.007281)
+        )
+        self.assertFalse(
+            policy.probe_book_buy_ok(bid=0.00720, ask=0.00729, arm_px=0.007281)
+        )
+        self.assertFalse(
+            policy.probe_book_buy_ok(bid=0.00739, ask=0.007409, arm_px=0.007281)
+        )
         # Ступенька из 3 зелёных 5м баров (как TREE/BIRB/WET): проходит setup и допускает room ≥ 0.3%.
         stair_bars = base5[:-2] + [
             {"open": 1.000, "high": 1.004, "low": 1.000, "close": 1.003, "volume": 12.0},

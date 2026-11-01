@@ -183,6 +183,9 @@ PROBE_STAIR_VOL2_MULT = 1.5
 PROBE_STAIR_VOL_MIN_MULT = 1.1
 PROBE_STAIR_MIN_DAY_ROOM_PCT = 0.3
 PROBE_STAIR_MIN_1H_POS = 0.85
+# Защита от проскальзывания по пустому стакану перед рыночной покупкой щупа (GROVE 0.007281->0.007409):
+PROBE_MAX_SPREAD_PCT = 0.35
+PROBE_MAX_ASK_SLIP_PCT = 0.45
 # Жёсткий дневной риск-лимит (Daily Max Drawdown) на новые входы щупа (~1.35% от депозита $440).
 PROBE_DAILY_MAX_LOSS_USD = 6.0
 PROBE_SPRINT_HOLD_SEC = 30
@@ -829,6 +832,21 @@ def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_op
     if lo > 0 and hi > lo + 1e-12:
         if pos < PROBE_CANDLE_MIN_BAR_POS - 1e-12:
             return False
+    return True
+
+
+def probe_book_buy_ok(*, bid: float, ask: float, arm_px: float = 0.0) -> bool:
+    """Проверка живого стакана перед рыночным Buy: спред ≤ 0.35% и ask не улетел > 0.45% над взводом."""
+    b = float(bid or 0)
+    a = float(ask or 0)
+    if b <= 0 or a <= 0 or a < b:
+        return True
+    spread_pct = (a - b) / b * 100.0
+    if spread_pct > PROBE_MAX_SPREAD_PCT + 1e-12:
+        return False
+    ref = float(arm_px or 0)
+    if ref > 0 and (a / ref - 1.0) * 100.0 > PROBE_MAX_ASK_SLIP_PCT + 1e-12:
+        return False
     return True
 
 
