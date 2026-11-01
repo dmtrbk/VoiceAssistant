@@ -884,6 +884,9 @@ class TestDeskPolicy(unittest.TestCase):
             )
         )
         self.assertTrue(
+            policy.probe_trends_ok("neutral", "bull", 8.0, algo=policy.PROBE_ALGO_CANDLE)
+        )
+        self.assertFalse(
             policy.probe_trends_ok("neutral", "neutral", 8.0, algo=policy.PROBE_ALGO_CANDLE)
         )
         self.assertFalse(

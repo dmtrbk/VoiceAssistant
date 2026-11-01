@@ -165,8 +165,13 @@ PROBE_CANDLE_CHASE_PCT = 1.2
 PROBE_CANDLE_MAX_DAY_PCT = 45.0
 PROBE_CANDLE_MIN_DAY_ROOM_PCT = 1.0
 PROBE_CANDLE_MAX_DAY_DROP_PCT = 28.0
+# Отсечение перегрева за 30м (>2.2%), кульминации объёма на пред. баре (>6.5x) и верхних фитилей слива (>0.85%).
+PROBE_CANDLE_MAX_30M_CHG_PCT = 2.20
+PROBE_CANDLE_MAX_PRIOR_VOL_MULT = 6.5
+PROBE_CANDLE_MAX_PREV3_WICK_PCT = 0.85
 # Ступенька (3 зелёных 5м бара подряд с растущими low и close, как TREE/BIRB/WET/MPLX):
-# на 3-м баре цена идёт плотно у верха (pos ≥ 0.70, wick ≤ 0.30%), допускаем room ≥ 0.3%.
+# на 3-м баре цена идёт плотно у верха (pos ≥ 0.70, wick ≤ 0.30%), допускаем room ≥ 0.3%,
+# и требуем поджатие к верхней границе часового диапазона (pos_in_1h ≥ 0.85).
 PROBE_STAIR_MIN_RISE_PCT = 0.70
 PROBE_STAIR_MAX_RISE_PCT = 2.40
 PROBE_STAIR_MIN_BODY_PCT = 0.20
@@ -177,6 +182,7 @@ PROBE_STAIR_MAX_DIP_PCT = 0.35
 PROBE_STAIR_VOL2_MULT = 1.5
 PROBE_STAIR_VOL_MIN_MULT = 1.1
 PROBE_STAIR_MIN_DAY_ROOM_PCT = 0.3
+PROBE_STAIR_MIN_1H_POS = 0.85
 # Жёсткий дневной риск-лимит (Daily Max Drawdown) на новые входы щупа (~1.35% от депозита $440).
 PROBE_DAILY_MAX_LOSS_USD = 6.0
 PROBE_SPRINT_HOLD_SEC = 30
@@ -879,6 +885,17 @@ def _probe_staircase_setup(
         return None
     if vol < typical_vol * PROBE_STAIR_VOL_MIN_MULT * elapsed_frac:
         return None
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    if window:
+        try:
+            hi_1h = max(float(bar["high"]) for bar in window)
+            lo_1h = min(float(bar["low"]) for bar in window)
+        except (TypeError, ValueError, KeyError):
+            return None
+        if hi_1h > lo_1h + 1e-12:
+            pos_1h = (px - lo_1h) / (hi_1h - lo_1h)
+            if pos_1h < PROBE_STAIR_MIN_1H_POS - 1e-12:
+                return None
     return {"shelf": p_op, "price": px, "stair": 1.0}
 
 
@@ -909,6 +926,7 @@ def probe_candle_setup(
         bar_ts = float(forming.get("ts") or 0)
         prior_o = float(prior.get("open") or prior.get("close") or 0)
         prior_c = float(prior.get("close") or 0)
+        prior_vol = float(prior.get("volume") or 0)
         vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
     except (TypeError, ValueError, KeyError):
         return None
@@ -917,6 +935,29 @@ def probe_candle_setup(
     typical = _median(vols)
     if typical <= 0:
         return None
+    # Отсечение кульминационного выброса объёма на предыдущей свече (Blow-off Volume > 6.5x).
+    if prior_vol > typical * PROBE_CANDLE_MAX_PRIOR_VOL_MULT + 1e-12:
+        return None
+    # Отсечение перегрева за последние 30 минут (> +2.20%).
+    if len(window) >= 6:
+        try:
+            ref_30m = float(window[-6].get("close") or 0)
+        except (TypeError, ValueError):
+            ref_30m = 0.0
+        if ref_30m > 0 and (price / ref_30m - 1.0) * 100.0 > PROBE_CANDLE_MAX_30M_CHG_PCT + 1e-12:
+            return None
+    # Отсечение длинных верхних фитилей продавца (> 0.85%) на 3 предыдущих 5м свечах.
+    for prev_bar in bars[-4:-1]:
+        try:
+            pb_o = float(prev_bar.get("open") or prev_bar.get("close") or 0)
+            pb_c = float(prev_bar.get("close") or 0)
+            pb_h = float(prev_bar.get("high") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pb_o > 0 and pb_h > max(pb_o, pb_c):
+            pb_wick = (pb_h - max(pb_o, pb_c)) / pb_o * 100.0
+            if pb_wick > PROBE_CANDLE_MAX_PREV3_WICK_PCT + 1e-12:
+                return None
     elapsed_frac = 1.0
     if now is not None and bar_ts > 0:
         elapsed = float(now) - bar_ts
@@ -1195,6 +1236,8 @@ def probe_trends_ok(
     name = str(algo or "").strip().lower()
     if name == PROBE_ALGO_CANDLE:
         if trend15 == "bear" or trend1h == "bear":
+            return False
+        if trend15 != "bull" and trend1h != "bull":
             return False
     elif trend15 != "bull" or trend1h == "bear":
         return False
