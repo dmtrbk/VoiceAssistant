@@ -58,6 +58,7 @@ from .desk_policy import (
     probe_candle_day_ok,
     probe_daily_loss_blocked,
     probe_grind_live_ok,
+    probe_market_regime_ok,
     probe_should_handoff,
     PROBE_ALGO_CANDLE,
     PROBE_ALGO_GRIND,
@@ -1279,13 +1280,18 @@ class CryptoDeskMixin:
     def _probe_scan(self) -> None:
         if len(probe_legs()) + len(probe_arms()) >= PROBE_MAX_LEGS:
             return
-        if probe_daily_loss_blocked(crypto_journal.daily_realized_pnl()):
-            logger.info("[Крипта] щуп стоп на сегодня: достигнут дневной лимит убытка")
+        loss_guard = crypto_journal.probe_loss_guard_reason()
+        if loss_guard:
+            logger.info("[Крипта] щуп пауза: %s", loss_guard)
             return
         try:
             tape = self._tape()
         except Exception as exc:
             logger.info("[Крипта] щуп лента: %s", exc)
+            return
+        regime_ok, regime_note = probe_market_regime_ok(tape)
+        if not regime_ok:
+            logger.info("[Крипта] щуп пауза (падающий рынок): %s", regime_note)
             return
         blocked = self._probe_blocked() | probe_tickers() | {arm["ticker"] for arm in probe_arms()}
         candidates: list[dict[str, Any]] = []
@@ -1294,7 +1300,7 @@ class CryptoDeskMixin:
             if not ticker or ticker in blocked or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
                 continue
             candidates.append(row)
-        ranked = probe_scan_ranked_rows(candidates)
+        ranked = probe_scan_ranked_rows(candidates, now=time.time())
         order = probe_scan_algo_order()
         classic = tuple(a for a in order if a != PROBE_ALGO_CANDLE)
 

@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import time
 from typing import Any
+
+_YEKT = timezone(timedelta(hours=5))
 
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _PROBE_TUNE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe_tune.json")
@@ -79,9 +82,18 @@ SLEEVE_SKIP = frozenset({
 _live_extra: set[str] = set()
 # Щуп: 40$ на пробой тихой полки / свечи. Не слот рукава и не карман.
 PROBE_USD = 40.0
-# Раньше $1M/~$250k резали пыльные папы (DIAM ~$48k при day +30…50%).
-# $25k — почти весь spot USDT с day ≥ пола; ниже — совсем мёртвый стакан.
-PROBE_MIN_TURNOVER_USD = 25_000.0
+# Днём берём монеты с оборотом ≥ $150k (тонкий стакан <$150k на живых сделках дал 1W/11L и -$5.62).
+# Ночью (21:00–06:00 YEKT) торгуем только крупняк с оборотом ≥ $1.5M (ZRO/STX/WET/VVV/LIT).
+PROBE_MIN_TURNOVER_USD = 150_000.0
+PROBE_NIGHT_MIN_TURNOVER_USD = 1_500_000.0
+PROBE_NIGHT_START_HOUR_YEKT = 21
+PROBE_NIGHT_END_HOUR_YEKT = 6
+# Защита от падающего рынка и каскада стопов:
+PROBE_BTC_MAX_DROP_DAY_PCT = -2.5
+PROBE_MIN_MARKET_BREADTH_PCT = 20.0
+PROBE_HOURLY_MAX_LOSS_USD = 1.50
+PROBE_MAX_CONSECUTIVE_LOSSES = 3
+PROBE_STREAK_PAUSE_SEC = 3600.0
 # Ниже 0.5% сутки 29.10 резали INIT-контекст и оставляли PARTI 18:25 (−$3.28).
 # Пол −3% на полном scan: щуп +$1.04, этой сделки нет.
 PROBE_DAY_MIN_PCT = -3.0
@@ -482,15 +494,55 @@ def probe_should_handoff(reason: str | None) -> bool:
     return str(reason or "") in PROBE_HANDOFF_REASONS
 
 
-def probe_scan_rank(row: dict[str, Any]) -> float:
+def probe_min_turnover_usd(now: float | None = None) -> float:
+    """Порог суточного оборота щупа: днём $150k, ночью (21:00–06:00 YEKT) $1.5M."""
+    if now is None:
+        return float(PROBE_MIN_TURNOVER_USD)
+    hr = datetime.fromtimestamp(float(now), _YEKT).hour
+    if hr >= PROBE_NIGHT_START_HOUR_YEKT or hr < PROBE_NIGHT_END_HOUR_YEKT:
+        return float(PROBE_NIGHT_MIN_TURNOVER_USD)
+    return float(PROBE_MIN_TURNOVER_USD)
+
+
+def probe_market_regime_ok(rows: list[dict[str, Any]]) -> tuple[bool, str]:
+    """Защита от падающего рынка: стоп щупа при сливе BTC или широком обвале спота."""
+    liquid_chgs: list[float] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+            continue
+        try:
+            chg = float(row.get("chg") or 0)
+            turn = float(row.get("turnover") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ticker == "BTC" and chg <= PROBE_BTC_MAX_DROP_DAY_PCT + 1e-9:
+            return False, f"BTC {chg:+.1f}% ≤ {PROBE_BTC_MAX_DROP_DAY_PCT:.1f}%"
+        if turn >= PROBE_MIN_TURNOVER_USD:
+            liquid_chgs.append(chg)
+    if len(liquid_chgs) >= 20:
+        green_pct = sum(1 for c in liquid_chgs if c > 0) / len(liquid_chgs) * 100.0
+        if green_pct < PROBE_MIN_MARKET_BREADTH_PCT - 1e-9:
+            return False, f"ширина рынка {green_pct:.0f}% < {PROBE_MIN_MARKET_BREADTH_PCT:.0f}%"
+    return True, ""
+
+
+def probe_scan_rank(
+    row: dict[str, Any],
+    *,
+    min_turnover: float | None = None,
+) -> float:
     """Сортировка scan: рост за 24ч (chg %), только ликвидные и day ≥ PROBE_DAY_MIN_PCT."""
+    floor_turn = float(PROBE_MIN_TURNOVER_USD if min_turnover is None else min_turnover)
     try:
         chg = float(row.get("chg") or 0)
         price = float(row.get("price") or 0)
         turn = float(row.get("turnover") or 0)
     except (TypeError, ValueError):
         return -1.0
-    if turn < PROBE_MIN_TURNOVER_USD or price <= 0 or chg < PROBE_DAY_MIN_PCT:
+    if turn < floor_turn or price <= 0 or chg < PROBE_DAY_MIN_PCT:
         return float("-inf")
     return chg
 
@@ -499,12 +551,14 @@ def probe_scan_ranked_rows(
     rows: list[dict[str, Any]],
     *,
     limit: int | None = None,
+    now: float | None = None,
 ) -> list[tuple[float, dict[str, Any]]]:
     """Список для щупа: по убыванию 24h %; первые PROBE_SCAN_MANDATORY_TOP — обязательный прогон."""
     cap = int(PROBE_SCAN_LIMIT if limit is None else limit)
+    floor_turn = probe_min_turnover_usd(now)
     scored: list[tuple[float, dict[str, Any]]] = []
     for row in rows:
-        score = probe_scan_rank(row)
+        score = probe_scan_rank(row, min_turnover=floor_turn)
         if score < PROBE_DAY_MIN_PCT:
             continue
         scored.append((score, row))

@@ -608,14 +608,14 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             0,
         )
-        # Средний и тонкий оборот в скан (DIAM ~$48k раньше резался порогом $250k).
+        # Днём пропускаем оборот ≥ $150k, тонкий стакан < $150k отсекаем; ночью — ≥ $1.5M.
         self.assertGreater(
             policy.probe_scan_rank({
                 "chg": 2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 300_000,
             }),
             0,
         )
-        self.assertGreater(
+        self.assertLess(
             policy.probe_scan_rank({
                 "chg": 30.0, "price": 0.0045, "low": 0.003, "high": 0.005, "turnover": 46_000,
             }),
@@ -627,6 +627,23 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             0,
         )
+        # Проверка дневного и ночного порога оборота (YEKT) + защиты от падающего рынка.
+        from datetime import datetime, timedelta, timezone
+        yekt = timezone(timedelta(hours=5))
+        day_ts = datetime(2026, 10, 31, 14, 0, tzinfo=yekt).timestamp()
+        night_ts = datetime(2026, 10, 31, 23, 0, tzinfo=yekt).timestamp()
+        self.assertEqual(policy.probe_min_turnover_usd(day_ts), 150_000.0)
+        self.assertEqual(policy.probe_min_turnover_usd(night_ts), 1_500_000.0)
+        self.assertFalse(
+            policy.probe_market_regime_ok([{"ticker": "BTC", "chg": -3.1, "turnover": 50_000_000}])[0]
+        )
+        red_market = [{"ticker": f"C{i}", "chg": -2.0, "turnover": 500_000} for i in range(25)]
+        self.assertFalse(policy.probe_market_regime_ok(red_market)[0])
+        normal_market = [
+            {"ticker": f"C{i}", "chg": 2.0 if i < 8 else -1.0, "turnover": 500_000}
+            for i in range(25)
+        ]
+        self.assertTrue(policy.probe_market_regime_ok(normal_market)[0])
         self.assertAlmostEqual(
             policy.probe_scan_rank({
                 "chg": -2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,

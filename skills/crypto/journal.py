@@ -464,6 +464,71 @@ def daily_realized_pnl(
     return round(day_pnl, 2)
 
 
+def probe_loss_guard_reason(
+    *,
+    now: float | None = None,
+    trades: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """Причина паузы щупа по потерям: дневной лимит, просадка за час или серия из 3 убытков подряд."""
+    from .desk_policy import (
+        PROBE_HOURLY_MAX_LOSS_USD,
+        PROBE_MAX_CONSECUTIVE_LOSSES,
+        PROBE_STREAK_PAUSE_SEC,
+        probe_daily_loss_blocked,
+    )
+
+    now_ts = float(now if now is not None else time.time())
+    day_dt = datetime.fromtimestamp(now_ts, _MSK)
+    day_start = day_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    day_end = (day_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()
+    rows = trades if trades is not None else _read_trades()
+    lots: dict[str, dict[str, float]] = {}
+    day_pnl = 0.0
+    closed: list[tuple[float, float]] = []
+    for entry in rows:
+        ticker = str(entry.get("ticker") or "").upper()
+        side = str(entry.get("side") or "").lower()
+        quote = float(entry.get("quote") or 0)
+        price = float(entry.get("price") or 0)
+        if not ticker or price <= 0 or quote <= 0:
+            continue
+        qty = quote / price
+        lot = lots.setdefault(ticker, {"qty": 0.0, "cost": 0.0})
+        if side == "buy":
+            lot["qty"] += qty
+            lot["cost"] += quote
+            continue
+        if side != "sell" or lot["qty"] <= 0:
+            continue
+        sell_qty = min(qty, lot["qty"])
+        avg = lot["cost"] / lot["qty"]
+        cost_sold = avg * sell_qty
+        proceeds = quote * (sell_qty / qty)
+        pnl = proceeds - cost_sold
+        epoch = _entry_epoch(entry)
+        if epoch is not None and epoch <= now_ts + 1.0:
+            if day_start <= epoch < day_end:
+                day_pnl += pnl
+            closed.append((epoch, pnl))
+        lot["qty"] -= sell_qty
+        lot["cost"] -= cost_sold
+        if lot["qty"] < 1e-12:
+            lot["qty"] = 0.0
+            lot["cost"] = 0.0
+    if probe_daily_loss_blocked(round(day_pnl, 2)):
+        return f"дневной лимит убытка ({day_pnl:+.2f}$)"
+    hour_pnl = sum(pnl for ep, pnl in closed if now_ts - 3600.0 <= ep <= now_ts)
+    if hour_pnl <= -PROBE_HOURLY_MAX_LOSS_USD + 1e-9:
+        return f"просадка за час ({hour_pnl:+.2f}$)"
+    if len(closed) >= PROBE_MAX_CONSECUTIVE_LOSSES:
+        tail = closed[-PROBE_MAX_CONSECUTIVE_LOSSES:]
+        if all(pnl < -0.15 for _ep, pnl in tail):
+            last_ep = tail[-1][0]
+            if now_ts - last_ep < PROBE_STREAK_PAUSE_SEC:
+                return f"серия из {PROBE_MAX_CONSECUTIVE_LOSSES} убытков (пауза 60м)"
+    return None
+
+
 def format_daily_pnl_report(
     trades: list[dict[str, Any]] | None = None,
     lifetime: float | None = None,
