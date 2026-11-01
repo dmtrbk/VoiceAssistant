@@ -183,6 +183,17 @@ PROBE_STAIR_VOL2_MULT = 1.5
 PROBE_STAIR_VOL_MIN_MULT = 1.1
 PROBE_STAIR_MIN_DAY_ROOM_PCT = 0.3
 PROBE_STAIR_MIN_1H_POS = 0.85
+# Быстрая 2-свечная ступенька (prior зелёная + forming пробивает prior.high с общим ростом 0.80..1.80%):
+PROBE_STAIR2_MIN_RISE_PCT = 0.80
+PROBE_STAIR2_MAX_RISE_PCT = 1.80
+PROBE_STAIR2_MIN_BODY_PCT = 0.25
+PROBE_STAIR2_MAX_BODY_PCT = 1.20
+PROBE_STAIR2_MIN_BAR_POS = 0.72
+PROBE_STAIR2_MAX_WICK_PCT = 0.25
+PROBE_STAIR2_MAX_DIP_PCT = 0.30
+PROBE_STAIR2_VOL2_MULT = 1.6
+PROBE_STAIR2_VOL_MIN_MULT = 1.2
+PROBE_STAIR2_MIN_1H_POS = 0.88
 # Защита от проскальзывания по пустому стакану перед рыночной покупкой щупа (GROVE 0.007281->0.007409):
 PROBE_MAX_SPREAD_PCT = 0.35
 PROBE_MAX_ASK_SLIP_PCT = 0.45
@@ -961,6 +972,69 @@ def _probe_staircase_setup(
     return {"shelf": p_op, "price": px, "stair": 1.0}
 
 
+def _probe_staircase_2bar_setup(
+    bars: list[dict[str, Any]],
+    *,
+    typical_vol: float,
+    elapsed_frac: float = 1.0,
+) -> dict[str, float] | None:
+    """Ранний вход на 2-й ступеньке (prior зелёная + forming пробивает prior.high, суммарный ход 0.80..1.80%)."""
+    if len(bars) < 2 or typical_vol <= 0:
+        return None
+    prior, forming = bars[-2], bars[-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        p_op = float(prior.get("open") or 0)
+        p_hi = float(prior.get("high") or 0)
+        p_lo = float(prior.get("low") or 0)
+        p_cl = float(prior.get("close") or 0)
+        p_vol = float(prior.get("volume") or 0)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if min(op, hi, lo, px, p_op, p_hi, p_lo, p_cl) <= 0 or hi < lo:
+        return None
+    if not (px > op and p_cl > p_op and px > p_hi):
+        return None
+    if lo < p_lo - 1e-12:
+        return None
+    rise2 = (px / p_op - 1.0) * 100.0
+    if rise2 < PROBE_STAIR2_MIN_RISE_PCT - 1e-12 or rise2 > PROBE_STAIR2_MAX_RISE_PCT + 1e-12:
+        return None
+    body = (px / op - 1.0) * 100.0
+    if body < PROBE_STAIR2_MIN_BODY_PCT - 1e-12 or body > PROBE_STAIR2_MAX_BODY_PCT + 1e-12:
+        return None
+    span = hi - lo
+    pos = (px - lo) / span if span > 1e-12 else 1.0
+    if pos < PROBE_STAIR2_MIN_BAR_POS - 1e-12:
+        return None
+    wick = (hi - px) / op * 100.0
+    if wick > PROBE_STAIR2_MAX_WICK_PCT + 1e-12:
+        return None
+    if lo < op and (op - lo) / op * 100.0 > PROBE_STAIR2_MAX_DIP_PCT + 1e-12:
+        return None
+    vol2_avg = (vol + p_vol) / 2.0
+    if vol2_avg < typical_vol * PROBE_STAIR2_VOL2_MULT * elapsed_frac:
+        return None
+    if vol < typical_vol * PROBE_STAIR2_VOL_MIN_MULT * elapsed_frac:
+        return None
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    if window:
+        try:
+            hi_1h = max(float(bar["high"]) for bar in window)
+            lo_1h = min(float(bar["low"]) for bar in window)
+        except (TypeError, ValueError, KeyError):
+            return None
+        if hi_1h > lo_1h + 1e-12:
+            pos_1h = (px - lo_1h) / (hi_1h - lo_1h)
+            if pos_1h < PROBE_STAIR2_MIN_1H_POS - 1e-12:
+                return None
+    return {"shelf": p_op, "price": px, "stair": 1.0}
+
+
 def _probe_flag_setup(
     bars: list[dict[str, Any]],
     *,
@@ -1114,7 +1188,11 @@ def probe_candle_setup(
     stair = _probe_staircase_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
     if stair:
         return stair
-    # 3) Пробой 15-минутного плоского флага у вершины часа (bull-flag breakout).
+    # 3) Быстрая 2-свечная ступенька (prior зелёная + forming пробивает prior.high).
+    stair2 = _probe_staircase_2bar_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
+    if stair2:
+        return stair2
+    # 4) Пробой 15-минутного плоского флага у вершины часа (bull-flag breakout).
     return _probe_flag_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
 
 

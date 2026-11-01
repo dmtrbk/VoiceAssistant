@@ -843,6 +843,16 @@ class TestDeskPolicy(unittest.TestCase):
             day_high=1.015,
         )
         self.assertIsNotNone(stair_pick)
+        # Быстрая 2-свечная ступенька (prior зелёная + forming пробивает prior.high, rise2 >= 0.80%):
+        stair2_bars = base5[:-2] + [
+            {"open": 1.001, "high": 1.001, "low": 0.999, "close": 1.000, "volume": 10.0},
+            {"open": 1.000, "high": 1.005, "low": 1.000, "close": 1.0045, "volume": 20.0},
+            {"open": 1.0045, "high": 1.0095, "low": 1.0045, "close": 1.009, "volume": 16.0},
+        ]
+        stair2_setup = policy.probe_candle_setup(stair2_bars)
+        self.assertIsNotNone(stair2_setup)
+        assert stair2_setup is not None
+        self.assertAlmostEqual(stair2_setup["shelf"], 1.000)
         self.assertFalse(policy.probe_daily_loss_blocked(-5.5))
         self.assertTrue(policy.probe_daily_loss_blocked(-6.0))
         self.assertEqual(policy.PROBE_ALGO_ORDER, (policy.PROBE_ALGO_CANDLE,))
