@@ -1350,8 +1350,9 @@ class CryptoDeskMixin:
             ):
                 continue
             try:
+                fast_bar = scan_idx < 36 or float(row.get("turnover") or 0) >= 1_000_000.0
                 bars5 = self._probe_bars(
-                    ticker, "5", 80, cache_sec=15.0 if scan_idx < 24 else 90.0
+                    ticker, "5", 80, cache_sec=8.0 if fast_bar else 45.0
                 )
             except Exception as exc:
                 logger.info("[Крипта] щуп %s 5м: %s", ticker, exc)
@@ -1644,7 +1645,7 @@ class CryptoDeskMixin:
             self._sync_tape_symbols()
         except Exception as exc:
             logger.warning("[Крипта] лента старт: %s", exc)
-        self._desk_stop.wait(90)
+        self._desk_stop.wait(5)
         next_probe = 0.0
         next_report = time.time() + _DESK_PERIOD_SEC
         while not self._desk_stop.is_set():

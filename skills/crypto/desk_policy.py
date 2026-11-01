@@ -562,7 +562,7 @@ def probe_scan_ranked_rows(
     limit: int | None = None,
     now: float | None = None,
 ) -> list[tuple[float, dict[str, Any]]]:
-    """Список для щупа: по убыванию 24h %; первые PROBE_SCAN_MANDATORY_TOP — обязательный прогон."""
+    """Список для щупа: топ-8 по 24h %, затем высоколиквидные ($1.5M+) в фазе разгона, затем остальные."""
     cap = int(PROBE_SCAN_LIMIT if limit is None else limit)
     floor_turn = probe_min_turnover_usd(now)
     scored: list[tuple[float, dict[str, Any]]] = []
@@ -572,11 +572,22 @@ def probe_scan_ranked_rows(
             continue
         scored.append((score, row))
     scored.sort(key=lambda item: item[0], reverse=True)
-    if len(scored) <= cap:
-        return scored
+    if len(scored) <= PROBE_SCAN_MANDATORY_TOP:
+        return scored[:cap]
     head = scored[:PROBE_SCAN_MANDATORY_TOP]
-    tail = scored[PROBE_SCAN_MANDATORY_TOP:cap]
-    return head + tail
+    rest = scored[PROBE_SCAN_MANDATORY_TOP:]
+    prime: list[tuple[float, dict[str, Any]]] = []
+    other: list[tuple[float, dict[str, Any]]] = []
+    for item in rest:
+        sc, r = item
+        turn = float(r.get("turnover") or 0)
+        if turn >= 1_500_000.0 and 1.5 <= sc <= 25.0:
+            prime.append(item)
+        else:
+            other.append(item)
+    prime.sort(key=lambda item: (float(item[1].get("turnover") or 0), item[0]), reverse=True)
+    combined = head + prime + other
+    return combined[:cap]
 
 
 def probe_quote() -> float:
@@ -917,17 +928,69 @@ def _probe_staircase_setup(
     return {"shelf": p_op, "price": px, "stair": 1.0}
 
 
+def _probe_flag_setup(
+    bars: list[dict[str, Any]],
+    *,
+    typical_vol: float,
+    elapsed_frac: float = 1.0,
+) -> dict[str, float] | None:
+    """Пробой 15-минутного плоского флага у вершины часа (TRUMP 19:40 после полки 19:20–19:35)."""
+    if len(bars) < PROBE_CANDLE_LOOKBACK + 2 or typical_vol <= 0:
+        return None
+    forming = bars[-1]
+    flag = bars[-4:-1]
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        flag_top = max(max(float(b["open"]), float(b["close"])) for b in flag)
+        flag_bot = min(min(float(b["open"]), float(b["close"])) for b in flag)
+        flag_hi = max(float(b["high"]) for b in flag)
+        hi_1h = max(float(b["high"]) for b in window)
+        lo_1h = min(float(b["low"]) for b in window)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if min(op, hi, lo, px, flag_top, flag_bot, flag_hi, hi_1h, lo_1h) <= 0 or hi < lo:
+        return None
+    if px <= op or px <= flag_hi:
+        return None
+    body = (px / op - 1.0) * 100.0
+    if body < PROBE_CANDLE_MIN_BODY_PCT - 1e-12 or body > PROBE_CANDLE_MAX_BODY_PCT + 1e-12:
+        return None
+    if (hi - px) / op * 100.0 > 0.50 + 1e-12:
+        return None
+    if lo < op and (op - lo) / op * 100.0 > PROBE_STAIR_MAX_DIP_PCT + 1e-12:
+        return None
+    span = hi - lo
+    pos = (px - lo) / span if span > 1e-12 else 1.0
+    if pos < 0.65 - 1e-12:
+        return None
+    if (flag_top / flag_bot - 1.0) * 100.0 > 0.80 + 1e-12:
+        return None
+    if hi_1h <= lo_1h + 1e-12 or (px - lo_1h) / (hi_1h - lo_1h) < PROBE_STAIR_MIN_1H_POS - 1e-12:
+        return None
+    # Древко флага: до плоской полки должен быть реальный импульс ≥ +2.5% от минимума часа.
+    if (flag_bot / lo_1h - 1.0) * 100.0 < 2.5 - 1e-12:
+        return None
+    if vol < typical_vol * 1.3 * elapsed_frac:
+        return None
+    return {"shelf": flag_bot, "price": px, "stair": 1.0}
+
+
 def probe_candle_setup(
     bars: list[dict[str, Any]],
     *,
     now: float | None = None,
 ) -> dict[str, float] | None:
-    """Ранний вход в живую восходящую 5м свечу от open либо в 3-свечную ступеньку.
+    """Ранний вход в живую восходящую 5м свечу от open, 3-свечную ступеньку или пробой флага.
 
-    Главный щуп: берём старт восходящей свечи без верхнего фитиля (слива)
-    или устойчивую ступеньку из 3 зелёных 5м баров подряд с объёмом.
+    Главный щуп: берём старт восходящей свечи без верхнего фитиля (слива),
+    устойчивую ступеньку из 3 зелёных 5м баров подряд или пробой 15м плоского флага.
     bars — 5м, от старых к новым; нужен open (опционально ts старта бара).
-    Полка — open живой свечи (для ступеньки — open предыдущей свечи).
+    Полка — open живой свечи (для ступеньки/флага — основание полки).
     """
     need = PROBE_CANDLE_LOOKBACK + 2
     if len(bars) < need:
@@ -956,8 +1019,24 @@ def probe_candle_setup(
     # Отсечение кульминационного выброса объёма на предыдущей свече (Blow-off Volume > 6.5x).
     if prior_vol > typical * PROBE_CANDLE_MAX_PRIOR_VOL_MULT + 1e-12:
         return None
-    # Отсечение перегрева за последние 30 минут (> +2.20%).
-    if len(window) >= 6:
+    # Проверим, стояла ли цена последние 15 минут (3 закрытых бара) в узкой полке флага ≤ 0.80% после импульса ≥ +2.5%.
+    flag_cooled = False
+    if len(bars) >= 4 and window:
+        try:
+            f_bars = bars[-4:-1]
+            f_top = max(max(float(b["open"]), float(b["close"])) for b in f_bars)
+            f_bot = min(min(float(b["open"]), float(b["close"])) for b in f_bars)
+            lo_1h = min(float(b["low"]) for b in window)
+            flag_cooled = (
+                f_bot > 0
+                and lo_1h > 0
+                and (f_top / f_bot - 1.0) * 100.0 <= 0.80 + 1e-12
+                and (f_bot / lo_1h - 1.0) * 100.0 >= 2.5 - 1e-12
+            )
+        except (TypeError, ValueError, KeyError):
+            flag_cooled = False
+    # Отсечение перегрева за последние 30 минут (> +2.20%), если не было 15-минутной полки охлаждения.
+    if not flag_cooled and len(window) >= 6:
         try:
             ref_30m = float(window[-6].get("close") or 0)
         except (TypeError, ValueError):
@@ -969,7 +1048,7 @@ def probe_candle_setup(
         try:
             pb_o = float(prev_bar.get("open") or prev_bar.get("close") or 0)
             pb_c = float(prev_bar.get("close") or 0)
-            pb_h = float(prev_bar.get("high") or 0)
+            pb_h = float(prev_bar.get("high") or prev_bar.get("close") or 0)
         except (TypeError, ValueError):
             continue
         if pb_o > 0 and pb_h > max(pb_o, pb_c):
@@ -999,7 +1078,11 @@ def probe_candle_setup(
     ):
         return {"shelf": op, "price": price}
     # 2) Ступенька из 3 зелёных 5м свечей подряд (staircase breakout).
-    return _probe_staircase_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
+    stair = _probe_staircase_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
+    if stair:
+        return stair
+    # 3) Пробой 15-минутного плоского флага у вершины часа (bull-flag breakout).
+    return _probe_flag_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
 
 
 def probe_candle_day_ok(
