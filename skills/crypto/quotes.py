@@ -359,6 +359,23 @@ class CryptoQuotesMixin:
             "ask": float(row.get("ask1Price") or 0),
         }
 
+    def _orderbook_obi(self, ticker: str, depth: int = 5) -> float | None:
+        """Дисбаланс стакана L2 (0..1): доля bid-объёма в топ-depth уровнях."""
+        from .desk_policy import orderbook_obi
+
+        ticker = ticker.upper()
+        try:
+            data = self._public_get(
+                "/v5/market/orderbook",
+                {"category": "spot", "symbol": self._symbol(ticker), "limit": "25"},
+                f"ob:{ticker}",
+                cache_sec=2.0,
+            )
+        except Exception:
+            return None
+        result = data.get("result") or {}
+        return orderbook_obi(result.get("b") or [], result.get("a") or [], depth=depth)
+
     def _momentum(self, ticker: str) -> dict[str, Any]:
         data = self._public_get(
             "/v5/market/kline",

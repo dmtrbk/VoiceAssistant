@@ -47,6 +47,7 @@ from .desk_policy import (
     SLEEVE_SKIP,
     _leveraged_base,
     BTC_DIP_TICKER,
+    EXIT_TRAP_BEAR_OBI,
     POCKET_EXIT_DEEP_PULLBACK_PCT,
     PROBE_CANDLE_SHELF_BREAK_PCT,
     btc_dip_quote,
@@ -518,6 +519,7 @@ class CryptoDeskMixin:
             live = self._tape_quote(ticker)
             if live and float(live.get("price") or 0) > 0:
                 price = float(live["price"])
+            live_bid = float((live or {}).get("bid") or 0)
             entry = position_basis(book_entry, read_anchors().get(ticker))
             now = time.time()
             exit_state = None
@@ -533,6 +535,7 @@ class CryptoDeskMixin:
             exit_state = update_pocket_exit_arm(
                 exit_state, price=price, entry=entry, now=now, qty=qty
             )
+            obi: float | None = None
             if exit_state:
                 update_second_pocket_leg(
                     ticker,
@@ -542,6 +545,9 @@ class CryptoDeskMixin:
                     exit_high=float(exit_state["high"]),
                     exit_ts=float(exit_state["ts"]),
                 )
+                obi_fn = getattr(self, "_orderbook_obi", None)
+                if callable(obi_fn):
+                    obi = obi_fn(ticker)
             reason = btc_dip_exit_reason(
                 price=price,
                 entry=entry,
@@ -549,6 +555,8 @@ class CryptoDeskMixin:
                 now=now,
                 swing_low=float(leg.get("low") or 0),
                 scratch=bool(leg.get("scratch")),
+                bid=live_bid,
+                obi=obi,
             )
             if not reason or price <= 0:
                 if exit_state and price > 0:
@@ -570,9 +578,10 @@ class CryptoDeskMixin:
                 self._drop_anchor(ticker)
                 continue
             seen = getattr(self, "_last_fill", None)
+            use_maker = not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
             try:
                 phrase = self._place_order(
-                    ticker, "Sell", base_qty=sell_qty, price=price, maker=True
+                    ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker
                 )
             except Exception as exc:
                 logger.info("[Крипта] карман2 %s продажа не прошла: %s", ticker, exc)
@@ -892,6 +901,10 @@ class CryptoDeskMixin:
         except Exception as exc:
             logger.info("[Крипта] щуп %s цена: %s", ticker, exc)
             return
+        live = self._tape_quote(ticker)
+        if live and float(live.get("price") or 0) > 0:
+            price = float(live["price"])
+        live_bid = float((live or {}).get("bid") or 0)
         trend = "bull"
         try:
             bars = self._probe_bars(ticker, "15", 80)
@@ -901,40 +914,48 @@ class CryptoDeskMixin:
             logger.info("[Крипта] щуп %s тренд: %s", ticker, exc)
         peak = max(float(state.get("peak") or 0), price)
         leg_algo = str(state.get("algo") or "")
+        qty = float(state.get("qty") or 0)
+        entry = float(state.get("entry") or 0)
         if peak > float(state.get("peak") or 0) + 1e-12:
             write_probe(
                 ticker=ticker,
-                qty=float(state.get("qty") or 0),
-                entry=float(state.get("entry") or 0),
+                qty=qty,
+                entry=entry,
                 shelf=float(state.get("shelf") or 0),
                 arm_px=float(state.get("arm_px") or 0),
                 peak=peak,
                 low=float(state.get("low") or 0),
                 algo=leg_algo,
             )
+        arm_need = exit_trap_arm_pct(entry=entry, qty=qty) if entry > 0 and qty > 0 else 9e9
+        peak_gain = (peak / entry - 1.0) * 100.0 if entry > 0 else 0.0
+        obi: float | None = None
+        if peak_gain >= arm_need - 1e-6:
+            obi_fn = getattr(self, "_orderbook_obi", None)
+            if callable(obi_fn):
+                obi = obi_fn(ticker)
         reason = probe_exit_reason(
             price=price,
-            entry=float(state.get("entry") or 0),
+            entry=entry,
             shelf=float(state.get("shelf") or 0),
             trend15=trend,
             arm_px=float(state.get("arm_px") or 0),
             peak=peak,
             entry_low=float(state.get("low") or 0),
             algo=leg_algo,
-            qty=float(state.get("qty") or 0),
+            qty=qty,
             opened_ts=float(state.get("ts") or 0),
             now=time.time(),
+            bid=live_bid,
+            obi=obi,
         )
         if not reason:
             return
-        qty = float(state.get("qty") or 0)
-        entry = float(state.get("entry") or 0)
         shelf = float(state.get("shelf") or 0)
         # Мягкий выход → карман2 только если уже был реальный плюс (ловушка),
         # либо если нога застряла в щупе («застой») — освобождаем слот щупа под минимальный выход в кармане2.
         seed_high = max(float(state.get("peak") or 0), float(price or 0))
         peak_gain = (seed_high / entry - 1.0) * 100.0 if entry > 0 else 0.0
-        arm_need = exit_trap_arm_pct(entry=entry, qty=qty) if entry > 0 and qty > 0 else 9e9
         is_stale = reason == "застой"
         has_trap_peak = peak_gain >= arm_need - 1e-6
         if (
@@ -992,8 +1013,9 @@ class CryptoDeskMixin:
             write_probe(drop=ticker)
             return
         seen = getattr(self, "_last_fill", None)
+        use_maker = not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
         try:
-            self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
+            self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker)
         except Exception as exc:
             logger.info("[Крипта] щуп %s продажа не прошла: %s", ticker, exc)
             return
@@ -1669,6 +1691,7 @@ class CryptoDeskMixin:
                     if self._desk_stop.is_set():
                         return
                     if fired:
+                        tape.consume_signals()
                         self._pockets_tick()
                         break
                 elif self._desk_stop.wait(remaining):

@@ -226,6 +226,12 @@ class BybitPublicTape:
             out: dict[str, float] = {"price": price, "ts": ts}
             if chg is not None:
                 out["chg"] = float(chg)
+            bid = float(row.get("bid") or 0)
+            ask = float(row.get("ask") or 0)
+            if bid > 0:
+                out["bid"] = bid
+            if ask > 0:
+                out["ask"] = ask
             return out
 
     def is_alive(self, *, max_age: float = _STALE_SEC) -> bool:
@@ -282,9 +288,10 @@ class BybitPublicTape:
                 "ts": time.time(),
             }
             self._last_msg = time.time()
+            bid = float(self._px[ticker].get("bid") or 0)
             entered = self._mark_hot_locked(ticker, price)
             crossed = self._mark_entry_locked(ticker, price)
-            faded = self._mark_exit_locked(ticker, price)
+            faded = self._mark_exit_locked(ticker, price, bid=bid)
         if entered:
             logger.info("[Крипта] лента: зона %s", ",".join(sorted(entered)))
             self._wake.set()
@@ -331,7 +338,7 @@ class BybitPublicTape:
             return {ticker}
         return set()
 
-    def _mark_exit_locked(self, ticker: str, price: float) -> set[str]:
+    def _mark_exit_locked(self, ticker: str, price: float, *, bid: float = 0.0) -> set[str]:
         arm = self._exit.get(ticker)
         if not arm or price <= 0:
             return set()
@@ -348,10 +355,11 @@ class BybitPublicTape:
         hold = float(arm.get("hold") or 0)
         if arm.get("fired") or pullback <= 0:
             return set()
-        deep_hit = deep_pullback > 0 and price <= high * (1.0 - deep_pullback / 100.0) + 1e-12
+        exit_px = min(price, float(bid)) if float(bid or 0) > 0 else price
+        deep_hit = deep_pullback > 0 and exit_px <= high * (1.0 - deep_pullback / 100.0) + 1e-12
         if not deep_hit and hold > 0 and time.time() - float(arm.get("high_ts") or 0) < hold:
             return set()
-        if price <= high * (1.0 - pullback / 100.0) + 1e-12:
+        if exit_px <= high * (1.0 - pullback / 100.0) + 1e-12:
             arm["fired"] = True
             return {ticker}
         return set()

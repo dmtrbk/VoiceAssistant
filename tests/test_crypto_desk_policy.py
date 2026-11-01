@@ -1365,6 +1365,19 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertAlmostEqual(policy.exit_trap_arm_pct(cost_usd=100.0), 0.66, places=2)
         self.assertGreater(policy.exit_trap_arm_pct(cost_usd=40.0), 1.0)
         self.assertLess(policy.exit_trap_arm_pct(cost_usd=200.0), 0.6)
+        # Дисбаланс стакана L2 (OBI) и срабатывание ловушки по bid / медвежьей плите:
+        obi_bear = policy.orderbook_obi([["1.0", "100"]], [["1.0", "400"]], depth=5)
+        self.assertAlmostEqual(obi_bear or 0.0, 0.20, places=2)
+        # При медвежьей плите (obi <= 0.28) откат -0.35% режет сразу без ожидания hold 60с:
+        self.assertTrue(
+            policy.pocket_exit_ready(
+                armed, price=101.1, bid=101.1 * (1.0 - 0.0035), now=10.0 + 5.0, entry=100.0, obi=obi_bear
+            )
+        )
+        # Если lastPrice застыл на пике 104.0, но bid в стакане уже упал до need — выход готов:
+        self.assertTrue(
+            policy.pocket_exit_ready(held, price=104.0, bid=need, now=20.0 + policy.POCKET_EXIT_HOLD_SEC)
+        )
 
     def test_watch_stream_tickers_skips_dust(self):
         self.assertEqual(

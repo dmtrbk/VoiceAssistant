@@ -232,10 +232,13 @@ BTC_DIP_EXIT_PCT = 1.1
 # Второй карман: те же сутки и отскок, фиксированные 50$ вместо доли счёта.
 SUI_DIP_TICKER = "AVA"
 SUI_DIP_USD = 50.0
-# Плюс (комиссия×2 + $0.50) взводит вершину. Продажа — откат от неё, пауза короче входа.
+# Плюс (комиссия×2 + $0.30) взводит вершину. Продажа — откат от неё, пауза короче входа.
 POCKET_EXIT_PULLBACK_PCT = 0.5
+POCKET_EXIT_WALL_PULLBACK_PCT = 0.30
 POCKET_EXIT_DEEP_PULLBACK_PCT = 1.0
 POCKET_EXIT_HOLD_SEC = 60
+EXIT_TRAP_BEAR_OBI = 0.28
+EXIT_TRAP_BULL_OBI = 0.72
 BTC_DIP_STOP_PCT = 15.0
 WATCH_MAX_TRADES_PER_HOUR = 2
 WATCH_PERIOD_CALM = 12 * 60
@@ -379,6 +382,34 @@ def pick_second_pocket_leg_for_funding(
     return best_leg
 
 
+def orderbook_obi(
+    bids: list[Any],
+    asks: list[Any],
+    *,
+    depth: int = 5,
+) -> float | None:
+    """Дисбаланс стакана L2 (0..1): доля bid-объёма в USD среди топ-depth уровней."""
+    cap = max(1, int(depth))
+    bid_usd = 0.0
+    ask_usd = 0.0
+    for row in (bids or [])[:cap]:
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            try:
+                bid_usd += float(row[0]) * float(row[1])
+            except (TypeError, ValueError):
+                continue
+    for row in (asks or [])[:cap]:
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            try:
+                ask_usd += float(row[0]) * float(row[1])
+            except (TypeError, ValueError):
+                continue
+    tot = bid_usd + ask_usd
+    if tot <= 0:
+        return None
+    return bid_usd / tot
+
+
 def btc_dip_exit_reason(
     *,
     price: float,
@@ -387,6 +418,8 @@ def btc_dip_exit_reason(
     now: float | None = None,
     swing_low: float = 0.0,
     scratch: bool = False,
+    bid: float = 0.0,
+    obi: float | None = None,
 ) -> str | None:
     """Стоп −15% на дыре. Обычный срыв — возврат под локальное дно. Плюс закрываем откатом от вершины."""
     px = float(price or 0)
@@ -398,7 +431,7 @@ def btc_dip_exit_reason(
         return "стоп"
     if float(swing_low or 0) > 0 and px <= float(swing_low):
         return "дно"
-    if pocket_exit_ready(exit_arm, price=px, now=now, entry=ent):
+    if pocket_exit_ready(exit_arm, price=px, now=now, entry=ent, bid=bid, obi=obi):
         return "вершина"
     if scratch and gain >= POCKET_SCRATCH_PCT - 1e-6:
         return "безубыток"
@@ -1408,8 +1441,10 @@ def probe_exit_reason(
     qty: float = 0.0,
     opened_ts: float = 0.0,
     now: float | None = None,
+    bid: float = 0.0,
+    obi: float | None = None,
 ) -> str | None:
-    """Стоп и полка. Плюс — ловушка: пик ≥ комиссия×2+$0.50, продажа на откате −0,5%.
+    """Стоп и полка. Плюс — ловушка: пик ≥ комиссия×2+$0.30, продажа на откате −0,5% (или −0,3% при плите ask).
 
     Пока ловушка не взведена: shelf режется «ожиданием»/«дном»; подножка
     impulse/sprint/grind эти срезы не берёт. Большой ход (+PROBE_RUN) ещё и медвежьим 15м.
@@ -1435,10 +1470,17 @@ def probe_exit_reason(
     high = max(float(peak or 0), px)
     arm_pct = exit_trap_arm_pct(entry=ent, qty=qty)
     peak_gain = (high / ent - 1.0) * 100.0 if ent > 0 else 0.0
+    exit_px = min(px, float(bid)) if float(bid or 0) > 0 else px
+    exit_gain = (exit_px / ent - 1.0) * 100.0 if ent > 0 else 0.0
+    pullback_pct = (
+        POCKET_EXIT_WALL_PULLBACK_PCT
+        if (obi is not None and float(obi) <= EXIT_TRAP_BEAR_OBI + 1e-12)
+        else cfg().pocket_exit_pullback_pct
+    )
     if (
         peak_gain >= arm_pct - 1e-6
-        and px <= high * (1.0 - cfg().pocket_exit_pullback_pct / 100.0) + 1e-12
-        and gain >= 2.0 * EXIT_FEE_SIDE * 100.0 - 1e-6
+        and exit_px <= high * (1.0 - pullback_pct / 100.0) + 1e-12
+        and exit_gain >= 2.0 * EXIT_FEE_SIDE * 100.0 - 1e-6
     ):
         return "вершина"
     if (
@@ -1747,20 +1789,27 @@ def pocket_exit_ready(
     price: float,
     now: float | None = None,
     entry: float = 0.0,
+    bid: float = 0.0,
+    obi: float | None = None,
 ) -> bool:
-    """Продажа кармана: −0,5% от вершины и пауза hold (60с).
+    """Продажа кармана: −0,5% от вершины и пауза hold (60с), с учётом bid и дисбаланса стакана L2.
 
     Без ожидания таймера режем сразу, если:
-    - цена откатила ≥ 1.0% от вершины (POCKET_EXIT_DEEP_PULLBACK_PCT);
-    - или цена вернулась ≤ точки входа (не течём под водой).
+    - в стакане медвежья плита (obi ≤ 0.28) и откат ≥ 0.30% от вершины;
+    - цена/bid откатила ≥ 1.0% от вершины (POCKET_EXIT_DEEP_PULLBACK_PCT);
+    - или цена/bid вернулась ≤ точки входа (не течём под водой).
     """
     limits = cfg()
     if not state:
         return False
     high = float(state.get("high") or 0)
-    px = float(price or 0)
-    if high <= 0 or px <= 0:
+    raw_px = float(price or 0)
+    if high <= 0 or raw_px <= 0:
         return False
+    px = min(raw_px, float(bid)) if float(bid or 0) > 0 else raw_px
+    bear_wall = obi is not None and float(obi) <= EXIT_TRAP_BEAR_OBI + 1e-12
+    if bear_wall and px <= high * (1.0 - POCKET_EXIT_WALL_PULLBACK_PCT / 100.0) + 1e-12:
+        return True
     if px > high * (1.0 - limits.pocket_exit_pullback_pct / 100.0) + 1e-12:
         return False
     ent = float(entry or 0)
