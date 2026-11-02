@@ -212,6 +212,32 @@ def recompute_lifetime_pnl(
     return value
 
 
+def realized_pnl_for_sell(
+    trades: list[dict[str, Any]],
+    *,
+    ticker: str,
+    quote: float,
+    price: float,
+) -> float | None:
+    """Результат продажи против средней цены лота в журнале до этой сделки."""
+    symbol = str(ticker or "").upper()
+    quote_usd = float(quote or 0)
+    px = float(price or 0)
+    if not symbol or quote_usd <= 0 or px <= 0:
+        return None
+    lot = open_lots(trades).get(symbol)
+    if not lot or lot["qty"] <= 0 or lot["cost"] <= 0:
+        return None
+    qty = quote_usd / px
+    if qty <= 0:
+        return None
+    sell_qty = min(qty, lot["qty"])
+    avg = lot["cost"] / lot["qty"]
+    cost_sold = avg * sell_qty
+    proceeds = quote_usd * (sell_qty / qty)
+    return round(proceeds - cost_sold, 2)
+
+
 def format_trade_line(entry: dict[str, Any]) -> str:
     ts = str(entry.get("ts") or "").strip()
     side = "купил" if str(entry.get("side") or "") == "buy" else "продал"
@@ -221,8 +247,14 @@ def format_trade_line(entry: dict[str, Any]) -> str:
     price = entry.get("price") or 0
     quote_bit = f" на {_format_usd(float(quote))}" if quote else ""
     price_bit = f" по {price:g}" if price else ""
+    pnl_bit = ""
+    if side == "продал" and entry.get("pnl_usd") is not None:
+        try:
+            pnl_bit = f" ({float(entry['pnl_usd']):+.2f}$)"
+        except (TypeError, ValueError):
+            pnl_bit = ""
     when = f"{ts} " if ts else ""
-    return f"{when}{side} {name} ({ticker}){quote_bit}{price_bit}"
+    return f"{when}{side} {name} ({ticker}){quote_bit}{price_bit}{pnl_bit}"
 
 
 def format_journal(trades: list[dict[str, Any]] | None = None, limit: int = 8) -> str:
@@ -245,16 +277,23 @@ class CryptoJournalMixin:
 
     def _journal_trade(self, ticker: str, side: str, quote: float, price: float, spoken: str) -> None:
         now = datetime.now(_MSK)
-        entry = {
+        side_norm = "buy" if side == "Buy" else "sell"
+        quote_usd = round(float(quote or 0), 2)
+        px = round(float(price or 0), 6)
+        trades = _read_trades()
+        entry: dict[str, Any] = {
             "ts": now.strftime("%d.%m %H:%M"),
             "ts_epoch": int(now.timestamp()),
             "ticker": ticker,
             "name": spoken,
-            "side": "buy" if side == "Buy" else "sell",
-            "quote": round(float(quote or 0), 2),
-            "price": round(float(price or 0), 6),
+            "side": side_norm,
+            "quote": quote_usd,
+            "price": px,
         }
-        trades = _read_trades()
+        if side_norm == "sell":
+            pnl = realized_pnl_for_sell(trades, ticker=ticker, quote=quote_usd, price=px)
+            if pnl is not None:
+                entry["pnl_usd"] = pnl
         trades.append(entry)
         _write_trades(trades)
         try:

@@ -101,6 +101,38 @@ class TestCryptoLifetime(unittest.TestCase):
         crypto_journal._write_trades(trades, path=self.path)
         self.assertEqual(len(crypto_journal._read_trades(self.path)), 250)
 
+    def test_sell_line_includes_pnl(self):
+        buys = [{"ticker": "WOO", "side": "buy", "quote": 40.0, "price": 0.01}]
+        pnl = crypto_journal.realized_pnl_for_sell(
+            buys, ticker="WOO", quote=39.0, price=0.01144
+        )
+        self.assertIsNotNone(pnl)
+        self.assertGreater(pnl, 0)
+        line = crypto_journal.format_trade_line(
+            {
+                "ts": "02.11 10:15",
+                "side": "sell",
+                "name": "WOO",
+                "ticker": "WOO",
+                "quote": 39.0,
+                "price": 0.01144,
+                "pnl_usd": pnl,
+            }
+        )
+        self.assertIn("продал", line)
+        self.assertIn(f"({pnl:+.2f}$)", line)
+        buy_line = crypto_journal.format_trade_line(
+            {
+                "ts": "02.11 09:00",
+                "side": "buy",
+                "name": "WOO",
+                "ticker": "WOO",
+                "quote": 40.0,
+                "price": 0.01,
+            }
+        )
+        self.assertNotIn("$)", buy_line)
+
 
 if __name__ == "__main__":
     unittest.main()
