@@ -23,6 +23,8 @@ DESK_ALT_SLEEVE = frozenset({
 ALT_SLEEVE_MAX_PCT = 50.0
 ALT_MAX_NAMES = 2
 PROBE_MAX_LEGS = 4
+# BTC за сутки в минусе — не четыре коррелированные полки, а 1–2 слота.
+PROBE_MAX_LEGS_BTC_DOWN = 2
 # Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
 POCKET_FROM_PROBE_MAX = 3
 # Мягкий выход щупа → передача во второй карман; жёсткий — продажа.
@@ -83,7 +85,7 @@ _live_extra: set[str] = set()
 # Щуп: 40$ на пробой тихой полки / свечи. Не слот рукава и не карман.
 PROBE_USD = 40.0
 # Днём берём монеты с оборотом ≥ $150k (тонкий стакан <$150k на живых сделках дал 1W/11L и -$5.62).
-# Ночью (21:00–06:00 YEKT) новые щупы запрещены: 02.11 азиатский чоп UNI/TRUMP/BEAM = −$1.96 по полке.
+# Ночь 21:00–06:00 YEKT — не молчать: только stair/flag, оборот ≥ $1.5M, OBI ≥ 0.55 (STX/ZRO да, UNI/BEAM нет).
 PROBE_MIN_TURNOVER_USD = 150_000.0
 PROBE_NIGHT_MIN_TURNOVER_USD = 1_500_000.0
 PROBE_NIGHT_START_HOUR_YEKT = 21
@@ -201,6 +203,8 @@ PROBE_STAIR2_MIN_1H_POS = 0.88
 # Защита от проскальзывания по пустому стакану перед рыночной покупкой щупа (GROVE 0.007281->0.007409):
 PROBE_MAX_SPREAD_PCT = 0.35
 PROBE_MAX_ASK_SLIP_PCT = 0.45
+# На входе нужен bid-перевес в топ-5 L2. Иначе ложный пробой в красной ленте проходит узкий спред.
+PROBE_MIN_ENTRY_OBI = 0.55
 # Жёсткий дневной риск-лимит (Daily Max Drawdown) на новые входы щупа (~1.35% от депозита $440).
 PROBE_DAILY_MAX_LOSS_USD = 6.0
 PROBE_SPRINT_HOLD_SEC = 30
@@ -552,16 +556,59 @@ def probe_should_handoff(reason: str | None) -> bool:
 
 
 def probe_night_halted(now: float | None = None) -> bool:
-    """Новые входы щупа с 21:00 до 06:00 YEKT закрыты. Открытые ноги продолжают выход."""
+    """Ночное окно щупа 21:00–06:00 YEKT: не стоп, а узкий фильтр (stair/flag + $1.5M)."""
     ts = time.time() if now is None else float(now)
     hr = datetime.fromtimestamp(ts, _YEKT).hour
     return hr >= PROBE_NIGHT_START_HOUR_YEKT or hr < PROBE_NIGHT_END_HOUR_YEKT
 
 
 def probe_night_halt_reason(now: float | None = None) -> str | None:
-    if probe_night_halted(now):
-        return "ночь 21:00–06:00 YEKT"
+    """Полный ночной стоп снят — новые входы ночью режет probe_setup_ok_now, не пауза."""
+    del now
     return None
+
+
+def tape_btc_day_chg(rows: list[dict[str, Any]] | None) -> float | None:
+    """Суточная процентная смена BTC из ленты тикеров. Нет строки — None."""
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("ticker") or "").upper() != "BTC":
+            continue
+        try:
+            return float(row.get("chg"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def probe_max_legs(*, btc_day_chg: float | None = None) -> int:
+    """Днём до 4 ног. BTC за сутки в минусе — 2 слота, иначе каскад коррелированных полок."""
+    if btc_day_chg is None:
+        return int(PROBE_MAX_LEGS)
+    if float(btc_day_chg) < 0.0:
+        return int(PROBE_MAX_LEGS_BTC_DOWN)
+    return int(PROBE_MAX_LEGS)
+
+
+def probe_setup_ok_now(
+    setup: dict[str, Any] | None,
+    *,
+    now: float | None = None,
+    turnover: float | None = None,
+) -> bool:
+    """Ночью только ступенька/флаг и оборот ≥ $1.5M. Днём сетап уже отфильтрован scan."""
+    if not setup:
+        return False
+    if not probe_night_halted(now):
+        return True
+    if float(setup.get("stair") or 0) < 1.0 - 1e-12:
+        return False
+    try:
+        turn = float(turnover) if turnover is not None else 0.0
+    except (TypeError, ValueError):
+        turn = 0.0
+    return turn >= float(PROBE_NIGHT_MIN_TURNOVER_USD) - 1e-9
 
 
 def probe_min_turnover_usd(now: float | None = None) -> float:
@@ -938,6 +985,17 @@ def probe_book_buy_ok(*, bid: float, ask: float, arm_px: float = 0.0) -> bool:
     return True
 
 
+def probe_entry_obi_ok(obi: float | None) -> bool:
+    """Перед Buy щупа: доля bid в топ-5 ≥ 0.55. Нет котировки стакана — не блокируем."""
+    if obi is None:
+        return True
+    try:
+        value = float(obi)
+    except (TypeError, ValueError):
+        return True
+    return value >= PROBE_MIN_ENTRY_OBI - 1e-12
+
+
 def _probe_staircase_setup(
     bars: list[dict[str, Any]],
     *,
@@ -1125,12 +1183,11 @@ def probe_candle_setup(
     *,
     now: float | None = None,
 ) -> dict[str, float] | None:
-    """Ранний вход в живую восходящую 5м свечу от open, 3-свечную ступеньку или пробой флага.
+    """Вход в 3-свечную ступеньку, 2-свечную ступеньку или пробой флага.
 
-    Главный щуп: берём старт восходящей свечи без верхнего фитиля (слива),
-    устойчивую ступеньку из 3 зелёных 5м баров подряд или пробой 15м плоского флага.
+    Одиночная 5м свеча выключена: главный поставщик ложных полок.
     bars — 5м, от старых к новым; нужен open (опционально ts старта бара).
-    Полка — open живой свечи (для ступеньки/флага — основание полки).
+    Полка — основание ступеньки/флага.
     """
     need = PROBE_CANDLE_LOOKBACK + 2
     if len(bars) < need:
@@ -1210,13 +1267,7 @@ def probe_candle_setup(
         prior_body = (prior_c / prior_o - 1.0) * 100.0
         if prior_body > probe_candle_prior_max_body_pct() + 1e-12:
             return None
-    # 1) Классический старт одиночной 5м свечи (внутри бара 0.35..0.65).
-    if (
-        probe_candle_live_ok(price, hi, lo, op)
-        and (prior_o <= 0 or prior_c <= 0 or price > max(prior_o, prior_c) - 1e-12)
-        and vol >= typical * PROBE_CANDLE_VOL_MULT * elapsed_frac
-    ):
-        return {"shelf": op, "price": price}
+    # Одиночная 5м свеча выключена. Днём и ночью — только ступенька и флаг.
     # 2) Ступенька из 3 зелёных 5м свечей подряд (staircase breakout).
     stair = _probe_staircase_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
     if stair:
@@ -1559,7 +1610,8 @@ def probe_exit_reason(
 
     Пока ловушка не взведена: shelf режется «ожиданием»/«дном»; подножка
     impulse/sprint/grind эти срезы не берёт. Большой ход (+PROBE_RUN) ещё и медвежьим 15м.
-    Если нога висит без выхода ≥ PROBE_CANDLE_STALE_SEC — «застой» (handoff в карман2).
+    Если нога в минусе висит ≥ PROBE_CANDLE_STALE_SEC — «застой» (handoff в карман2).
+    Пока цена над входом — ждём ловушку или полку, плюс в scratch не режем.
     """
     px = float(price or 0)
     ent = float(entry or 0)
@@ -1598,6 +1650,7 @@ def probe_exit_reason(
         float(opened_ts or 0) > 0
         and now is not None
         and float(now) - float(opened_ts) >= PROBE_CANDLE_STALE_SEC
+        and gain <= 1e-12
         and gain < arm_pct - 1e-6
     ):
         return "застой"

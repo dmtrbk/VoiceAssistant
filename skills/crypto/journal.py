@@ -464,12 +464,35 @@ def daily_realized_pnl(
     return round(day_pnl, 2)
 
 
+def probe_daily_loss_reset_ts(path: str | None = None) -> float:
+    """Метка сброса дневного стопа −$6. 0 — считать с начала календарных суток МСК."""
+    try:
+        return float(_read_daily_meta(path).get("probe_loss_reset_ts") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def reset_probe_daily_loss(
+    *,
+    now: float | None = None,
+    path: str | None = None,
+) -> float:
+    """Обнулить счётчик дневного стопа: новые входы смотрят PnL только после этой метки."""
+    ts = float(now if now is not None else time.time())
+    meta = _read_daily_meta(path)
+    meta["probe_loss_reset_ts"] = ts
+    _write_daily_meta(meta, path)
+    logger.info("[Крипта] дневной стоп −$6 сброшен, считаю с %s", datetime.fromtimestamp(ts, _MSK).strftime("%d.%m %H:%M"))
+    return ts
+
+
 def probe_loss_guard_reason(
     *,
     now: float | None = None,
     trades: list[dict[str, Any]] | None = None,
+    reset_ts: float | None = None,
 ) -> str | None:
-    """Пауза новых входов: ночь, дневной лимит, час, серия убытков или кулдаун после полки."""
+    """Пауза новых входов: дневной лимит, час, серия убытков или кулдаун после полки."""
     from .desk_policy import (
         PROBE_HOURLY_MAX_LOSS_USD,
         PROBE_MAX_CONSECUTIVE_LOSSES,
@@ -477,15 +500,16 @@ def probe_loss_guard_reason(
         PROBE_SHELF_COOLDOWN_SEC,
         PROBE_STREAK_PAUSE_SEC,
         probe_daily_loss_blocked,
-        probe_night_halt_reason,
     )
 
     now_ts = float(now if now is not None else time.time())
-    night = probe_night_halt_reason(now_ts)
-    if night:
-        return night
+    if reset_ts is None:
+        reset_ts = 0.0 if trades is not None else probe_daily_loss_reset_ts()
     day_dt = datetime.fromtimestamp(now_ts, _MSK)
-    day_start = day_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    day_start = max(
+        day_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp(),
+        float(reset_ts or 0),
+    )
     day_end = (day_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()
     rows = trades if trades is not None else _read_trades()
     lots: dict[str, dict[str, float]] = {}

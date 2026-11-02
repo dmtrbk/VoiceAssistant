@@ -648,11 +648,30 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_night_halted(datetime(2026, 11, 1, 6, 0, tzinfo=yekt).timestamp())
         )
-        self.assertEqual(
-            policy.probe_night_halt_reason(night_ts),
-            "ночь 21:00–06:00 YEKT",
-        )
+        self.assertIsNone(policy.probe_night_halt_reason(night_ts))
         self.assertIsNone(policy.probe_night_halt_reason(day_ts))
+        self.assertEqual(policy.PROBE_MAX_LEGS_BTC_DOWN, 2)
+        self.assertEqual(policy.probe_max_legs(), 4)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4), 4)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0), 4)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01), 2)
+        self.assertEqual(policy.tape_btc_day_chg([{"ticker": "ETH", "chg": 1.0}]), None)
+        self.assertEqual(
+            policy.tape_btc_day_chg([{"ticker": "BTC", "chg": -1.2}, {"ticker": "ETH", "chg": 2.0}]),
+            -1.2,
+        )
+        night_stair = {"shelf": 1.0, "price": 1.01, "stair": 1.0, "algo": "candle"}
+        night_candle = {"shelf": 1.0, "price": 1.01, "algo": "candle"}
+        self.assertTrue(policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=200_000))
+        self.assertTrue(
+            policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=1_500_000)
+        )
+        self.assertFalse(
+            policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=400_000)
+        )
+        self.assertFalse(
+            policy.probe_setup_ok_now(night_candle, now=night_ts, turnover=5_000_000)
+        )
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_SEC, 25 * 60)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_LOSS_USD, 0.25)
         self.assertFalse(
@@ -818,33 +837,17 @@ class TestDeskPolicy(unittest.TestCase):
                 rising["close"], rising["high"], rising["low"], rising["open"]
             )
         )
-        candle = policy.probe_candle_setup(base5 + [rising])
-        self.assertIsNotNone(candle)
-        assert candle is not None
-        self.assertAlmostEqual(candle["shelf"], 1.0)
-        # Продавленный сверху фитиль (PARTI 18:20 pos=0.32 / BLEND 13:25 pos=0.20 / DOOD pos=0.21) — мимо.
+        # Одиночная 5м свеча выключена — ложные полки. Живой вход только stair/flag.
+        self.assertIsNone(policy.probe_candle_setup(base5 + [rising]))
         collapsed_wick = {**rising, "close": 1.006, "high": 1.020}
         self.assertIsNone(policy.probe_candle_setup(base5 + [collapsed_wick]))
-        # Покупка на самом пике бара (pos > 0.65) — тоже мимо.
         tip_candle = {**rising, "close": 1.011, "high": 1.012}
         self.assertIsNone(policy.probe_candle_setup(base5 + [tip_candle]))
         late_body = {**rising, "close": 1.022, "high": 1.023}
         self.assertIsNone(policy.probe_candle_setup(base5 + [late_body]))
-        # В начале 5м свечи (1-я минута) достаточно пропорционального темпа объёма.
         early_bar = {**rising, "ts": 1000.0, "volume": 6.0}
         self.assertIsNone(policy.probe_candle_setup(base5 + [early_bar]))
-        self.assertIsNotNone(policy.probe_candle_setup(base5 + [early_bar], now=1045.0))
-        # Candle раньше impulse в порядке.
-        candle_pick = policy.probe_pick_setup(
-            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-            base5 + [rising],
-            day_chg=5.0,
-        )
-        self.assertIsNotNone(candle_pick)
-        assert candle_pick is not None
-        self.assertEqual(candle_pick["algo"], policy.PROBE_ALGO_CANDLE)
-        self.assertEqual(candle_pick["hold_sec"], policy.PROBE_CANDLE_HOLD_SEC)
-        self.assertLessEqual(policy.PROBE_CANDLE_HOLD_SEC, 2)
+        self.assertIsNone(policy.probe_candle_setup(base5 + [early_bar], now=1045.0))
         # buy_ok: терпит уехавший хай, но режет кончик и обвалившийся под 0.35 фитиль.
         self.assertTrue(
             policy.probe_candle_buy_ok(1.008, 1.02, 0.999, 1.0)
@@ -869,6 +872,12 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_book_buy_ok(bid=0.00739, ask=0.007409, arm_px=0.007281)
         )
+        self.assertEqual(policy.PROBE_MIN_ENTRY_OBI, 0.55)
+        self.assertTrue(policy.probe_entry_obi_ok(None))
+        self.assertTrue(policy.probe_entry_obi_ok(0.55))
+        self.assertTrue(policy.probe_entry_obi_ok(0.80))
+        self.assertFalse(policy.probe_entry_obi_ok(0.40))
+        self.assertFalse(policy.probe_entry_obi_ok(0.549))
         # Ступенька из 3 зелёных 5м баров (как TREE/BIRB/WET): проходит setup и допускает room ≥ 0.3%.
         stair_bars = base5[:-2] + [
             {"open": 1.000, "high": 1.004, "low": 1.000, "close": 1.003, "volume": 12.0},
@@ -887,6 +896,10 @@ class TestDeskPolicy(unittest.TestCase):
             day_high=1.015,
         )
         self.assertIsNotNone(stair_pick)
+        assert stair_pick is not None
+        self.assertEqual(stair_pick["algo"], policy.PROBE_ALGO_CANDLE)
+        self.assertEqual(stair_pick["hold_sec"], policy.PROBE_CANDLE_HOLD_SEC)
+        self.assertLessEqual(policy.PROBE_CANDLE_HOLD_SEC, 2)
         # Быстрая 2-свечная ступенька (prior зелёная + forming пробивает prior.high, rise2 >= 0.80%):
         stair2_bars = base5[:-2] + [
             {"open": 1.001, "high": 1.001, "low": 0.999, "close": 1.000, "volume": 10.0},
@@ -905,10 +918,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertGreaterEqual(policy.PROBE_CANDLE_MIN_BODY_PCT, 0.6)
         weak = {**rising, "close": 1.004, "high": 1.012}
         self.assertIsNone(policy.probe_candle_setup(base5 + [weak]))
-        # Свежий день + room ≥ 1% — да; +35% с room — да; +48% — нет; у самого пика суток (<1%) — нет.
+        # Свежий день + room — да; +35% с room — да; +48% — нет; у самого пика суток — нет.
         fresh = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-            base5 + [rising],
+            stair_bars,
             day_chg=8.0,
             day_high=1.02,
         )
@@ -917,7 +930,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(fresh["algo"], policy.PROBE_ALGO_CANDLE)
         hot_ok = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-            base5 + [rising],
+            stair_bars,
             day_chg=35.0,
             day_high=1.12,
         )
@@ -925,16 +938,16 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(
             policy.probe_pick_setup(
                 [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-                base5 + [rising],
+                stair_bars,
                 day_chg=48.0,
                 day_high=1.12,
             )
         )
-        # У самого пика суток (<1%) — нет; глубокий слив с хая (>28%) — нет.
+        # У самого пика суток — нет; глубокий слив с хая (>28%) — нет.
         self.assertIsNone(
             policy.probe_pick_setup(
                 [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-                base5 + [rising],
+                stair_bars,
                 day_chg=8.0,
                 day_high=1.01,
             )
@@ -942,7 +955,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(
             policy.probe_pick_setup(
                 [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-                base5 + [rising],
+                stair_bars,
                 day_chg=8.0,
                 day_high=1.50,
             )
@@ -1274,7 +1287,7 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             "вершина",
         )
-        # Спящая нога щупа ≥ 2ч → «застой» (handoff в карман2).
+        # Спящая нога щупа ≥ 2ч в минусе → «застой» (handoff в карман2).
         self.assertEqual(
             policy.probe_exit_reason(
                 price=0.3143,
@@ -1288,6 +1301,20 @@ class TestDeskPolicy(unittest.TestCase):
                 now=1000.0 + policy.PROBE_CANDLE_STALE_SEC + 1.0,
             ),
             "застой",
+        )
+        # Плюс над входом не режем scratch: ждём ловушку или полку.
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.3180,
+                entry=0.3174,
+                shelf=0.314,
+                trend15="neutral",
+                peak=0.3199,
+                algo=policy.PROBE_ALGO_CANDLE,
+                qty=94.5,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_CANDLE_STALE_SEC + 1.0,
+            )
         )
         # В кармане2 нога со щупа (scratch=True) закрывается в безубыток при -0.20% и выше.
         self.assertIsNone(
@@ -1684,10 +1711,7 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         yekt = timezone(timedelta(hours=5))
         night = datetime(2026, 11, 2, 3, 0, tzinfo=yekt).timestamp()
         day = datetime(2026, 11, 2, 10, 0, tzinfo=yekt).timestamp()
-        self.assertEqual(
-            crypto_journal.probe_loss_guard_reason(now=night, trades=[]),
-            "ночь 21:00–06:00 YEKT",
-        )
+        self.assertIsNone(crypto_journal.probe_loss_guard_reason(now=night, trades=[]))
         self.assertIsNone(crypto_journal.probe_loss_guard_reason(now=day, trades=[]))
         shelf_trades = [
             {"ticker": "DOOD", "side": "buy", "quote": 40.0, "price": 0.002, "ts_epoch": day - 1800},
@@ -1706,6 +1730,19 @@ class TestJournalChurnAndDaily(unittest.TestCase):
             {"ticker": "PUMP", "side": "sell", "quote": 39.90, "price": 0.00399, "ts_epoch": day - 60},
         ]
         self.assertIsNone(crypto_journal.probe_loss_guard_reason(now=day, trades=scratch))
+
+    def test_probe_daily_loss_reset_ignores_old_sells(self):
+        now = datetime(2026, 11, 2, 18, 0, tzinfo=_MSK).timestamp()
+        trades = [
+            {"ticker": "UNI", "side": "buy", "quote": 40.0, "price": 1.0, "ts_epoch": now - 8000},
+            {"ticker": "UNI", "side": "sell", "quote": 34.0, "price": 0.85, "ts_epoch": now - 7000},
+        ]
+        reason = crypto_journal.probe_loss_guard_reason(now=now, trades=trades, reset_ts=0.0)
+        self.assertIsNotNone(reason)
+        self.assertTrue(str(reason).startswith("дневной лимит"))
+        self.assertIsNone(
+            crypto_journal.probe_loss_guard_reason(now=now, trades=trades, reset_ts=now - 60)
+        )
 
     def test_daily_report_gate(self):
         morning = datetime(2026, 9, 18, 10, 0, tzinfo=_MSK)
