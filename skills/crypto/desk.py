@@ -60,7 +60,7 @@ from .desk_policy import (
     probe_candle_day_ok,
     probe_daily_loss_blocked,
     probe_grind_live_ok,
-    probe_market_regime_ok,
+    probe_market_regime_pause_reason,
     probe_should_handoff,
     PROBE_ALGO_CANDLE,
     PROBE_ALGO_GRIND,
@@ -106,6 +106,24 @@ from .reconcile import (
 logger = logging.getLogger(__name__)
 
 _RECONCILE_MIN_GAP_SEC = 45.0
+_PROBE_PAUSE_LOG_SEC = 300.0
+
+
+def _probe_pause_kind(reason: str) -> str:
+    text = str(reason or "")
+    if text.startswith("ночь"):
+        return "ночь"
+    if text.startswith("после полки"):
+        return "полка"
+    if text.startswith("просадка"):
+        return "час"
+    if text.startswith("серия"):
+        return "серия"
+    if text.startswith("дневной"):
+        return "день"
+    if text.startswith("падающий"):
+        return "рынок"
+    return text or "пауза"
 
 
 def _wants_advice(text: str) -> bool:
@@ -874,11 +892,41 @@ class CryptoDeskMixin:
         with common._TRADE_LOCK:
             self._probe_locked()
 
+    def _note_probe_pause(self, reason: str) -> None:
+        kind = _probe_pause_kind(reason)
+        prev = str(getattr(self, "_probe_pause_kind", "") or "")
+        now = time.time()
+        last_log = float(getattr(self, "_probe_pause_log_ts", 0.0) or 0.0)
+        if kind == prev and now - last_log < _PROBE_PAUSE_LOG_SEC:
+            return
+        self._probe_pause_kind = kind
+        self._probe_pause_log_ts = now
+        logger.info("[Крипта] щуп пауза: %s", reason)
+        if kind != prev and common.telegram_configured():
+            common.send_telegram_notification(f"Крипта: щуп пауза — {reason}", background=True)
+
+    def _note_probe_resume(self) -> None:
+        prev = str(getattr(self, "_probe_pause_kind", "") or "")
+        if not prev:
+            return
+        self._probe_pause_kind = ""
+        self._probe_pause_log_ts = 0.0
+        logger.info("[Крипта] щуп пауза снята")
+        if common.telegram_configured():
+            common.send_telegram_notification("Крипта: щуп снова ищет входы", background=True)
+
     def _probe_locked(self) -> None:
         state = read_probe()
         for leg in probe_legs(state):
             self._probe_exit(leg)
         if not cfg().probe_on:
+            return
+        pause = crypto_journal.probe_loss_guard_reason()
+        if pause:
+            self._note_probe_pause(pause)
+            if probe_arms():
+                write_probe(clear_arm=True)
+                logger.info("[Крипта] щуп взводы сняты: %s", pause)
             return
         state = read_probe()
         for arm in probe_arms(state):
@@ -1325,17 +1373,23 @@ class CryptoDeskMixin:
             return
         loss_guard = crypto_journal.probe_loss_guard_reason()
         if loss_guard:
-            logger.info("[Крипта] щуп пауза: %s", loss_guard)
+            self._note_probe_pause(loss_guard)
             return
         try:
             tape = self._tape()
         except Exception as exc:
             logger.info("[Крипта] щуп лента: %s", exc)
             return
-        regime_ok, regime_note = probe_market_regime_ok(tape)
-        if not regime_ok:
-            logger.info("[Крипта] щуп пауза (падающий рынок): %s", regime_note)
+        regime_pause, until = probe_market_regime_pause_reason(
+            tape,
+            now=time.time(),
+            pause_until=float(getattr(self, "_probe_regime_pause_until", 0.0) or 0.0),
+        )
+        self._probe_regime_pause_until = until
+        if regime_pause:
+            self._note_probe_pause(regime_pause)
             return
+        self._note_probe_resume()
         blocked = self._probe_blocked() | probe_tickers() | {arm["ticker"] for arm in probe_arms()}
         candidates: list[dict[str, Any]] = []
         for row in tape:

@@ -83,7 +83,7 @@ _live_extra: set[str] = set()
 # Щуп: 40$ на пробой тихой полки / свечи. Не слот рукава и не карман.
 PROBE_USD = 40.0
 # Днём берём монеты с оборотом ≥ $150k (тонкий стакан <$150k на живых сделках дал 1W/11L и -$5.62).
-# Ночью (21:00–06:00 YEKT) торгуем только крупняк с оборотом ≥ $1.5M (ZRO/STX/WET/VVV/LIT).
+# Ночью (21:00–06:00 YEKT) новые щупы запрещены: 02.11 азиатский чоп UNI/TRUMP/BEAM = −$1.96 по полке.
 PROBE_MIN_TURNOVER_USD = 150_000.0
 PROBE_NIGHT_MIN_TURNOVER_USD = 1_500_000.0
 PROBE_NIGHT_START_HOUR_YEKT = 21
@@ -91,9 +91,13 @@ PROBE_NIGHT_END_HOUR_YEKT = 6
 # Защита от падающего рынка и каскада стопов:
 PROBE_BTC_MAX_DROP_DAY_PCT = -2.5
 PROBE_MIN_MARKET_BREADTH_PCT = 20.0
+PROBE_MARKET_FALL_PAUSE_SEC = 3600.0
 PROBE_HOURLY_MAX_LOSS_USD = 1.50
 PROBE_MAX_CONSECUTIVE_LOSSES = 3
 PROBE_STREAK_PAUSE_SEC = 3600.0
+# После среза «полка» не перерабатывать слот в тот же чоп (ZAMA→DOOD, LA→INIT).
+PROBE_SHELF_COOLDOWN_SEC = 25 * 60
+PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
 # Ниже 0.5% сутки 29.10 резали INIT-контекст и оставляли PARTI 18:25 (−$3.28).
 # Пол −3% на полном scan: щуп +$1.04, этой сделки нет.
 PROBE_DAY_MIN_PCT = -3.0
@@ -547,12 +551,24 @@ def probe_should_handoff(reason: str | None) -> bool:
     return str(reason or "") in PROBE_HANDOFF_REASONS
 
 
+def probe_night_halted(now: float | None = None) -> bool:
+    """Новые входы щупа с 21:00 до 06:00 YEKT закрыты. Открытые ноги продолжают выход."""
+    ts = time.time() if now is None else float(now)
+    hr = datetime.fromtimestamp(ts, _YEKT).hour
+    return hr >= PROBE_NIGHT_START_HOUR_YEKT or hr < PROBE_NIGHT_END_HOUR_YEKT
+
+
+def probe_night_halt_reason(now: float | None = None) -> str | None:
+    if probe_night_halted(now):
+        return "ночь 21:00–06:00 YEKT"
+    return None
+
+
 def probe_min_turnover_usd(now: float | None = None) -> float:
-    """Порог суточного оборота щупа: днём $150k, ночью (21:00–06:00 YEKT) $1.5M."""
+    """Порог суточного оборота щупа: днём $150k, ночью (21:00–06:00 YEKT) $1.5M — запасной слой."""
     if now is None:
         return float(PROBE_MIN_TURNOVER_USD)
-    hr = datetime.fromtimestamp(float(now), _YEKT).hour
-    if hr >= PROBE_NIGHT_START_HOUR_YEKT or hr < PROBE_NIGHT_END_HOUR_YEKT:
+    if probe_night_halted(now):
         return float(PROBE_NIGHT_MIN_TURNOVER_USD)
     return float(PROBE_MIN_TURNOVER_USD)
 
@@ -580,6 +596,23 @@ def probe_market_regime_ok(rows: list[dict[str, Any]]) -> tuple[bool, str]:
         if green_pct < PROBE_MIN_MARKET_BREADTH_PCT - 1e-9:
             return False, f"ширина рынка {green_pct:.0f}% < {PROBE_MIN_MARKET_BREADTH_PCT:.0f}%"
     return True, ""
+
+
+def probe_market_regime_pause_reason(
+    rows: list[dict[str, Any]],
+    *,
+    now: float,
+    pause_until: float = 0.0,
+) -> tuple[str | None, float]:
+    """Падающий рынок: при срабатывании — пауза новых щупов на PROBE_MARKET_FALL_PAUSE_SEC."""
+    ok, note = probe_market_regime_ok(rows)
+    until = float(pause_until or 0.0)
+    if not ok:
+        return f"падающий рынок: {note}", float(now) + float(PROBE_MARKET_FALL_PAUSE_SEC)
+    if until > float(now) + 1e-9:
+        left_min = max(1, int((until - float(now) + 59) // 60))
+        return f"падающий рынок: пауза {left_min}м после обвала", until
+    return None, 0.0
 
 
 def probe_scan_rank(

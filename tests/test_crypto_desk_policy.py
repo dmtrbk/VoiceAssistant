@@ -634,6 +634,27 @@ class TestDeskPolicy(unittest.TestCase):
         night_ts = datetime(2026, 10, 31, 23, 0, tzinfo=yekt).timestamp()
         self.assertEqual(policy.probe_min_turnover_usd(day_ts), 150_000.0)
         self.assertEqual(policy.probe_min_turnover_usd(night_ts), 1_500_000.0)
+        self.assertFalse(policy.probe_night_halted(day_ts))
+        self.assertTrue(policy.probe_night_halted(night_ts))
+        self.assertTrue(
+            policy.probe_night_halted(datetime(2026, 10, 31, 21, 0, tzinfo=yekt).timestamp())
+        )
+        self.assertFalse(
+            policy.probe_night_halted(datetime(2026, 10, 31, 20, 59, tzinfo=yekt).timestamp())
+        )
+        self.assertTrue(
+            policy.probe_night_halted(datetime(2026, 11, 1, 5, 59, tzinfo=yekt).timestamp())
+        )
+        self.assertFalse(
+            policy.probe_night_halted(datetime(2026, 11, 1, 6, 0, tzinfo=yekt).timestamp())
+        )
+        self.assertEqual(
+            policy.probe_night_halt_reason(night_ts),
+            "ночь 21:00–06:00 YEKT",
+        )
+        self.assertIsNone(policy.probe_night_halt_reason(day_ts))
+        self.assertEqual(policy.PROBE_SHELF_COOLDOWN_SEC, 25 * 60)
+        self.assertEqual(policy.PROBE_SHELF_COOLDOWN_LOSS_USD, 0.25)
         self.assertFalse(
             policy.probe_market_regime_ok([{"ticker": "BTC", "chg": -3.1, "turnover": 50_000_000}])[0]
         )
@@ -644,6 +665,29 @@ class TestDeskPolicy(unittest.TestCase):
             for i in range(25)
         ]
         self.assertTrue(policy.probe_market_regime_ok(normal_market)[0])
+        self.assertEqual(policy.PROBE_MARKET_FALL_PAUSE_SEC, 3600.0)
+        t0 = 1_700_000_000.0
+        reason, until = policy.probe_market_regime_pause_reason(
+            [{"ticker": "BTC", "chg": -4.0, "turnover": 50_000_000}],
+            now=t0,
+            pause_until=0.0,
+        )
+        self.assertIn("падающий рынок", reason or "")
+        self.assertAlmostEqual(until, t0 + 3600.0)
+        reason2, until2 = policy.probe_market_regime_pause_reason(
+            normal_market,
+            now=t0 + 600.0,
+            pause_until=until,
+        )
+        self.assertIn("пауза", reason2 or "")
+        self.assertAlmostEqual(until2, until)
+        reason3, until3 = policy.probe_market_regime_pause_reason(
+            normal_market,
+            now=t0 + 3601.0,
+            pause_until=until,
+        )
+        self.assertIsNone(reason3)
+        self.assertEqual(until3, 0.0)
         self.assertAlmostEqual(
             policy.probe_scan_rank({
                 "chg": -2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
@@ -1633,6 +1677,35 @@ class TestJournalChurnAndDaily(unittest.TestCase):
             "KAS",
             crypto_journal.recently_sold(policy.PROBE_REENTRY_HOURS, trades, now=now + 3 * 3600),
         )
+
+    def test_probe_loss_guard_night_and_shelf_cooldown(self):
+        from datetime import datetime, timedelta, timezone
+
+        yekt = timezone(timedelta(hours=5))
+        night = datetime(2026, 11, 2, 3, 0, tzinfo=yekt).timestamp()
+        day = datetime(2026, 11, 2, 10, 0, tzinfo=yekt).timestamp()
+        self.assertEqual(
+            crypto_journal.probe_loss_guard_reason(now=night, trades=[]),
+            "ночь 21:00–06:00 YEKT",
+        )
+        self.assertIsNone(crypto_journal.probe_loss_guard_reason(now=day, trades=[]))
+        shelf_trades = [
+            {"ticker": "DOOD", "side": "buy", "quote": 40.0, "price": 0.002, "ts_epoch": day - 1800},
+            {"ticker": "DOOD", "side": "sell", "quote": 39.22, "price": 0.001961, "ts_epoch": day - 120},
+        ]
+        reason = crypto_journal.probe_loss_guard_reason(now=day, trades=shelf_trades)
+        self.assertIsNotNone(reason)
+        self.assertTrue(str(reason).startswith("после полки пауза"))
+        later = crypto_journal.probe_loss_guard_reason(
+            now=day + policy.PROBE_SHELF_COOLDOWN_SEC,
+            trades=shelf_trades,
+        )
+        self.assertIsNone(later)
+        scratch = [
+            {"ticker": "PUMP", "side": "buy", "quote": 40.0, "price": 0.004, "ts_epoch": day - 1800},
+            {"ticker": "PUMP", "side": "sell", "quote": 39.90, "price": 0.00399, "ts_epoch": day - 60},
+        ]
+        self.assertIsNone(crypto_journal.probe_loss_guard_reason(now=day, trades=scratch))
 
     def test_daily_report_gate(self):
         morning = datetime(2026, 9, 18, 10, 0, tzinfo=_MSK)

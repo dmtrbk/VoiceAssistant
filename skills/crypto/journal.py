@@ -469,15 +469,21 @@ def probe_loss_guard_reason(
     now: float | None = None,
     trades: list[dict[str, Any]] | None = None,
 ) -> str | None:
-    """Причина паузы щупа по потерям: дневной лимит, просадка за час или серия из 3 убытков подряд."""
+    """Пауза новых входов: ночь, дневной лимит, час, серия убытков или кулдаун после полки."""
     from .desk_policy import (
         PROBE_HOURLY_MAX_LOSS_USD,
         PROBE_MAX_CONSECUTIVE_LOSSES,
+        PROBE_SHELF_COOLDOWN_LOSS_USD,
+        PROBE_SHELF_COOLDOWN_SEC,
         PROBE_STREAK_PAUSE_SEC,
         probe_daily_loss_blocked,
+        probe_night_halt_reason,
     )
 
     now_ts = float(now if now is not None else time.time())
+    night = probe_night_halt_reason(now_ts)
+    if night:
+        return night
     day_dt = datetime.fromtimestamp(now_ts, _MSK)
     day_start = day_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     day_end = (day_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()
@@ -526,6 +532,17 @@ def probe_loss_guard_reason(
             last_ep = tail[-1][0]
             if now_ts - last_ep < PROBE_STREAK_PAUSE_SEC:
                 return f"серия из {PROBE_MAX_CONSECUTIVE_LOSSES} убытков (пауза 60м)"
+    shelf_hits = [
+        ep
+        for ep, pnl in closed
+        if now_ts - PROBE_SHELF_COOLDOWN_SEC <= ep <= now_ts + 1.0
+        and pnl <= -PROBE_SHELF_COOLDOWN_LOSS_USD + 1e-9
+    ]
+    if shelf_hits:
+        last_ep = max(shelf_hits)
+        left = PROBE_SHELF_COOLDOWN_SEC - (now_ts - last_ep)
+        mins = max(1, int((left + 59) // 60))
+        return f"после полки пауза {mins}м"
     return None
 
 
