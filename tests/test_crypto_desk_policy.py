@@ -983,38 +983,28 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_book_buy_ok(bid=0.00727, ask=0.00729, arm_px=0.007281, strict=True)
         )
-        # Ступенька из 3 зелёных 5м баров (как TREE/BIRB/WET): проходит setup и допускает room ≥ 0.3%.
+        # Ступенька 2/3 бара выключена — candle setup молчит (остался только флаг).
         stair_bars = base5[:-2] + [
             {"open": 1.000, "high": 1.004, "low": 1.000, "close": 1.003, "volume": 12.0},
             {"open": 1.003, "high": 1.008, "low": 1.003, "close": 1.007, "volume": 20.0},
             {"open": 1.007, "high": 1.011, "low": 1.007, "close": 1.0105, "volume": 18.0},
         ]
-        stair_setup = policy.probe_candle_setup(stair_bars)
-        self.assertIsNotNone(stair_setup)
-        assert stair_setup is not None
-        self.assertAlmostEqual(stair_setup["shelf"], 1.003)
-        self.assertEqual(stair_setup.get("stair"), 1.0)
-        stair_pick = policy.probe_pick_setup(
-            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-            stair_bars,
-            day_chg=7.2,
-            day_high=1.015,
+        self.assertIsNone(policy.probe_candle_setup(stair_bars))
+        self.assertIsNone(
+            policy.probe_pick_setup(
+                [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+                stair_bars,
+                day_chg=7.2,
+                day_high=1.015,
+            )
         )
-        self.assertIsNotNone(stair_pick)
-        assert stair_pick is not None
-        self.assertEqual(stair_pick["algo"], policy.PROBE_ALGO_CANDLE)
-        self.assertEqual(stair_pick["hold_sec"], policy.PROBE_CANDLE_HOLD_SEC)
         self.assertLessEqual(policy.PROBE_CANDLE_HOLD_SEC, 2)
-        # Быстрая 2-свечная ступенька (prior зелёная + forming пробивает prior.high, rise2 >= 0.80%):
         stair2_bars = base5[:-2] + [
             {"open": 1.001, "high": 1.001, "low": 0.999, "close": 1.000, "volume": 10.0},
             {"open": 1.000, "high": 1.005, "low": 1.000, "close": 1.0045, "volume": 20.0},
             {"open": 1.0045, "high": 1.0095, "low": 1.0045, "close": 1.009, "volume": 16.0},
         ]
-        stair2_setup = policy.probe_candle_setup(stair2_bars)
-        self.assertIsNotNone(stair2_setup)
-        assert stair2_setup is not None
-        self.assertAlmostEqual(stair2_setup["shelf"], 1.000)
+        self.assertIsNone(policy.probe_candle_setup(stair2_bars))
         self.assertFalse(policy.probe_daily_loss_blocked(-5.5))
         self.assertTrue(policy.probe_daily_loss_blocked(-6.0))
         self.assertEqual(
@@ -1029,23 +1019,15 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertGreaterEqual(policy.PROBE_CANDLE_MIN_BODY_PCT, 0.6)
         weak = {**rising, "close": 1.004, "high": 1.012}
         self.assertIsNone(policy.probe_candle_setup(base5 + [weak]))
-        # Свежий день + room — да; +35% с room — да; +48% — нет; у самого пика суток — нет.
-        fresh = policy.probe_pick_setup(
-            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-            stair_bars,
-            day_chg=8.0,
-            day_high=1.02,
+        # Ступенька не вход. +48% и пик суток — по-прежнему нет.
+        self.assertIsNone(
+            policy.probe_pick_setup(
+                [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+                stair_bars,
+                day_chg=8.0,
+                day_high=1.02,
+            )
         )
-        self.assertIsNotNone(fresh)
-        assert fresh is not None
-        self.assertEqual(fresh["algo"], policy.PROBE_ALGO_CANDLE)
-        hot_ok = policy.probe_pick_setup(
-            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-            stair_bars,
-            day_chg=35.0,
-            day_high=1.12,
-        )
-        self.assertIsNotNone(hot_ok)
         self.assertIsNone(
             policy.probe_pick_setup(
                 [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
@@ -1405,10 +1387,10 @@ class TestDeskPolicy(unittest.TestCase):
                 now=now,
             )
         )
-        # BASED $30: пик +2.035% взвёл ловушку, откат -0.5% до +1.44% закрывает в плюс («вершина»).
+        # BASED $30: пик +2.0% взвёл ловушку щупа (~1.56%+), откат ≥0.60% закрывает в плюс.
         self.assertEqual(
             policy.probe_exit_reason(
-                price=0.05445,
+                price=0.05440,
                 entry=0.053678,
                 shelf=0.05279,
                 trend15="bull",
@@ -1417,6 +1399,23 @@ class TestDeskPolicy(unittest.TestCase):
                 qty=558.89,
             ),
             "вершина",
+        )
+        self.assertAlmostEqual(
+            policy.exit_trap_arm_pct(cost_usd=40.0, extra_usd=policy.PROBE_TRAP_EXTRA_USD),
+            1.56,
+            places=2,
+        )
+        # Шум +0.8% больше не взводит ловушку щупа.
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.006,
+                entry=1.0,
+                shelf=0.99,
+                trend15="bull",
+                peak=1.008,
+                algo=policy.PROBE_ALGO_SPARK,
+                qty=40.0,
+            )
         )
         # Спящая нога щупа ≥ 2ч в минусе → «застой» (handoff в карман2).
         self.assertEqual(

@@ -73,9 +73,12 @@ ALT_CHASE_PCT = 5.0
 ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
 # Суточный потолок +25% остался только у impulse: уже разогнанную свечу не догоняем.
-# Ловушка: круг комиссий (taker 0,18% × 2) + $0.12 сверх (на $40 это ~+0.66%, не +1.11%).
+# Ловушка кармана/рукава: круг комиссий (taker 0,18% × 2) + $0.12 сверх (на $40 ~+0.66%).
+# Щуп: взвод позже (~+1.56% на $40) и откат 0.60% — иначе вершина забирает +$0.05 и не даёт ходу.
 EXIT_FEE_SIDE = 0.0018
 EXIT_TRAP_EXTRA_USD = 0.12
+PROBE_TRAP_EXTRA_USD = 0.48
+PROBE_TRAP_PULLBACK_PCT = 0.60
 EXIT_TRAP_DEFAULT_COST_USD = 100.0
 
 # Стейблы не рукав, даже если оборот большой. Базовый список остаётся всегда.
@@ -149,7 +152,7 @@ PROBE_ALGO_SPARK = "spark"
 PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
-# База — ступенька/флаг; выстрел — impulse; spark — старт 5м в первые 1–2 минуты.
+# Ступенька выключена (полки −$4.8/сутки). Candle — только флаг; выстрел — impulse; старт — spark.
 PROBE_ALGO_ORDER = (PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK)
 # 5м зелёная свеча: ловим начало восходящей свечи от open, без верхнего фитиля (слива).
 PROBE_CANDLE_LOOKBACK = 12
@@ -379,10 +382,12 @@ def exit_trap_arm_pct(
     entry: float = 0.0,
     qty: float = 0.0,
     cost_usd: float = 0.0,
+    extra_usd: float | None = None,
 ) -> float:
-    """Порог взвода ловушки в %: taker×2 на ногу + $0.12 сверх.
+    """Порог взвода ловушки в %: taker×2 на ногу + extra сверх.
 
     Нет размера — считаем от типичных $100, чтобы дозор не молчал.
+    extra_usd: карман/рукав $0.12; щуп — PROBE_TRAP_EXTRA_USD.
     """
     cost = float(cost_usd or 0)
     if cost <= 0:
@@ -392,7 +397,8 @@ def exit_trap_arm_pct(
             cost = ent * q
     if cost <= 0:
         cost = EXIT_TRAP_DEFAULT_COST_USD
-    need = cost * (2.0 * EXIT_FEE_SIDE) + EXIT_TRAP_EXTRA_USD
+    extra = EXIT_TRAP_EXTRA_USD if extra_usd is None else float(extra_usd)
+    need = cost * (2.0 * EXIT_FEE_SIDE) + extra
     return need / cost * 100.0
 
 
@@ -1358,11 +1364,11 @@ def probe_candle_setup(
     *,
     now: float | None = None,
 ) -> dict[str, float] | None:
-    """Вход в 3-свечную ступеньку, 2-свечную ступеньку или пробой флага.
+    """Вход: только пробой флага. Ступенька 2/3 бара выключена (полки без хода).
 
     Одиночная 5м свеча выключена: главный поставщик ложных полок.
     bars — 5м, от старых к новым; нужен open (опционально ts старта бара).
-    Полка — основание ступеньки/флага.
+    Полка — основание флага.
     """
     need = PROBE_CANDLE_LOOKBACK + 2
     if len(bars) < need:
@@ -1442,16 +1448,7 @@ def probe_candle_setup(
         prior_body = (prior_c / prior_o - 1.0) * 100.0
         if prior_body > probe_candle_prior_max_body_pct() + 1e-12:
             return None
-    # Одиночная 5м свеча выключена. Днём и ночью — только ступенька и флаг.
-    # 2) Ступенька из 3 зелёных 5м свечей подряд (staircase breakout).
-    stair = _probe_staircase_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
-    if stair:
-        return stair
-    # 3) Быстрая 2-свечная ступенька (prior зелёная + forming пробивает prior.high).
-    stair2 = _probe_staircase_2bar_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
-    if stair2:
-        return stair2
-    # 4) Пробой 15-минутного плоского флага у вершины часа (bull-flag breakout).
+    # Ступенька 2/3 бара выключена. Candle — только пробой 15м флага.
     return _probe_flag_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
 
 
@@ -1836,14 +1833,14 @@ def probe_exit_reason(
         else:
             return "полка"
     high = max(float(peak or 0), px)
-    arm_pct = exit_trap_arm_pct(entry=ent, qty=qty)
+    arm_pct = exit_trap_arm_pct(entry=ent, qty=qty, extra_usd=PROBE_TRAP_EXTRA_USD)
     peak_gain = (high / ent - 1.0) * 100.0 if ent > 0 else 0.0
     exit_px = min(px, float(bid)) if float(bid or 0) > 0 else px
     exit_gain = (exit_px / ent - 1.0) * 100.0 if ent > 0 else 0.0
     pullback_pct = (
         POCKET_EXIT_WALL_PULLBACK_PCT
         if (obi is not None and float(obi) <= EXIT_TRAP_BEAR_OBI + 1e-12)
-        else cfg().pocket_exit_pullback_pct
+        else PROBE_TRAP_PULLBACK_PCT
     )
     if (
         peak_gain >= arm_pct - 1e-6
