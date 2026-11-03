@@ -797,18 +797,19 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertAlmostEqual(impulse["shelf"], 1.0)
         self.assertIsNone(
             policy.probe_impulse_setup(
-                quiet5 + [boom, {**live5, "close": 1.20, "high": 1.21}]
+                quiet5 + [boom, {**live5, "close": 1.40, "high": 1.41}]
             )
         )
-        # Без open candle молчит; impulse только по явному order (живой стол — candle).
-        self.assertIsNone(
-            policy.probe_pick_setup(
-                [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(60)]
-                + [{"high": 1.02, "low": 0.99, "close": 1.0, "volume": 10.0},
-                   {"high": 1.08, "low": 1.0, "close": 1.06, "volume": 40.0}],
-                quiet5 + [boom, live5],
-            )
+        # Живой стол: ступенька, иначе выстрел с базы (impulse).
+        picked_impulse = policy.probe_pick_setup(
+            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(60)]
+            + [{"high": 1.02, "low": 0.99, "close": 1.0, "volume": 10.0},
+               {"high": 1.08, "low": 1.0, "close": 1.06, "volume": 40.0}],
+            quiet5 + [boom, live5],
         )
+        self.assertIsNotNone(picked_impulse)
+        assert picked_impulse is not None
+        self.assertEqual(picked_impulse["algo"], policy.PROBE_ALGO_IMPULSE)
         picked = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(60)]
             + [{"high": 1.02, "low": 0.99, "close": 1.0, "volume": 10.0},
@@ -819,6 +820,37 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNotNone(picked)
         assert picked is not None
         self.assertEqual(picked["algo"], policy.PROBE_ALGO_IMPULSE)
+        # NAVX-подобный выстрел с базы: +22% от часового хая, цена у хая суток.
+        navx_base = [
+            {"open": 0.00870, "high": 0.00872, "low": 0.00866, "close": 0.00870, "volume": 10.0}
+            for _ in range(14)
+        ]
+        navx_boom = {
+            "open": 0.00870,
+            "high": 0.01040,
+            "low": 0.00868,
+            "close": 0.01020,
+            "volume": 40.0,
+        }
+        navx_live = {
+            "open": 0.01020,
+            "high": 0.01123,
+            "low": 0.01018,
+            "close": 0.01115,
+            "volume": 36.0,
+        }
+        navx = policy.probe_impulse_setup(navx_base + [navx_boom, navx_live])
+        self.assertIsNotNone(navx)
+        assert navx is not None
+        self.assertEqual(navx.get("impulse"), 1.0)
+        self.assertTrue(
+            policy.probe_scan_day_ok(price=0.01122, day_high=0.01123, day_chg=22.7)
+        )
+        self.assertFalse(
+            policy.probe_candle_day_ok(
+                price=0.01122, day_high=0.01123, day_chg=22.7, stair=True
+            )
+        )
 
         # Candle: старт восходящей 5м свечи от open (pos 0.35..0.65), без верхнего фитиля и не на пике.
         base5 = [
@@ -912,9 +944,11 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertAlmostEqual(stair2_setup["shelf"], 1.000)
         self.assertFalse(policy.probe_daily_loss_blocked(-5.5))
         self.assertTrue(policy.probe_daily_loss_blocked(-6.0))
-        self.assertEqual(policy.PROBE_ALGO_ORDER, (policy.PROBE_ALGO_CANDLE,))
+        self.assertEqual(
+            policy.PROBE_ALGO_ORDER,
+            (policy.PROBE_ALGO_CANDLE, policy.PROBE_ALGO_IMPULSE),
+        )
         self.assertNotIn(policy.PROBE_ALGO_GRIND, policy.PROBE_ALGO_ORDER)
-        self.assertNotIn(policy.PROBE_ALGO_IMPULSE, policy.PROBE_ALGO_ORDER)
         self.assertGreaterEqual(policy.PROBE_CANDLE_MIN_BODY_PCT, 0.6)
         weak = {**rising, "close": 1.004, "high": 1.012}
         self.assertIsNone(policy.probe_candle_setup(base5 + [weak]))

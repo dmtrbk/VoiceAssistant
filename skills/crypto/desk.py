@@ -60,10 +60,12 @@ from .desk_policy import (
     probe_candle_buy_ok,
     PROBE_MIN_ENTRY_OBI,
     probe_candle_day_ok,
+    probe_scan_day_ok,
     probe_daily_loss_blocked,
     probe_grind_live_ok,
     probe_should_handoff,
     PROBE_ALGO_CANDLE,
+    PROBE_ALGO_IMPULSE,
     PROBE_ALGO_GRIND,
     probe_max_legs,
     probe_setup_ok_now,
@@ -1646,11 +1648,10 @@ class CryptoDeskMixin:
             ticker = str(row["ticker"])
             if ticker in blocked:
                 continue
-            if not probe_candle_day_ok(
+            if not probe_scan_day_ok(
                 price=float(row.get("price") or 0),
                 day_high=float(row.get("high") or 0),
                 day_chg=float(row.get("chg") or 0),
-                stair=True,
             ):
                 continue
             try:
@@ -1664,7 +1665,7 @@ class CryptoDeskMixin:
             setup = probe_pick_setup(
                 [],
                 bars5,
-                order=(PROBE_ALGO_CANDLE,),
+                order=(PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE),
                 day_chg=float(row.get("chg") or 0),
                 day_high=float(row.get("high") or 0),
                 now=time.time(),

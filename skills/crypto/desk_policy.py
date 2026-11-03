@@ -143,7 +143,7 @@ PROBE_ALGO_IMPULSE = "impulse"
 PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
-PROBE_ALGO_ORDER = (PROBE_ALGO_CANDLE,)
+PROBE_ALGO_ORDER = (PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE)
 # 5м зелёная свеча: ловим начало восходящей свечи от open, без верхнего фитиля (слива).
 PROBE_CANDLE_LOOKBACK = 12
 # 0,25% ловил шум (CSPR/BICO +0,5%). INIT был +0,67…1,3% от open.
@@ -210,12 +210,16 @@ PROBE_DAILY_MAX_LOSS_USD = 6.0
 PROBE_SPRINT_HOLD_SEC = 30
 PROBE_SPRINT_CHASE_PCT = 5.0
 PROBE_IMPULSE_HOLD_SEC = 8
-PROBE_IMPULSE_CHASE_PCT = 2.5
+PROBE_IMPULSE_CHASE_PCT = 4.0
 PROBE_IMPULSE_LOOKBACK = 12
 PROBE_IMPULSE_VOL_MULT = 2.5
 PROBE_IMPULSE_BREAK_MIN_PCT = 3.0
-PROBE_IMPULSE_BREAK_MAX_PCT = 15.0
-PROBE_IMPULSE_MAX_DAY_PCT = 25.0
+# Выстрел с базы (NAVX +22%): потолок шире 15%, иначе середина импульса уже «поздно».
+PROBE_IMPULSE_BREAK_MAX_PCT = 32.0
+PROBE_IMPULSE_MAX_DAY_PCT = 35.0
+# Живая свеча выстрела идёт у хая — не требовать середину бара, только не кончик.
+PROBE_IMPULSE_MAX_BAR_POS = 0.95
+PROBE_IMPULSE_TIP_GAP_PCT = 0.20
 # Grind: горячее candle нельзя; у хая дня (+25%) — уже догон.
 PROBE_GRIND_MAX_DAY_PCT = 18.0
 # Лестница: ближе к началу хода, не только у самого хая. Свежий пробой +4% — не grind.
@@ -597,12 +601,16 @@ def probe_setup_ok_now(
     now: float | None = None,
     turnover: float | None = None,
 ) -> bool:
-    """Ночью только ступенька/флаг и оборот ≥ $1.5M. Днём сетап уже отфильтрован scan."""
+    """Ночью только ступенька/флаг/выстрел и оборот ≥ $1.5M. Днём сетап уже отфильтрован scan."""
     if not setup:
         return False
     if not probe_night_halted(now):
         return True
-    if float(setup.get("stair") or 0) < 1.0 - 1e-12:
+    strong = (
+        float(setup.get("stair") or 0) >= 1.0 - 1e-12
+        or float(setup.get("impulse") or 0) >= 1.0 - 1e-12
+    )
+    if not strong:
         return False
     try:
         turn = float(turnover) if turnover is not None else 0.0
@@ -1290,6 +1298,23 @@ def probe_candle_setup(
     return _probe_flag_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
 
 
+def probe_scan_day_ok(
+    *,
+    price: float,
+    day_high: float,
+    day_chg: float | None,
+) -> bool:
+    """Лента скана: режем сутки ≥45% и слив с хая >28%. Сам хай не режем — там живут выстрелы."""
+    if day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
+        return False
+    hi = float(day_high or 0)
+    px = float(price or 0)
+    if hi <= 0 or px <= 0:
+        return True
+    room = (hi - px) / hi * 100.0
+    return room <= PROBE_CANDLE_MAX_DAY_DROP_PCT + 1e-12
+
+
 def probe_candle_day_ok(
     *,
     price: float,
@@ -1356,15 +1381,15 @@ def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         return None
     if price < prior_high:
         return None
-    # Не на кончике живой свечи пробоя.
+    # Не на самом кончике живой свечи; выстрел почти всегда у верха бара.
     if live_high > 0 and live_low > 0:
-        tip_cap = live_high * (1.0 - 0.35 / 100.0)
+        tip_cap = live_high * (1.0 - PROBE_IMPULSE_TIP_GAP_PCT / 100.0)
         if price > tip_cap + 1e-12:
             return None
         span = live_high - live_low
-        if span > 1e-12 and (price - live_low) / span > 0.70 + 1e-12:
+        if span > 1e-12 and (price - live_low) / span > PROBE_IMPULSE_MAX_BAR_POS + 1e-12:
             return None
-    return {"shelf": prior_high, "price": price}
+    return {"shelf": prior_high, "price": price, "impulse": 1.0}
 
 
 def probe_grind_live_ok(price: float, live_high: float, live_low: float) -> bool:
@@ -1480,10 +1505,9 @@ def probe_pick_setup(
     day_high: float | None = None,
     now: float | None = None,
 ) -> dict[str, Any] | None:
-    """Первый сработавший по order. Живой стол: только candle.
+    """Первый сработавший по order. Живой стол: ступенька/флаг, затем выстрел с базы.
 
-    Impulse/sprint/shelf остаются для явного order= в тестах.
-    Candle: живой старт 5м свечи среди растущих монет.
+    Sprint/shelf/grind — только явный order= в тестах.
     """
     seq = tuple(order or PROBE_ALGO_ORDER)
     for algo in seq:
