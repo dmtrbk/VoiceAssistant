@@ -357,6 +357,10 @@ class CryptoDeskMixin:
         for item in orphans:
             self._cancel_order(item["ticker"], item["order_id"])
             notes.append(f"отмена {item['ticker']}")
+        try:
+            notes.extend(self._journal_sync_exchange(qtys, min_lot_usd=ALT_HELD_MIN_USD))
+        except Exception as exc:
+            logger.info("[Крипта] журнал сверка: %s", exc)
         if notes:
             logger.info("[Крипта] reconcile: %s", "; ".join(notes))
         return notes

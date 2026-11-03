@@ -369,7 +369,13 @@ class TestCryptoSkill(unittest.TestCase):
             patch.object(
                 self.skill,
                 "_order_state",
-                return_value={"orderStatus": "Filled", "cumExecQty": "0.000263", "cumExecValue": "19.988"},
+                return_value={
+                    "orderStatus": "Filled",
+                    "cumExecQty": "0.000263",
+                    "cumExecValue": "19.988",
+                    "cumExecFee": "0.036",
+                    "feeCurrency": "USDT",
+                },
             ),
         ):
             phrase = self.skill._place_order("BTC", "Sell", base_qty=0.00026352, price=76000.0)

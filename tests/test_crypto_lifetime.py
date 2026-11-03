@@ -133,6 +133,88 @@ class TestCryptoLifetime(unittest.TestCase):
         )
         self.assertNotIn("$)", buy_line)
 
+    def test_fees_cut_realized_pnl(self):
+        trades = [
+            {"ticker": "WOO", "side": "buy", "quote": 40.0, "price": 0.01, "fee_usd": 0.07},
+            {"ticker": "WOO", "side": "sell", "quote": 40.0, "price": 0.01, "fee_usd": 0.07},
+        ]
+        self.assertEqual(crypto_journal.compute_realized_from_trades(trades), -0.14)
+        pnl = crypto_journal.realized_pnl_for_sell(
+            trades[:1], ticker="WOO", quote=40.0, price=0.01, fee_usd=0.07
+        )
+        self.assertEqual(pnl, -0.14)
+
+    def test_sync_adds_missing_sell_and_fees(self):
+        trades = [
+            {
+                "ts": "03.11 16:07",
+                "ts_epoch": 1793711256,
+                "ticker": "PARTI",
+                "name": "PARTI",
+                "side": "buy",
+                "quote": 40.0,
+                "price": 0.04547,
+            }
+        ]
+        fills = [
+            {
+                "symbol": "PARTIUSDT",
+                "side": "Buy",
+                "orderId": "b1",
+                "execQty": "879.7",
+                "execPrice": "0.04547",
+                "execValue": "40.0",
+                "execFee": "1.58346",
+                "feeCurrency": "PARTI",
+                "execTime": "1793711256000",
+            },
+            {
+                "symbol": "PARTIUSDT",
+                "side": "Sell",
+                "orderId": "s1",
+                "execQty": "878.1",
+                "execPrice": "0.04505",
+                "execValue": "39.56",
+                "execFee": "0.071",
+                "feeCurrency": "USDT",
+                "execTime": "1793713656000",
+            },
+        ]
+        updated, notes, changed = crypto_journal.sync_journal_with_fills(
+            trades, fills, {"PARTI": 0.05}
+        )
+        self.assertTrue(changed)
+        self.assertTrue(any("PARTI" in n for n in notes))
+        self.assertEqual(len(updated), 2)
+        self.assertEqual(updated[1]["side"], "sell")
+        self.assertAlmostEqual(float(updated[0]["fee_usd"]), 1.58346 * 0.04547, places=3)
+        self.assertAlmostEqual(float(updated[1]["fee_usd"]), 0.071, places=3)
+        self.assertLess(float(updated[1]["pnl_usd"]), 0)
+        self.assertNotIn("PARTI", crypto_journal.open_lots(updated))
+        self.assertAlmostEqual(
+            crypto_journal.compute_realized_from_trades(updated),
+            float(updated[1]["pnl_usd"]),
+        )
+
+    def test_sync_keeps_open_lot_if_wallet_holds(self):
+        trades = [
+            {
+                "ts": "03.11 16:34",
+                "ts_epoch": 1793712875,
+                "ticker": "LTC",
+                "side": "buy",
+                "quote": 40.0,
+                "price": 55.12,
+                "fee_usd": 0.07,
+            }
+        ]
+        updated, notes, changed = crypto_journal.sync_journal_with_fills(
+            trades, [], {"LTC": 0.72}
+        )
+        self.assertFalse(changed)
+        self.assertEqual(notes, [])
+        self.assertEqual(len(updated), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

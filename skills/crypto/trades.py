@@ -25,6 +25,31 @@ from .common import (
 logger = logging.getLogger(__name__)
 
 
+def _cum_exec_fee_usdt(state: dict[str, Any], ticker: str, side: str) -> float:
+    """cumExecFee заявки в USDT. Buy без feeCurrency — комиссия в монете."""
+    try:
+        fee = float(state.get("cumExecFee") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if fee <= 0:
+        return 0.0
+    try:
+        qty = float(state.get("cumExecQty") or 0)
+        quote = float(state.get("cumExecValue") or 0)
+    except (TypeError, ValueError):
+        qty = quote = 0.0
+    px = quote / qty if qty else 0.0
+    cur = str(state.get("feeCurrency") or "").upper()
+    coin = str(ticker or "").upper()
+    if cur in {"USDT", "USD"}:
+        return fee
+    if cur == coin or (not cur and str(side).lower() == "buy"):
+        return fee * px if px > 0 else 0.0
+    if cur:
+        return fee * px if px > 0 else 0.0
+    return fee
+
+
 def _has_max_hint(text: str) -> bool:
     return any(re.search(rf"(?<![а-яa-z]){re.escape(word)}(?![а-яa-z])", text) for word in _MAX_HINTS)
 
@@ -211,20 +236,20 @@ class CryptoTradesMixin:
         *,
         quote_usdt: float = 0.0,
         base_qty: float = 0.0,
-    ) -> tuple[float, float]:
-        """Лимитная PostOnly у своей стороны книги. Возвращает (исполнено монет, на сумму)."""
+    ) -> tuple[float, float, float]:
+        """Лимитная PostOnly у своей стороны книги. Возвращает (монеты, сумма, комиссия USDT)."""
         min_amt = max(filters["min_amt"], _MIN_QUOTE)
         book = self._book(ticker)
         px = book["bid"] if side == "Buy" else book["ask"]
         if px <= 0:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
         price_s = common._price_str(px, filters["tick"], round_up=(side == "Sell"))
         px = float(price_s)
         qty = (quote_usdt / px if px else 0.0) if side == "Buy" else base_qty
         qty_s = _qty_str(qty, filters["step"])
         qty = float(qty_s or 0)
         if qty <= 0 or qty * px + 1e-9 < min_amt:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
         data = self._signed(
             "POST",
             "/v5/order/create",
@@ -241,7 +266,7 @@ class CryptoTradesMixin:
         )
         order_id = str((data.get("result") or {}).get("orderId") or "")
         if not order_id:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
         deadline = time.time() + common._MAKER_WAIT_SEC
         state: dict[str, Any] = {}
         while time.time() < deadline:
@@ -266,9 +291,9 @@ class CryptoTradesMixin:
                 px,
                 done_quote,
             )
-        return done_qty, done_quote
+        return done_qty, done_quote, _cum_exec_fee_usdt(state, ticker, side)
 
-    def _await_fill(self, ticker: str, order_id: str) -> tuple[float, float]:
+    def _await_fill(self, ticker: str, order_id: str, side: str = "") -> tuple[float, float, float]:
         """Сколько рыночная заявка реально исполнилась. Принятие ордера ещё не сделка."""
         deadline = time.time() + 8.0
         state: dict[str, Any] = {}
@@ -285,8 +310,8 @@ class CryptoTradesMixin:
             qty = float(state.get("cumExecQty") or 0)
             quote = float(state.get("cumExecValue") or 0)
         except (TypeError, ValueError):
-            return 0.0, 0.0
-        return max(qty, 0.0), max(quote, 0.0)
+            return 0.0, 0.0, 0.0
+        return max(qty, 0.0), max(quote, 0.0), _cum_exec_fee_usdt(state, ticker, side)
 
     def _place_order(
         self,
@@ -312,10 +337,10 @@ class CryptoTradesMixin:
 
         if side == "Buy":
             self._earn_free_cash(want_quote)
-        maker_qty = maker_quote = 0.0
+        maker_qty = maker_quote = maker_fee = 0.0
         if maker and common._maker_orders_enabled():
             try:
-                maker_qty, maker_quote = self._maker_leg(
+                maker_qty, maker_quote, maker_fee = self._maker_leg(
                     ticker,
                     side,
                     filters,
@@ -348,14 +373,21 @@ class CryptoTradesMixin:
             if maker_quote <= 0:
                 raise RuntimeError("no lots")
             return self._finish_order(
-                ticker, side, maker_quote, maker_quote / maker_qty, qty=maker_qty
+                ticker,
+                side,
+                maker_quote,
+                maker_quote / maker_qty,
+                qty=maker_qty,
+                fee_usd=maker_fee,
             )
         data = self._signed("POST", "/v5/order/create", body)
         result = data.get("result") or {}
         order_id = str(result.get("orderId") or "")
         if not order_id and not result.get("orderLinkId"):
             raise RuntimeError(str(data.get("retMsg") or "заявка не прошла"))
-        mkt_qty, mkt_quote = self._await_fill(ticker, order_id) if order_id else (0.0, 0.0)
+        mkt_qty, mkt_quote, mkt_fee = (
+            self._await_fill(ticker, order_id, side) if order_id else (0.0, 0.0, 0.0)
+        )
         if mkt_qty > 0 and mkt_quote <= 0:
             mkt_quote = mkt_qty * px
         if mkt_qty > 0:
@@ -372,7 +404,12 @@ class CryptoTradesMixin:
         if total_qty <= 0 or total_quote <= 0:
             raise RuntimeError("заявка не исполнилась")
         return self._finish_order(
-            ticker, side, total_quote, total_quote / total_qty, qty=total_qty
+            ticker,
+            side,
+            total_quote,
+            total_quote / total_qty,
+            qty=total_qty,
+            fee_usd=maker_fee + mkt_fee,
         )
 
     def _finish_order(
@@ -383,10 +420,16 @@ class CryptoTradesMixin:
         px: float,
         *,
         qty: float = 0.0,
+        fee_usd: float = 0.0,
     ) -> str:
         if qty <= 0 and px > 0:
             qty = filled_quote / px
-        self._last_fill = {"qty": float(qty), "quote": float(filled_quote), "price": float(px)}
+        self._last_fill = {
+            "qty": float(qty),
+            "quote": float(filled_quote),
+            "price": float(px),
+            "fee": float(fee_usd or 0),
+        }
         self._bust_private_cache()
         if side == "Buy":
             self._mark_desk_bought(ticker)
@@ -394,6 +437,6 @@ class CryptoTradesMixin:
         spoken = _spoken(ticker)
         verb = "Купил" if side == "Buy" else "Продал"
         phrase = f"{verb} {spoken} на {_format_usd(filled_quote)}."
-        self._journal_trade(ticker, side, filled_quote, px, spoken)
+        self._journal_trade(ticker, side, filled_quote, px, spoken, fee_usd=fee_usd)
         self._last_tickers = [ticker]
         return phrase

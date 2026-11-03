@@ -98,6 +98,34 @@ def read_lifetime_pnl(path: str | None = None) -> float | None:
         return None
 
 
+def _entry_fee_usd(entry: dict[str, Any]) -> float:
+    try:
+        return max(0.0, float(entry.get("fee_usd") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def execution_fee_usdt(row: dict[str, Any]) -> float:
+    """Комиссия fill Bybit в USDT: sell обычно USDT, buy — в монете."""
+    try:
+        fee = float(row.get("execFee") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if fee <= 0:
+        return 0.0
+    try:
+        px = float(row.get("execPrice") or 0)
+    except (TypeError, ValueError):
+        px = 0.0
+    cur = str(row.get("feeCurrency") or "").upper()
+    if cur in {"USDT", "USD"}:
+        return fee
+    side = str(row.get("side") or "").lower()
+    if cur or side == "buy":
+        return fee * px if px > 0 else 0.0
+    return fee
+
+
 def open_lots(
     trades: list[dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, float]]:
@@ -117,7 +145,7 @@ def open_lots(
         lot = lots.setdefault(ticker, {"qty": 0.0, "cost": 0.0})
         if side == "buy":
             lot["qty"] += qty
-            lot["cost"] += quote
+            lot["cost"] += quote + _entry_fee_usd(entry)
             continue
         if side != "sell" or lot["qty"] <= 0:
             continue
@@ -125,7 +153,7 @@ def open_lots(
         avg = lot["cost"] / lot["qty"]
         lot["qty"] -= sell_qty
         lot["cost"] -= avg * sell_qty
-        if lot["qty"] < 1e-12:
+        if lot["qty"] < 1e-12 or lot["cost"] < 0.02:
             lot["qty"] = 0.0
             lot["cost"] = 0.0
     return {
@@ -166,9 +194,10 @@ def compute_lifetime_from_trades(
         if qty <= 0:
             continue
         lot = lots.setdefault(ticker, {"qty": 0.0, "cost": 0.0})
+        fee = _entry_fee_usd(entry)
         if side == "buy":
             lot["qty"] += qty
-            lot["cost"] += quote
+            lot["cost"] += quote + fee
             continue
         if side != "sell" or lot["qty"] <= 0:
             continue
@@ -176,10 +205,10 @@ def compute_lifetime_from_trades(
         avg = lot["cost"] / lot["qty"]
         cost_sold = avg * sell_qty
         proceeds = quote * (sell_qty / qty)
-        realized += proceeds - cost_sold
+        realized += proceeds - cost_sold - fee * (sell_qty / qty)
         lot["qty"] -= sell_qty
         lot["cost"] -= cost_sold
-        if lot["qty"] < 1e-12:
+        if lot["qty"] < 1e-12 or lot["cost"] < 0.02:
             lot["qty"] = 0.0
             lot["cost"] = 0.0
 
@@ -204,6 +233,7 @@ def recompute_lifetime_pnl(
 ) -> float | None:
     """Пересчитать и перезаписать lifetime_pnl_usd — зафиксированное по журналу."""
     trades = _read_trades(path)
+    annotate_sell_pnl(trades)
     if mark_prices is None:
         value = compute_realized_from_trades(trades)
     else:
@@ -218,6 +248,7 @@ def realized_pnl_for_sell(
     ticker: str,
     quote: float,
     price: float,
+    fee_usd: float = 0.0,
 ) -> float | None:
     """Результат продажи против средней цены лота в журнале до этой сделки."""
     symbol = str(ticker or "").upper()
@@ -235,7 +266,199 @@ def realized_pnl_for_sell(
     avg = lot["cost"] / lot["qty"]
     cost_sold = avg * sell_qty
     proceeds = quote_usd * (sell_qty / qty)
-    return round(proceeds - cost_sold, 2)
+    fee = max(0.0, float(fee_usd or 0)) * (sell_qty / qty)
+    return round(proceeds - cost_sold - fee, 2)
+
+
+def annotate_sell_pnl(trades: list[dict[str, Any]]) -> None:
+    """Проставить pnl_usd по каждой продаже с учётом комиссий."""
+    seen: list[dict[str, Any]] = []
+    for entry in trades:
+        if str(entry.get("side") or "").lower() == "sell":
+            pnl = realized_pnl_for_sell(
+                seen,
+                ticker=str(entry.get("ticker") or ""),
+                quote=float(entry.get("quote") or 0),
+                price=float(entry.get("price") or 0),
+                fee_usd=_entry_fee_usd(entry),
+            )
+            if pnl is not None:
+                entry["pnl_usd"] = pnl
+            else:
+                entry.pop("pnl_usd", None)
+        seen.append(entry)
+
+
+def cluster_executions(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Сумма fill одной заявки Bybit: quote, qty, fee, время."""
+    groups: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in fills:
+        if not isinstance(row, dict):
+            continue
+        sym = str(row.get("symbol") or "")
+        if not sym.endswith("USDT"):
+            continue
+        ticker = sym[:-4].upper()
+        side = str(row.get("side") or "").lower()
+        if side not in {"buy", "sell"}:
+            continue
+        try:
+            qty = float(row.get("execQty") or 0)
+            val = float(row.get("execValue") or 0)
+            px = float(row.get("execPrice") or 0)
+            ts_ms = int(row.get("execTime") or 0)
+        except (TypeError, ValueError):
+            continue
+        if val <= 0 and qty > 0 and px > 0:
+            val = qty * px
+        if qty <= 0 or val <= 0:
+            continue
+        oid = str(row.get("orderId") or row.get("execId") or f"{ticker}:{side}:{ts_ms}")
+        key = f"{ticker}:{side}:{oid}"
+        item = groups.get(key)
+        if item is None:
+            item = {
+                "ticker": ticker,
+                "side": side,
+                "order_id": oid,
+                "qty": 0.0,
+                "quote": 0.0,
+                "fee": 0.0,
+                "ts_ms": ts_ms,
+            }
+            groups[key] = item
+            order.append(key)
+        item["qty"] += qty
+        item["quote"] += val
+        item["fee"] += execution_fee_usdt(row)
+        if ts_ms and (not item["ts_ms"] or ts_ms < item["ts_ms"]):
+            item["ts_ms"] = ts_ms
+    out: list[dict[str, Any]] = []
+    for key in order:
+        item = groups[key]
+        if item["qty"] <= 0:
+            continue
+        item["price"] = item["quote"] / item["qty"]
+        out.append(item)
+    return out
+
+
+def _match_fill_group(
+    entry: dict[str, Any],
+    groups: list[dict[str, Any]],
+    used: set[int],
+    *,
+    window_ms: int = 45 * 60 * 1000,
+) -> dict[str, Any] | None:
+    ticker = str(entry.get("ticker") or "").upper()
+    side = str(entry.get("side") or "").lower()
+    try:
+        ts_ms = int(float(entry.get("ts_epoch") or 0) * 1000)
+        quote = float(entry.get("quote") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not ticker or side not in {"buy", "sell"} or ts_ms <= 0:
+        return None
+    best: tuple[float, float, dict[str, Any], int] | None = None
+    for idx, group in enumerate(groups):
+        if idx in used:
+            continue
+        if group["ticker"] != ticker or group["side"] != side:
+            continue
+        dt = abs(int(group["ts_ms"] or 0) - ts_ms)
+        if dt > window_ms:
+            continue
+        dq = abs(float(group["quote"]) - quote)
+        score = (dq, dt)
+        if best is None or score < best[:2]:
+            best = (dq, float(dt), group, idx)
+    if best is None:
+        return None
+    used.add(best[3])
+    return best[2]
+
+
+def sync_journal_with_fills(
+    trades: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+    wallet_qty: dict[str, float],
+    *,
+    min_lot_usd: float = 5.0,
+    dust_usd: float = 1.0,
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    """Комиссии с биржи на строки журнала; проданные на Bybit лоты — в дневник."""
+    rows = [dict(entry) for entry in trades]
+    groups = cluster_executions(fills)
+    used: set[int] = set()
+    notes: list[str] = []
+    changed = False
+    for entry in rows:
+        group = _match_fill_group(entry, groups, used)
+        if group is None:
+            if "fee_usd" not in entry:
+                entry["fee_usd"] = 0.0
+                changed = True
+            continue
+        fee = round(float(group["fee"]), 6)
+        if abs(_entry_fee_usd(entry) - fee) > 1e-9 or "fee_usd" not in entry:
+            entry["fee_usd"] = fee
+            changed = True
+    lots = open_lots(rows)
+    for ticker, lot in list(lots.items()):
+        if lot["cost"] + 1e-9 < min_lot_usd:
+            continue
+        held = float(wallet_qty.get(ticker) or 0)
+        avg = lot["cost"] / lot["qty"] if lot["qty"] else 0.0
+        if held * avg >= dust_usd:
+            continue
+        last_ms = 0
+        name = ticker
+        for entry in rows:
+            if str(entry.get("ticker") or "").upper() != ticker:
+                continue
+            name = str(entry.get("name") or name)
+            try:
+                last_ms = max(last_ms, int(float(entry.get("ts_epoch") or 0) * 1000))
+            except (TypeError, ValueError):
+                pass
+        remain = lot["qty"]
+        added = 0
+        for idx, group in enumerate(groups):
+            if remain * avg < dust_usd:
+                break
+            if idx in used or group["ticker"] != ticker or group["side"] != "sell":
+                continue
+            if int(group["ts_ms"] or 0) + 60_000 < last_ms:
+                continue
+            quote = round(float(group["quote"]), 2)
+            if quote <= 0 or remain <= 0:
+                continue
+            used.add(idx)
+            ts_ms = int(group["ts_ms"] or last_ms)
+            dt = datetime.fromtimestamp(ts_ms / 1000.0, _MSK)
+            rows.append(
+                {
+                    "ts": dt.strftime("%d.%m %H:%M"),
+                    "ts_epoch": int(ts_ms / 1000),
+                    "ticker": ticker,
+                    "name": name,
+                    "side": "sell",
+                    "quote": quote,
+                    "price": quote / remain,
+                    "fee_usd": round(float(group["fee"]), 6),
+                }
+            )
+            remain = 0.0
+            added += 1
+            changed = True
+            break
+        if added:
+            notes.append(f"{ticker} закрыл по бирже")
+    if changed:
+        rows.sort(key=lambda item: float(item.get("ts_epoch") or 0))
+        annotate_sell_pnl(rows)
+    return rows, notes, changed
 
 
 def format_trade_line(entry: dict[str, Any]) -> str:
@@ -275,11 +498,20 @@ class CryptoJournalMixin:
             return "Отправил дневник крипты в телеграм."
         return text
 
-    def _journal_trade(self, ticker: str, side: str, quote: float, price: float, spoken: str) -> None:
+    def _journal_trade(
+        self,
+        ticker: str,
+        side: str,
+        quote: float,
+        price: float,
+        spoken: str,
+        fee_usd: float = 0.0,
+    ) -> None:
         now = datetime.now(_MSK)
         side_norm = "buy" if side == "Buy" else "sell"
         quote_usd = round(float(quote or 0), 2)
         px = round(float(price or 0), 6)
+        fee = round(max(0.0, float(fee_usd or 0)), 6)
         trades = _read_trades()
         entry: dict[str, Any] = {
             "ts": now.strftime("%d.%m %H:%M"),
@@ -289,9 +521,12 @@ class CryptoJournalMixin:
             "side": side_norm,
             "quote": quote_usd,
             "price": px,
+            "fee_usd": fee,
         }
         if side_norm == "sell":
-            pnl = realized_pnl_for_sell(trades, ticker=ticker, quote=quote_usd, price=px)
+            pnl = realized_pnl_for_sell(
+                trades, ticker=ticker, quote=quote_usd, price=px, fee_usd=fee
+            )
             if pnl is not None:
                 entry["pnl_usd"] = pnl
         trades.append(entry)
@@ -309,6 +544,82 @@ class CryptoJournalMixin:
         logger.info("[Крипта] %s", line)
         if common.telegram_configured():
             common.send_telegram_notification(line, background=True)
+
+    def _spot_fill_history(
+        self,
+        start_ms: int,
+        symbol: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        cursor = ""
+        end_ms = int(time.time() * 1000)
+        for _ in range(80):
+            params: dict[str, Any] = {
+                "category": "spot",
+                "limit": "100",
+                "startTime": str(int(start_ms)),
+                "endTime": str(end_ms),
+            }
+            if symbol:
+                params["symbol"] = symbol
+            if cursor:
+                params["cursor"] = cursor
+            data = self._signed("GET", "/v5/execution/list", params)
+            result = data.get("result") or {}
+            chunk = result.get("list") or []
+            rows.extend(row for row in chunk if isinstance(row, dict))
+            cursor = str(result.get("nextPageCursor") or "")
+            if not chunk or not cursor:
+                break
+        return rows
+
+    def _journal_sync_exchange(
+        self,
+        wallet_qty: dict[str, float],
+        *,
+        min_lot_usd: float = 5.0,
+    ) -> list[str]:
+        """Сверить дневник с fill Bybit: комиссии и продажи, которых нет в журнале."""
+        trades = _read_trades()
+        if not trades:
+            return []
+        lots = open_lots(trades)
+        ghosts = [
+            ticker
+            for ticker, lot in lots.items()
+            if lot["cost"] >= min_lot_usd
+            and float(wallet_qty.get(ticker) or 0) * (lot["cost"] / lot["qty"]) < 1.0
+        ]
+        need_fees = any("fee_usd" not in row for row in trades)
+        if not need_fees and not ghosts:
+            return []
+        start_ms = min(int(float(row.get("ts_epoch") or 0) * 1000) for row in trades)
+        start_ms = max(0, start_ms - 3600_000)
+        fills: list[dict[str, Any]] = []
+        if need_fees:
+            fills = self._spot_fill_history(start_ms)
+        else:
+            for ticker in ghosts:
+                fills.extend(self._spot_fill_history(start_ms, symbol=f"{ticker}USDT"))
+        updated, notes, changed = sync_journal_with_fills(
+            trades,
+            fills,
+            wallet_qty,
+            min_lot_usd=min_lot_usd,
+        )
+        if not changed:
+            return notes
+        _write_trades(updated)
+        try:
+            recompute_lifetime_pnl()
+        except Exception as exc:
+            logger.warning("[Крипта] lifetime после сверки: %s", exc)
+        try:
+            import conky_markets
+            conky_markets.poke_refresh()
+        except Exception:
+            pass
+        return notes
 
 
 def _entry_epoch(entry: dict[str, Any]) -> float | None:
