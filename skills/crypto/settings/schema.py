@@ -14,7 +14,7 @@ class DeskSettings:
     pocket_bounce_pct: float = 1.0
     pocket_stop_pct: float = 15.0
     pocket_hold_sec: float = 10 * 60
-    pocket_exit_pullback_pct: float = 0.5
+    pocket_exit_pullback_pct: float = 0.35
     pocket_exit_hold_sec: float = 60
     sui_usd: float = 50.0  # устарело: второй карман не покупает сам
     second_on: bool = False

@@ -1470,7 +1470,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.btc_dip_exit_reason(price=85.0, entry=100.0), "стоп")
         self.assertIsNone(policy.btc_dip_exit_reason(price=100.4, entry=100.0))
         self.assertIsNone(
-            policy.update_pocket_exit_arm(None, price=100.5, entry=100.0, now=1.0, qty=1.0)
+            policy.update_pocket_exit_arm(None, price=100.3, entry=100.0, now=1.0, qty=1.0)
         )
         armed = policy.update_pocket_exit_arm(None, price=101.1, entry=100.0, now=10.0, qty=1.0)
         self.assertAlmostEqual(armed["high"], 101.1)
@@ -1508,17 +1508,17 @@ class TestDeskPolicy(unittest.TestCase):
         )
         kept = policy.update_pocket_exit_arm(held, price=100.2, entry=100.0, now=80.0, qty=1.0)
         self.assertEqual(kept["high"], 104.0)
-        # $40 нога: порог ~1.11%, $100 — 0.66%, $200 — 0.51%.
-        self.assertAlmostEqual(policy.exit_trap_arm_pct(cost_usd=100.0), 0.66, places=2)
-        self.assertGreater(policy.exit_trap_arm_pct(cost_usd=40.0), 1.0)
-        self.assertLess(policy.exit_trap_arm_pct(cost_usd=200.0), 0.6)
+        # $40 нога: порог ~0.66%, $100 — 0.48%, $200 — 0.42%.
+        self.assertAlmostEqual(policy.exit_trap_arm_pct(cost_usd=100.0), 0.48, places=2)
+        self.assertAlmostEqual(policy.exit_trap_arm_pct(cost_usd=40.0), 0.66, places=2)
+        self.assertLess(policy.exit_trap_arm_pct(cost_usd=200.0), 0.5)
         # Дисбаланс стакана L2 (OBI) и срабатывание ловушки по bid / медвежьей плите:
         obi_bear = policy.orderbook_obi([["1.0", "100"]], [["1.0", "400"]], depth=5)
         self.assertAlmostEqual(obi_bear or 0.0, 0.20, places=2)
-        # При медвежьей плите (obi <= 0.28) откат -0.35% режет сразу без ожидания hold 60с:
+        # При медвежьей плите (obi <= 0.28) откат -0.25% режет сразу без ожидания hold 60с:
         self.assertTrue(
             policy.pocket_exit_ready(
-                armed, price=101.1, bid=101.1 * (1.0 - 0.0035), now=10.0 + 5.0, entry=100.0, obi=obi_bear
+                armed, price=101.1, bid=101.1 * (1.0 - 0.0025), now=10.0 + 5.0, entry=100.0, obi=obi_bear
             )
         )
         # Если lastPrice застыл на пике 104.0, но bid в стакане уже упал до need — выход готов:
