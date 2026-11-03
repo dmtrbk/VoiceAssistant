@@ -42,6 +42,7 @@ from .desk_policy import (
     PROBE_ARMED_PERIOD_SEC,
     PROBE_SCAN_LIMIT,
     PROBE_SCAN_CLASSIC_LIMIT,
+    PROBE_SCAN_MANDATORY_TOP,
     PROBE_ALGO_ORDER,
     set_live_sleeve,
     SLEEVE_SKIP,
@@ -1760,7 +1761,10 @@ class CryptoDeskMixin:
             ):
                 continue
             try:
-                fast_bar = scan_idx < 36 or float(row.get("turnover") or 0) >= 1_000_000.0
+                fast_bar = (
+                    scan_idx < PROBE_SCAN_MANDATORY_TOP
+                    or float(row.get("turnover") or 0) >= 1_000_000.0
+                )
                 bars5 = self._probe_bars(
                     ticker, "5", 80, cache_sec=8.0 if fast_bar else 45.0
                 )

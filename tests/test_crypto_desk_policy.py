@@ -770,7 +770,18 @@ class TestDeskPolicy(unittest.TestCase):
             [str(r[1]["ticker"]) for r in ranked[:5]],
             ["D", "F", "B", "C", "A"],
         )
-        self.assertGreaterEqual(policy.PROBE_SCAN_MANDATORY_TOP, 5)
+        self.assertGreaterEqual(policy.PROBE_SCAN_MANDATORY_TOP, 50)
+        # Лидеры суток стоят впереди ликвидного середняка, даже если у середняка оборот больше.
+        crowd = [
+            {"ticker": f"G{i}", "chg": 40.0 - i * 0.4, "price": 1.0, "turnover": 200_000}
+            for i in range(50)
+        ] + [
+            {"ticker": "LIQ", "chg": 4.0, "price": 1.0, "turnover": 8_000_000},
+        ]
+        crowd_ranked = policy.probe_scan_ranked_rows(crowd)
+        self.assertEqual(str(crowd_ranked[0][1]["ticker"]), "G0")
+        self.assertEqual(str(crowd_ranked[49][1]["ticker"]), "G49")
+        self.assertEqual(str(crowd_ranked[50][1]["ticker"]), "LIQ")
         mild_red = policy.probe_scan_ranked_rows([
             {"ticker": "RED", "chg": -2.0, "price": 1.0, "turnover": 500_000},
             {"ticker": "DEAD", "chg": -4.0, "price": 1.0, "turnover": 500_000},
@@ -962,12 +973,13 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertEqual(policy.PROBE_MIN_ENTRY_OBI, 0.55)
         self.assertTrue(policy.probe_entry_obi_ok(None))
+        self.assertTrue(policy.probe_entry_obi_ok(0.40))
+        self.assertTrue(policy.probe_entry_obi_ok(0.549))
         self.assertTrue(policy.probe_entry_obi_ok(0.55))
         self.assertTrue(policy.probe_entry_obi_ok(0.80))
-        self.assertFalse(policy.probe_entry_obi_ok(0.40))
-        self.assertFalse(policy.probe_entry_obi_ok(0.549))
         self.assertTrue(policy.probe_entry_obi_ok(0.70, strict=True))
         self.assertFalse(policy.probe_entry_obi_ok(0.60, strict=True))
+        self.assertFalse(policy.probe_entry_obi_ok(0.40, strict=True))
         self.assertFalse(
             policy.probe_book_buy_ok(bid=0.00727, ask=0.00729, arm_px=0.007281, strict=True)
         )

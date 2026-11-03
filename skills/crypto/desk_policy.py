@@ -126,9 +126,10 @@ PROBE_MAX_LOSS_PCT = 8.0
 # Сначала candle по широкому списку (только 5м); остальные алго — укороченный топ.
 # При floor $25k кандидатов ~120–130 — лимит почти = вся очередь, не топ-48.
 PROBE_SCAN_LIMIT = 128
-PROBE_SCAN_CLASSIC_LIMIT = 16
-# Топ-N по росту за 24ч всегда первыми в очереди щупа (candle + classic).
-PROBE_SCAN_MANDATORY_TOP = 8
+# Impulse по тем же лидерам суток, не по узким 16.
+PROBE_SCAN_CLASSIC_LIMIT = 50
+# Топ-N по росту за 24ч всегда первыми: свежие 5м и spark, не хвост за ликвидными середняками.
+PROBE_SCAN_MANDATORY_TOP = 50
 # Чаще сканируем: растущую 5м свечу надо брать в первой половине, не раз в минуту у хая.
 PROBE_PERIOD_SEC = 10
 PROBE_ARMED_PERIOD_SEC = 6
@@ -209,7 +210,7 @@ PROBE_STAIR2_MIN_1H_POS = 0.88
 # Защита от проскальзывания по пустому стакану перед рыночной покупкой щупа (GROVE 0.007281->0.007409):
 PROBE_MAX_SPREAD_PCT = 0.35
 PROBE_MAX_ASK_SLIP_PCT = 0.45
-# На входе нужен bid-перевес в топ-5 L2. Иначе ложный пробой в красной ленте проходит узкий спред.
+# OBI на входе только в жёстком режиме. Днём стакан не режет взвод (ICNT снимали 4 раза).
 PROBE_MIN_ENTRY_OBI = 0.55
 # Жёсткий режим (бывшие паузы: полка, час, серия, день): щуп не молчит, фильтры туже.
 PROBE_STRICT_MIN_ENTRY_OBI = 0.70
@@ -750,7 +751,7 @@ def probe_scan_ranked_rows(
     now: float | None = None,
     min_turnover: float | None = None,
 ) -> list[tuple[float, dict[str, Any]]]:
-    """Список для щупа: топ-8 по 24h %, затем высоколиквидные ($1.5M+) в фазе разгона, затем остальные."""
+    """Список для щупа: топ-50 по 24h %, затем высоколиквидные ($1.5M+) в фазе разгона, затем остальные."""
     cap = int(PROBE_SCAN_LIMIT if limit is None else limit)
     floor_turn = (
         float(min_turnover)
@@ -1151,18 +1152,23 @@ def probe_book_buy_ok(
 
 
 def probe_entry_obi_floor(*, strict: bool = False) -> float:
-    return float(PROBE_STRICT_MIN_ENTRY_OBI if strict else PROBE_MIN_ENTRY_OBI)
+    """Порог OBI: обычный вход без фильтра, жёсткий режим — 0.70."""
+    if not strict:
+        return 0.0
+    return float(PROBE_STRICT_MIN_ENTRY_OBI)
 
 
 def probe_entry_obi_ok(obi: float | None, *, strict: bool = False) -> bool:
-    """Перед Buy щупа: доля bid в топ-5. Нет котировки стакана — не блокируем."""
+    """OBI перед Buy только в жёстком режиме. Нет котировки стакана — не блокируем."""
+    if not strict:
+        return True
     if obi is None:
         return True
     try:
         value = float(obi)
     except (TypeError, ValueError):
         return True
-    return value >= probe_entry_obi_floor(strict=strict) - 1e-12
+    return value >= probe_entry_obi_floor(strict=True) - 1e-12
 
 
 def _probe_staircase_setup(
