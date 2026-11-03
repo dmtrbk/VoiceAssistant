@@ -19,7 +19,7 @@ class DeskSettings:
     sui_usd: float = 50.0  # устарело: второй карман не покупает сам
     second_on: bool = False
     second_ticker: str = "AVA"  # устарело: тикер приходит с щупа
-    pocket_from_probe_max: int = 3
+    pocket_from_probe_max: int = 6
     sleeve_on: bool = False  # устарело: рукав снят
     sleeve_max_pct: float = 50.0
     sleeve_max_names: int = 2

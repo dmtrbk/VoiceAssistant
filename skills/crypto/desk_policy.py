@@ -26,12 +26,14 @@ PROBE_MAX_LEGS = 4
 # BTC за сутки в минусе — не четыре коррелированные полки, а 1–2 слота.
 PROBE_MAX_LEGS_BTC_DOWN = 2
 # Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
-POCKET_FROM_PROBE_MAX = 3
+POCKET_FROM_PROBE_MAX = 6
 # Мягкий выход щупа → передача во второй карман; жёсткий — продажа.
 # «дно» не передаём: цена уже у low щупа — карман2 сразу резал бы тем же дном.
 PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд", "застой"})
 PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "дно"})
 PROBE_CANDLE_STALE_SEC = 2 * 3600
+# Парковка в карман2 ради свободного слота: свежую ногу не трогаем.
+PROBE_ROOM_MIN_AGE_SEC = 15 * 60
 POCKET_SCRATCH_PCT = -0.20
 DESK_CASH_FLOOR_PCT = 25.0
 DESK_CASH_FLOOR_BULL_PCT = 8.0
@@ -205,6 +207,10 @@ PROBE_MAX_SPREAD_PCT = 0.35
 PROBE_MAX_ASK_SLIP_PCT = 0.45
 # На входе нужен bid-перевес в топ-5 L2. Иначе ложный пробой в красной ленте проходит узкий спред.
 PROBE_MIN_ENTRY_OBI = 0.55
+# Жёсткий режим (бывшие паузы: полка, час, серия, день): щуп не молчит, фильтры туже.
+PROBE_STRICT_MIN_ENTRY_OBI = 0.70
+PROBE_STRICT_MAX_SPREAD_PCT = 0.20
+PROBE_STRICT_MAX_ASK_SLIP_PCT = 0.25
 # Жёсткий дневной риск-лимит (Daily Max Drawdown) на новые входы щупа (~1.35% от депозита $440).
 PROBE_DAILY_MAX_LOSS_USD = 6.0
 PROBE_SPRINT_HOLD_SEC = 30
@@ -377,6 +383,45 @@ def exit_trap_arm_pct(
         cost = EXIT_TRAP_DEFAULT_COST_USD
     need = cost * (2.0 * EXIT_FEE_SIDE) + EXIT_TRAP_EXTRA_USD
     return need / cost * 100.0
+
+
+def pick_probe_leg_for_room(
+    legs: list[dict[str, Any]],
+    prices: dict[str, float],
+    *,
+    now: float | None = None,
+    min_age_sec: float | None = None,
+) -> dict[str, Any] | None:
+    """Худшая по PnL% нога щупа старше min_age — её паркуем в карман2, слот снова свободен."""
+    now_ts = float(now if now is not None else time.time())
+    min_age = float(PROBE_ROOM_MIN_AGE_SEC if min_age_sec is None else min_age_sec)
+    best: dict[str, Any] | None = None
+    best_pnl = float("inf")
+    best_age = -1.0
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            continue
+        ticker = str(leg.get("ticker") or "").upper()
+        try:
+            qty = float(leg.get("qty") or 0)
+            entry = float(leg.get("entry") or 0)
+            px = float(prices.get(ticker) or 0)
+            opened = float(leg.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not ticker or qty <= 0 or entry <= 0 or px <= 0:
+            continue
+        age = now_ts - opened if opened > 0 else min_age
+        if age < min_age - 1e-12:
+            continue
+        pnl_pct = (px / entry - 1.0) * 100.0
+        if pnl_pct < best_pnl - 1e-12 or (
+            abs(pnl_pct - best_pnl) <= 1e-12 and age > best_age
+        ):
+            best = leg
+            best_pnl = pnl_pct
+            best_age = age
+    return best
 
 
 def pick_second_pocket_leg_for_funding(
@@ -587,11 +632,8 @@ def tape_btc_day_chg(rows: list[dict[str, Any]] | None) -> float | None:
 
 
 def probe_max_legs(*, btc_day_chg: float | None = None) -> int:
-    """Днём до 4 ног. BTC за сутки в минусе — 2 слота, иначе каскад коррелированных полок."""
-    if btc_day_chg is None:
-        return int(PROBE_MAX_LEGS)
-    if float(btc_day_chg) < 0.0:
-        return int(PROBE_MAX_LEGS_BTC_DOWN)
+    """Слоты не режем по BTC: до 4 ног. Место под новый вход — парковка в карман2."""
+    del btc_day_chg
     return int(PROBE_MAX_LEGS)
 
 
@@ -600,11 +642,12 @@ def probe_setup_ok_now(
     *,
     now: float | None = None,
     turnover: float | None = None,
+    strict: bool = False,
 ) -> bool:
-    """Ночью только ступенька/флаг/выстрел и оборот ≥ $1.5M. Днём сетап уже отфильтрован scan."""
+    """Ночь и жёсткий режим: только ступенька/флаг/выстрел и оборот ≥ $1.5M."""
     if not setup:
         return False
-    if not probe_night_halted(now):
+    if not strict and not probe_night_halted(now):
         return True
     strong = (
         float(setup.get("stair") or 0) >= 1.0 - 1e-12
@@ -619,11 +662,9 @@ def probe_setup_ok_now(
     return turn >= float(PROBE_NIGHT_MIN_TURNOVER_USD) - 1e-9
 
 
-def probe_min_turnover_usd(now: float | None = None) -> float:
-    """Порог суточного оборота щупа: днём $150k, ночью (21:00–06:00 YEKT) $1.5M — запасной слой."""
-    if now is None:
-        return float(PROBE_MIN_TURNOVER_USD)
-    if probe_night_halted(now):
+def probe_min_turnover_usd(now: float | None = None, *, strict: bool = False) -> float:
+    """Порог оборота: днём $150k; ночь и жёсткий режим — $1.5M."""
+    if strict or (now is not None and probe_night_halted(now)):
         return float(PROBE_NIGHT_MIN_TURNOVER_USD)
     return float(PROBE_MIN_TURNOVER_USD)
 
@@ -693,10 +734,15 @@ def probe_scan_ranked_rows(
     *,
     limit: int | None = None,
     now: float | None = None,
+    min_turnover: float | None = None,
 ) -> list[tuple[float, dict[str, Any]]]:
     """Список для щупа: топ-8 по 24h %, затем высоколиквидные ($1.5M+) в фазе разгона, затем остальные."""
     cap = int(PROBE_SCAN_LIMIT if limit is None else limit)
-    floor_turn = probe_min_turnover_usd(now)
+    floor_turn = (
+        float(min_turnover)
+        if min_turnover is not None
+        else probe_min_turnover_usd(now)
+    )
     scored: list[tuple[float, dict[str, Any]]] = []
     for row in rows:
         score = probe_scan_rank(row, min_turnover=floor_turn)
@@ -988,30 +1034,42 @@ def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_op
     return True
 
 
-def probe_book_buy_ok(*, bid: float, ask: float, arm_px: float = 0.0) -> bool:
-    """Проверка живого стакана перед рыночным Buy: спред ≤ 0.35% и ask не улетел > 0.45% над взводом."""
+def probe_book_buy_ok(
+    *,
+    bid: float,
+    ask: float,
+    arm_px: float = 0.0,
+    strict: bool = False,
+) -> bool:
+    """Проверка живого стакана перед рыночным Buy: спред и ask-slip. В жёстком режиме туже."""
     b = float(bid or 0)
     a = float(ask or 0)
     if b <= 0 or a <= 0 or a < b:
         return True
     spread_pct = (a - b) / b * 100.0
-    if spread_pct > PROBE_MAX_SPREAD_PCT + 1e-12:
+    max_spread = PROBE_STRICT_MAX_SPREAD_PCT if strict else PROBE_MAX_SPREAD_PCT
+    max_slip = PROBE_STRICT_MAX_ASK_SLIP_PCT if strict else PROBE_MAX_ASK_SLIP_PCT
+    if spread_pct > max_spread + 1e-12:
         return False
     ref = float(arm_px or 0)
-    if ref > 0 and (a / ref - 1.0) * 100.0 > PROBE_MAX_ASK_SLIP_PCT + 1e-12:
+    if ref > 0 and (a / ref - 1.0) * 100.0 > max_slip + 1e-12:
         return False
     return True
 
 
-def probe_entry_obi_ok(obi: float | None) -> bool:
-    """Перед Buy щупа: доля bid в топ-5 ≥ 0.55. Нет котировки стакана — не блокируем."""
+def probe_entry_obi_floor(*, strict: bool = False) -> float:
+    return float(PROBE_STRICT_MIN_ENTRY_OBI if strict else PROBE_MIN_ENTRY_OBI)
+
+
+def probe_entry_obi_ok(obi: float | None, *, strict: bool = False) -> bool:
+    """Перед Buy щупа: доля bid в топ-5. Нет котировки стакана — не блокируем."""
     if obi is None:
         return True
     try:
         value = float(obi)
     except (TypeError, ValueError):
         return True
-    return value >= PROBE_MIN_ENTRY_OBI - 1e-12
+    return value >= probe_entry_obi_floor(strict=strict) - 1e-12
 
 
 def _probe_staircase_setup(

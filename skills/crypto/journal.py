@@ -531,7 +531,7 @@ def probe_loss_guard_reason(
     trades: list[dict[str, Any]] | None = None,
     reset_ts: float | None = None,
 ) -> str | None:
-    """Пауза новых входов: дневной лимит, час, серия убытков или кулдаун после полки."""
+    """Жёсткий режим входов (не стоп скана): дневной лимит, час, серия убытков или полка."""
     from .desk_policy import (
         PROBE_HOURLY_MAX_LOSS_USD,
         PROBE_MAX_CONSECUTIVE_LOSSES,

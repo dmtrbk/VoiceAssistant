@@ -654,7 +654,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.probe_max_legs(), 4)
         self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4), 4)
         self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0), 4)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01), 2)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01), 4)
         self.assertEqual(policy.tape_btc_day_chg([{"ticker": "ETH", "chg": 1.0}]), None)
         self.assertEqual(
             policy.tape_btc_day_chg([{"ticker": "BTC", "chg": -1.2}, {"ticker": "ETH", "chg": 2.0}]),
@@ -672,6 +672,13 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_setup_ok_now(night_candle, now=night_ts, turnover=5_000_000)
         )
+        self.assertFalse(
+            policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=200_000, strict=True)
+        )
+        self.assertTrue(
+            policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=1_500_000, strict=True)
+        )
+        self.assertEqual(policy.probe_min_turnover_usd(strict=True), 1_500_000.0)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_SEC, 25 * 60)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_LOSS_USD, 0.25)
         self.assertFalse(
@@ -910,6 +917,11 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.probe_entry_obi_ok(0.80))
         self.assertFalse(policy.probe_entry_obi_ok(0.40))
         self.assertFalse(policy.probe_entry_obi_ok(0.549))
+        self.assertTrue(policy.probe_entry_obi_ok(0.70, strict=True))
+        self.assertFalse(policy.probe_entry_obi_ok(0.60, strict=True))
+        self.assertFalse(
+            policy.probe_book_buy_ok(bid=0.00727, ask=0.00729, arm_px=0.007281, strict=True)
+        )
         # Ступенька из 3 зелёных 5м баров (как TREE/BIRB/WET): проходит setup и допускает room ≥ 0.3%.
         stair_bars = base5[:-2] + [
             {"open": 1.000, "high": 1.004, "low": 1.000, "close": 1.003, "volume": 12.0},
@@ -1296,7 +1308,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.probe_should_handoff("полка"))
         self.assertFalse(policy.probe_should_handoff("стоп"))
         self.assertFalse(policy.probe_should_handoff("вершина"))
-        self.assertEqual(policy.pocket_from_probe_max(), 3)
+        self.assertEqual(policy.pocket_from_probe_max(), 6)
         self.assertEqual(policy.PROBE_MAX_LEGS, 4)
         best_leg = policy.pick_second_pocket_leg_for_funding(
             [
@@ -1308,6 +1320,26 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNotNone(best_leg)
         assert best_leg is not None
         self.assertEqual(best_leg["ticker"], "SQD")
+        now = 1_700_000_000.0
+        room = policy.pick_probe_leg_for_room(
+            [
+                {"ticker": "SKY", "qty": 600.0, "entry": 0.066, "ts": now - 3600},
+                {"ticker": "LTC", "qty": 0.7, "entry": 55.0, "ts": now - 1200},
+                {"ticker": "NAVX", "qty": 4000.0, "entry": 0.01, "ts": now - 60},
+            ],
+            {"SKY": 0.065, "LTC": 55.2, "NAVX": 0.011},
+            now=now,
+        )
+        self.assertIsNotNone(room)
+        assert room is not None
+        self.assertEqual(room["ticker"], "SKY")
+        self.assertIsNone(
+            policy.pick_probe_leg_for_room(
+                [{"ticker": "NAVX", "qty": 1.0, "entry": 0.01, "ts": now - 60}],
+                {"NAVX": 0.011},
+                now=now,
+            )
+        )
         # BASED $30: пик +2.035% взвёл ловушку, откат -0.5% до +1.44% закрывает в плюс («вершина»).
         self.assertEqual(
             policy.probe_exit_reason(
@@ -3268,6 +3300,45 @@ class TestManualTrap(unittest.TestCase):
         legs = read_second_pocket_legs()
         self.assertEqual(len(legs), 1)
         self.assertAlmostEqual(legs[0]["entry"], 0.005)
+
+    def test_probe_make_room_parks_worst_leg(self):
+        from skills.crypto.common import probe_legs, read_second_pocket_legs, write_probe
+        from skills.crypto.settings import store as settings_store
+
+        settings_store.update(second_on=True, pocket_from_probe_max=3)
+        self.addCleanup(lambda: settings_store.update(second_on=False))
+        now = time.time()
+        write_probe(
+            ticker="SKY",
+            qty=600.0,
+            entry=0.066,
+            shelf=0.065,
+            peak=0.066,
+            ts=now - 3600,
+        )
+        write_probe(
+            ticker="LTC",
+            qty=0.7,
+            entry=55.0,
+            shelf=54.5,
+            peak=55.2,
+            ts=now - 1200,
+        )
+        with (
+            patch.object(self.skill, "_probe_cap", return_value=2),
+            patch.object(
+                self.skill,
+                "_ticker",
+                side_effect=lambda t: {"SKY": {"price": 0.065}, "LTC": {"price": 55.2}}[t],
+            ),
+        ):
+            ok = self.skill._probe_make_room()
+        self.assertTrue(ok)
+        self.assertEqual({leg["ticker"] for leg in probe_legs()}, {"LTC"})
+        pocket = read_second_pocket_legs()
+        self.assertEqual(len(pocket), 1)
+        self.assertEqual(pocket[0]["ticker"], "SKY")
+        self.assertTrue(pocket[0].get("scratch"))
 
 
 if __name__ == "__main__":

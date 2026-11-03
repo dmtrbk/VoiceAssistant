@@ -16,7 +16,7 @@ ALT_SLEEVE_MAX_PCT = 50.0
 ALT_MAX_NAMES = 2
 PROBE_MAX_LEGS = 3
 # Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
-POCKET_FROM_PROBE_MAX = 3
+POCKET_FROM_PROBE_MAX = 6
 # Мягкий выход щупа → передача во второй карман; жёсткий — продажа.
 # «дно» не передаём: цена уже у low щупа — карман2 сразу резал бы тем же дном.
 PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд"})
