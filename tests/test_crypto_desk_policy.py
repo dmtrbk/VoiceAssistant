@@ -3301,6 +3301,33 @@ class TestManualTrap(unittest.TestCase):
         self.assertEqual(len(legs), 1)
         self.assertAlmostEqual(legs[0]["entry"], 0.005)
 
+    def test_claim_journals_manual_buy_once(self):
+        from skills.crypto import journal as crypto_journal
+        from skills.crypto.common import read_second_pocket_legs
+
+        with patch.object(self.skill, "_manual_entry_px", return_value=0.01323):
+            self.skill._claim_manual_trap_legs(
+                {"DRIFT": {"ticker": "DRIFT", "qty": 3766.79, "price": 0.01323, "value": 49.83}}
+            )
+        trades = crypto_journal._read_trades()
+        buys = [row for row in trades if row.get("ticker") == "DRIFT" and row.get("side") == "buy"]
+        self.assertEqual(len(buys), 1)
+        self.assertAlmostEqual(float(buys[0]["price"]), 0.01323, places=5)
+        self.assertAlmostEqual(float(buys[0]["quote"]), 49.83, places=1)
+        with patch.object(self.skill, "_manual_entry_px", return_value=0.01323):
+            self.skill._claim_manual_trap_legs(
+                {"DRIFT": {"ticker": "DRIFT", "qty": 3766.79, "price": 0.01323, "value": 49.83}}
+            )
+        trades = crypto_journal._read_trades()
+        buys = [row for row in trades if row.get("ticker") == "DRIFT" and row.get("side") == "buy"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(len(read_second_pocket_legs()), 1)
+        pnl = crypto_journal.realized_pnl_for_sell(
+            trades, ticker="DRIFT", quote=50.14, price=0.01331
+        )
+        self.assertIsNotNone(pnl)
+        self.assertGreater(float(pnl), 0.2)
+
     def test_probe_make_room_parks_worst_leg(self):
         from skills.crypto.common import probe_legs, read_second_pocket_legs, write_probe
         from skills.crypto.settings import store as settings_store

@@ -1859,9 +1859,12 @@ class CryptoDeskMixin:
                 continue
             try:
                 px = float(row.get("price") or 0)
+                quote = float(row.get("quote") or 0)
                 q = float(row.get("qty") or 0)
             except (TypeError, ValueError):
                 continue
+            if q <= 0 and px > 0 and quote > 0:
+                q = quote / px
             if px <= 0 or q <= 0:
                 continue
             take = min(q, float(qty) - got)
@@ -1872,6 +1875,19 @@ class CryptoDeskMixin:
         if got > 0 and cost > 0:
             return cost / got
         return float(mark or 0)
+
+    def _journal_manual_buy(self, ticker: str, qty: float, entry: float) -> None:
+        """Дописать в дневник ручную покупку, если лота ещё нет — иначе продажа без pnl."""
+        coin = str(ticker or "").upper()
+        amount = float(qty or 0)
+        px = float(entry or 0)
+        if not coin or amount <= 0 or px <= 0:
+            return
+        have = float((crypto_journal.open_lots().get(coin) or {}).get("qty") or 0)
+        missing = amount - have
+        if missing * px < max(_MIN_QUOTE, ALT_HELD_MIN_USD) * 0.5:
+            return
+        self._journal_trade(coin, "Buy", missing * px, px, coin)
 
     def _claim_manual_trap_legs(
         self,
@@ -1917,10 +1933,14 @@ class CryptoDeskMixin:
                         None,
                     )
                     if book:
+                        entry = float(book.get("entry") or 0)
+                        extra = target - reserved
+                        if extra > 0 and entry > 0:
+                            self._journal_manual_buy(coin, target, entry)
                         update_second_pocket_leg(
                             coin,
                             qty=target,
-                            entry=float(book.get("entry") or 0),
+                            entry=entry,
                             low=float(book.get("low") or 0),
                             exit_high=float(book.get("exit_high") or 0),
                             exit_ts=float(book.get("exit_ts") or 0),
@@ -1937,6 +1957,7 @@ class CryptoDeskMixin:
                 max_legs=MANUAL_TRAP_MAX_LEGS,
             )
             if ok:
+                self._journal_manual_buy(coin, target, entry)
                 notes.append(f"{coin} вход {entry:.6g} qty {target:.6g}")
                 logger.info(
                     "[Крипта] ловушка вручную %s: qty %.6g вход %.6g (нужен +%.2f%%)",
