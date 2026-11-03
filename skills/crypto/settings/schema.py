@@ -34,6 +34,7 @@ class DeskSettings:
     sleeve_exit_hold_sec: float = 2 * 60
     sleeve_stop_pct: float = 4.0
     probe_on: bool = True
+    probe_paper: bool = False  # True — скан и логи, ордеров Buy нет
     probe_usd: float = 40.0
     probe_max_loss_pct: float = 8.0
     probe_shelf_range_pct: float = 12.0
@@ -77,7 +78,7 @@ _LIMITS: dict[str, tuple[float, float]] = {
 }
 
 _INT_FIELDS = frozenset({"sleeve_max_names", "pocket_from_probe_max"})
-_BOOL_FIELDS = frozenset({"probe_on", "second_on", "sleeve_on", "pocket_on"})
+_BOOL_FIELDS = frozenset({"probe_on", "probe_paper", "second_on", "sleeve_on", "pocket_on"})
 _CHOICES: dict[str, tuple[str, ...]] = {"second_ticker": ("SUI", "AVA")}
 _KEYS = {item.name for item in fields(DeskSettings)}
 
@@ -163,6 +164,7 @@ def to_payload(data: DeskSettings) -> dict[str, object]:
         },
         "probe": {
             "on": data.probe_on,
+            "paper": data.probe_paper,
             "usd": data.probe_usd,
             "max_loss_pct": data.probe_max_loss_pct,
             "shelf_range_pct": data.probe_shelf_range_pct,
@@ -214,6 +216,7 @@ def from_payload(raw: object) -> DeskSettings:
         "sleeve_exit_hold_sec": sleeve.get("exit_hold_sec"),
         "sleeve_stop_pct": sleeve.get("stop_pct"),
         "probe_on": probe.get("on"),
+        "probe_paper": probe.get("paper"),
         "probe_usd": probe.get("usd"),
         "probe_max_loss_pct": probe.get("max_loss_pct"),
         "probe_shelf_range_pct": probe.get("shelf_range_pct"),

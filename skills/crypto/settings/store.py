@@ -83,16 +83,17 @@ def status_line() -> str:
     if not data.probe_on:
         parts.append("Щуп выключен")
     else:
+        mode = "имитация" if data.probe_paper else "боевой"
         held = probe_legs(probe)
         arms = probe_arms(probe)
         if held:
             names = ", ".join(str(leg["ticker"]) for leg in held)
-            parts.append(f"Щуп держит {names}")
+            parts.append(f"Щуп {mode} держит {names}")
         if arms:
             names = ", ".join(str(arm["ticker"]) for arm in arms)
             parts.append(f"Щуп взведён {names}")
         if not held and not arms:
-            parts.append("Щуп молчит")
+            parts.append(f"Щуп {mode}")
     return " · ".join(parts)
 
 

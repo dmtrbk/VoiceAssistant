@@ -714,6 +714,16 @@ def probe_scan_ranked_rows(
     return combined[:cap]
 
 
+def probe_is_paper() -> bool:
+    """Имитация: скан, взвод и логи, ордеров Buy нет. Живые ноги продаёт как обычно."""
+    return bool(cfg().probe_on) and bool(cfg().probe_paper)
+
+
+def probe_places_buys() -> bool:
+    """Боевой щуп: настройки включены и не имитация."""
+    return bool(cfg().probe_on) and not bool(cfg().probe_paper)
+
+
 def probe_quote() -> float:
     """Щуп: базовый размер ноги из настроек (обычно 30$)."""
     return float(cfg().probe_usd)
@@ -762,7 +772,7 @@ def probe_quote_for_buy(
 
 def probe_reserve_quote(*, open_legs: int, pending: int = 0) -> float:
     """Пустой щуп резервирует один слот. Взвод или открытая нога держат место и под второй."""
-    if not cfg().probe_on:
+    if not probe_places_buys():
         return 0.0
     opened = max(0, int(open_legs))
     waiting = max(0, int(pending))

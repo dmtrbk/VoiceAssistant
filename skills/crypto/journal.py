@@ -673,3 +673,149 @@ def mark_daily_report_sent(*, now: datetime | None = None, path: str | None = No
     meta = _read_daily_meta(path)
     meta["last_report_day"] = now.strftime("%Y-%m-%d")
     _write_daily_meta(meta, path)
+
+
+_PAPER_EVENTS_KEEP = 500
+_PAPER_RELOG_SEC = 15 * 60
+
+
+def _empty_probe_paper() -> dict[str, Any]:
+    return {"open": [], "events": []}
+
+
+def read_probe_paper(path: str | None = None) -> dict[str, Any]:
+    path = path or common._PROBE_PAPER_PATH
+    empty = _empty_probe_paper()
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    open_legs = raw.get("open") if isinstance(raw.get("open"), list) else []
+    events = raw.get("events") if isinstance(raw.get("events"), list) else []
+    return {
+        "open": [item for item in open_legs if isinstance(item, dict)],
+        "events": [item for item in events if isinstance(item, dict)],
+    }
+
+
+def _write_probe_paper(payload: dict[str, Any], path: str | None = None) -> None:
+    path = path or common._PROBE_PAPER_PATH
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал имитацию щупа: %s", exc)
+
+
+def probe_paper_open_legs(path: str | None = None) -> list[dict[str, Any]]:
+    return list(read_probe_paper(path).get("open") or [])
+
+
+def probe_paper_recent(
+    ticker: str,
+    kind: str,
+    *,
+    within_sec: float = _PAPER_RELOG_SEC,
+    now: float | None = None,
+    path: str | None = None,
+) -> bool:
+    name = str(ticker or "").upper()
+    want = str(kind or "")
+    if not name or not want:
+        return False
+    now_ts = float(now if now is not None else time.time())
+    for event in reversed(read_probe_paper(path).get("events") or []):
+        if str(event.get("ticker") or "").upper() != name:
+            continue
+        if str(event.get("kind") or "") != want:
+            continue
+        ts = float(event.get("ts") or 0)
+        return now_ts - ts < float(within_sec)
+    return False
+
+
+def record_probe_paper(
+    *,
+    kind: str,
+    ticker: str,
+    algo: str = "",
+    shelf: float = 0.0,
+    price: float = 0.0,
+    quote: float = 0.0,
+    reason: str = "",
+    extra: dict[str, Any] | None = None,
+    now: float | None = None,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Журнал имитации: сетап, виртуальная покупка, виртуальный выход. Ордеров нет."""
+    payload = read_probe_paper(path)
+    name = str(ticker or "").upper()
+    ts = float(now if now is not None else time.time())
+    event: dict[str, Any] = {
+        "ts": ts,
+        "kind": str(kind or ""),
+        "ticker": name,
+        "algo": str(algo or ""),
+        "shelf": float(shelf or 0),
+        "price": float(price or 0),
+        "quote": float(quote or 0),
+        "reason": str(reason or ""),
+    }
+    if extra:
+        for key, value in extra.items():
+            if key in event or value is None:
+                continue
+            event[key] = value
+    events = list(payload.get("events") or [])
+    events.append(event)
+    payload["events"] = events[-_PAPER_EVENTS_KEEP:]
+    open_legs = [leg for leg in payload.get("open") or [] if isinstance(leg, dict)]
+    if kind == "buy" and name and float(price or 0) > 0:
+        open_legs = [leg for leg in open_legs if str(leg.get("ticker") or "").upper() != name]
+        qty = float(quote or 0) / float(price) if float(price) > 0 else 0.0
+        open_legs.append({
+            "ticker": name,
+            "qty": qty,
+            "entry": float(price),
+            "shelf": float(shelf or 0),
+            "arm_px": float((extra or {}).get("arm_px") or price),
+            "peak": float(price),
+            "low": float((extra or {}).get("low") or 0),
+            "ts": ts,
+            "algo": str(algo or ""),
+        })
+    if kind in {"exit", "drop"} and name:
+        open_legs = [leg for leg in open_legs if str(leg.get("ticker") or "").upper() != name]
+    payload["open"] = open_legs
+    _write_probe_paper(payload, path)
+    return event
+
+
+def update_probe_paper_leg(
+    ticker: str,
+    *,
+    peak: float | None = None,
+    path: str | None = None,
+) -> None:
+    name = str(ticker or "").upper()
+    if not name:
+        return
+    payload = read_probe_paper(path)
+    changed = False
+    for leg in payload.get("open") or []:
+        if str(leg.get("ticker") or "").upper() != name:
+            continue
+        if peak is not None and float(peak) > float(leg.get("peak") or 0) + 1e-12:
+            leg["peak"] = float(peak)
+            changed = True
+        break
+    if changed:
+        _write_probe_paper(payload, path)

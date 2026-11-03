@@ -125,6 +125,7 @@ class DeskSettingsWindow(QWidget):
         self._spins: dict[str, QAbstractSpinBox] = {}
         self._hints: dict[str, str] = {}
         self._probe_box: ToggleSwitch | None = None
+        self._paper_box: ToggleSwitch | None = None
         self._pocket_box: ToggleSwitch | None = None
         self._second_box: ToggleSwitch | None = None
         self._second_combo = None
@@ -268,6 +269,8 @@ QSpinBox, QDoubleSpinBox {{
             self._set_spin("cooldown_hours", data.cooldown_hours)
             if self._probe_box is not None:
                 self._probe_box.setChecked(data.probe_on)
+            if self._paper_box is not None:
+                self._paper_box.setChecked(data.probe_paper)
         finally:
             self._syncing = False
         self._refresh_alloc(data)
@@ -279,7 +282,8 @@ QSpinBox, QDoubleSpinBox {{
     def _refresh_alloc(self, data: DeskSettings) -> None:
         self._bar.set_shares(data.pocket_pct, data.probe_on)
         self._pocket_legend.setText(f"Карман <b>{data.pocket_pct:.0f}%</b>")
-        self._probe_legend.setText(f"Щуп <b>${data.probe_usd:.0f}</b>")
+        tag = "имитация" if data.probe_paper else f"${data.probe_usd:.0f}"
+        self._probe_legend.setText(f"Щуп <b>{tag}</b>")
         self._probe_legend.setVisible(data.probe_on)
 
     def _set_spin(self, key: str, value: float) -> None:
@@ -369,6 +373,17 @@ QSpinBox, QDoubleSpinBox {{
         self._probe_box = box
         row.addWidget(box, 0)
         top.insertLayout(0, row)
+        paper_row = QHBoxLayout()
+        paper_row.setContentsMargins(0, 8, 0, 0)
+        paper_name = QLabel("Имитация (без покупок)")
+        paper_name.setObjectName("rowTitle")
+        paper = ToggleSwitch()
+        paper.setChecked(False)
+        paper.toggled.connect(self._on_probe_paper_toggled)
+        self._paper_box = paper
+        paper_row.addWidget(paper_name, 1)
+        paper_row.addWidget(paper, 0)
+        col.addLayout(paper_row)
         self._probe_fields = QFrame()
         self._probe_fields.setObjectName("cardRow")
         fields = QVBoxLayout(self._probe_fields)
@@ -554,9 +569,30 @@ QSpinBox, QDoubleSpinBox {{
         self._set_probe_enabled(data.probe_on)
         self._refresh_alloc(data)
         self._status.setText(status_line())
-        self._hint.setText("Щуп сканирует ленту." if data.probe_on else "Щуп выключен.")
+        if not data.probe_on:
+            hint = "Щуп выключен."
+        elif data.probe_paper:
+            hint = "Имитация: скан и логи, ордеров нет. Живые ноги продаёт как обычно."
+        else:
+            hint = "Боевой щуп: сканирует ленту и покупает."
+        self._hint.setText(hint)
+
+    def _on_probe_paper_toggled(self, checked: bool) -> None:
+        if self._syncing:
+            return
+        update(probe_paper=checked)
+        data = current()
+        self._refresh_alloc(data)
+        self._status.setText(status_line())
+        self._hint.setText(
+            "Имитация: скан и логи, ордеров нет. Живые ноги продаёт как обычно."
+            if data.probe_paper
+            else "Боевой щуп: сканирует ленту и покупает."
+        )
 
     def _set_probe_enabled(self, on: bool) -> None:
+        if self._paper_box is not None:
+            self._paper_box.setEnabled(on)
         for key in (
             "probe_usd",
             "probe_max_loss_pct",

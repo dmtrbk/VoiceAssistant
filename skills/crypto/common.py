@@ -56,6 +56,7 @@ _BTC_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_btc_dip.json")
 _SUI_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_ava_dip.json")
 _SECOND_POCKET_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_second_pocket.json")
 _PROBE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe.json")
+_PROBE_PAPER_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe_paper.json")
 _ENTRY_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_entry_arm.json")
 _ANCHOR_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_anchor.json")
 
