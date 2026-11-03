@@ -608,7 +608,7 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             0,
         )
-        # Днём пропускаем оборот ≥ $150k, тонкий стакан < $150k отсекаем; ночью — ≥ $1.5M.
+        # Днём пропускаем оборот ≥ $150k, тонкий стакан < $150k отсекаем; ночью — ≥ $250k.
         self.assertGreater(
             policy.probe_scan_rank({
                 "chg": 2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 300_000,
@@ -633,11 +633,17 @@ class TestDeskPolicy(unittest.TestCase):
         day_ts = datetime(2026, 10, 31, 14, 0, tzinfo=yekt).timestamp()
         night_ts = datetime(2026, 10, 31, 23, 0, tzinfo=yekt).timestamp()
         self.assertEqual(policy.probe_min_turnover_usd(day_ts), 150_000.0)
-        self.assertEqual(policy.probe_min_turnover_usd(night_ts), 1_500_000.0)
+        self.assertEqual(policy.probe_min_turnover_usd(night_ts), 250_000.0)
         self.assertFalse(policy.probe_night_halted(day_ts))
         self.assertTrue(policy.probe_night_halted(night_ts))
-        self.assertTrue(
+        self.assertFalse(
             policy.probe_night_halted(datetime(2026, 10, 31, 21, 0, tzinfo=yekt).timestamp())
+        )
+        self.assertFalse(
+            policy.probe_night_halted(datetime(2026, 10, 31, 22, 59, tzinfo=yekt).timestamp())
+        )
+        self.assertTrue(
+            policy.probe_night_halted(datetime(2026, 10, 31, 23, 0, tzinfo=yekt).timestamp())
         )
         self.assertFalse(
             policy.probe_night_halted(datetime(2026, 10, 31, 20, 59, tzinfo=yekt).timestamp())
@@ -664,16 +670,26 @@ class TestDeskPolicy(unittest.TestCase):
         night_candle = {"shelf": 1.0, "price": 1.01, "algo": "candle"}
         self.assertTrue(policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=200_000))
         self.assertTrue(
-            policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=1_500_000)
+            policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=250_000)
         )
         self.assertFalse(
-            policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=400_000)
+            policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=200_000)
         )
         self.assertFalse(
             policy.probe_setup_ok_now(night_candle, now=night_ts, turnover=5_000_000)
         )
+        night_spark = {"shelf": 1.0, "price": 1.01, "spark": 1.0, "algo": "spark"}
+        self.assertTrue(
+            policy.probe_setup_ok_now(night_spark, now=night_ts, turnover=250_000)
+        )
+        self.assertFalse(
+            policy.probe_setup_ok_now(night_spark, now=night_ts, turnover=200_000)
+        )
         self.assertFalse(
             policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=200_000, strict=True)
+        )
+        self.assertFalse(
+            policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=400_000, strict=True)
         )
         self.assertTrue(
             policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=1_500_000, strict=True)
@@ -876,8 +892,41 @@ class TestDeskPolicy(unittest.TestCase):
                 rising["close"], rising["high"], rising["low"], rising["open"]
             )
         )
-        # Одиночная 5м свеча выключена — ложные полки. Живой вход только stair/flag.
+        # Одиночная 5м в candle выключена; spark — только первые 1–2 мин, pos до 0.90.
         self.assertIsNone(policy.probe_candle_setup(base5 + [rising]))
+        spark_early = {**rising, "ts": 1000.0, "close": 1.010, "high": 1.012, "volume": 25.0}
+        self.assertIsNotNone(policy.probe_spark_setup(base5 + [spark_early], now=1060.0))
+        self.assertIsNone(policy.probe_spark_setup(base5 + [spark_early], now=1130.0))
+        self.assertIsNone(policy.probe_spark_setup(base5 + [spark_early]))
+        spark_pick = policy.probe_pick_setup(
+            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+            base5 + [spark_early],
+            day_chg=8.0,
+            day_high=1.04,
+            now=1060.0,
+        )
+        self.assertIsNotNone(spark_pick)
+        assert spark_pick is not None
+        self.assertEqual(spark_pick["algo"], policy.PROBE_ALGO_SPARK)
+        self.assertEqual(spark_pick.get("spark"), 1.0)
+        # Перегрев 30м режет candle/stair, spark — нет.
+        heat = [
+            {"open": 1.0, "high": 1.002, "low": 0.998, "close": 1.0, "volume": 10.0}
+            for _ in range(8)
+        ] + [
+            {"open": 0.980, "high": 0.982, "low": 0.978, "close": 0.980, "volume": 10.0}
+            for _ in range(6)
+        ]
+        heat_bar = {
+            "open": 1.0,
+            "high": 1.012,
+            "low": 0.999,
+            "close": 1.010,
+            "volume": 25.0,
+            "ts": 1000.0,
+        }
+        self.assertIsNone(policy.probe_candle_setup(heat + [heat_bar], now=1060.0))
+        self.assertIsNotNone(policy.probe_spark_setup(heat + [heat_bar], now=1060.0))
         collapsed_wick = {**rising, "close": 1.006, "high": 1.020}
         self.assertIsNone(policy.probe_candle_setup(base5 + [collapsed_wick]))
         tip_candle = {**rising, "close": 1.011, "high": 1.012}
@@ -958,7 +1007,11 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.probe_daily_loss_blocked(-6.0))
         self.assertEqual(
             policy.PROBE_ALGO_ORDER,
-            (policy.PROBE_ALGO_CANDLE, policy.PROBE_ALGO_IMPULSE),
+            (
+                policy.PROBE_ALGO_CANDLE,
+                policy.PROBE_ALGO_IMPULSE,
+                policy.PROBE_ALGO_SPARK,
+            ),
         )
         self.assertNotIn(policy.PROBE_ALGO_GRIND, policy.PROBE_ALGO_ORDER)
         self.assertGreaterEqual(policy.PROBE_CANDLE_MIN_BODY_PCT, 0.6)

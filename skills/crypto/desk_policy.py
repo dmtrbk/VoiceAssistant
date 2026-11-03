@@ -87,10 +87,12 @@ _live_extra: set[str] = set()
 # Щуп: 40$ на пробой тихой полки / свечи. Не слот рукава и не карман.
 PROBE_USD = 40.0
 # Днём берём монеты с оборотом ≥ $150k (тонкий стакан <$150k на живых сделках дал 1W/11L и -$5.62).
-# Ночь 21:00–06:00 YEKT — не молчать: только stair/flag, оборот ≥ $1.5M, OBI ≥ 0.55 (STX/ZRO да, UNI/BEAM нет).
+# Ночь 23:00–06:00 YEKT: только stair/flag/impulse/spark, оборот ≥ $250k.
+# Вечер 21–23 — как день. Жёсткий режим после убытков — по-прежнему ≥ $1.5M.
 PROBE_MIN_TURNOVER_USD = 150_000.0
-PROBE_NIGHT_MIN_TURNOVER_USD = 1_500_000.0
-PROBE_NIGHT_START_HOUR_YEKT = 21
+PROBE_NIGHT_MIN_TURNOVER_USD = 250_000.0
+PROBE_STRICT_MIN_TURNOVER_USD = 1_500_000.0
+PROBE_NIGHT_START_HOUR_YEKT = 23
 PROBE_NIGHT_END_HOUR_YEKT = 6
 # Защита от падающего рынка и каскада стопов:
 PROBE_BTC_MAX_DROP_DAY_PCT = -2.5
@@ -142,10 +144,12 @@ PROBE_SHELF_BARS = 96
 # Impulse/sprint/shelf сегодня: CPOOL/HYPE — поздний вход и срез за минуты.
 PROBE_ALGO_CANDLE = "candle"
 PROBE_ALGO_IMPULSE = "impulse"
+PROBE_ALGO_SPARK = "spark"
 PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
-PROBE_ALGO_ORDER = (PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE)
+# База — ступенька/флаг; выстрел — impulse; spark — старт 5м в первые 1–2 минуты.
+PROBE_ALGO_ORDER = (PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK)
 # 5м зелёная свеча: ловим начало восходящей свечи от open, без верхнего фитиля (слива).
 PROBE_CANDLE_LOOKBACK = 12
 # 0,25% ловил шум (CSPR/BICO +0,5%). INIT был +0,67…1,3% от open.
@@ -226,6 +230,12 @@ PROBE_IMPULSE_MAX_DAY_PCT = 35.0
 # Живая свеча выстрела идёт у хая — не требовать середину бара, только не кончик.
 PROBE_IMPULSE_MAX_BAR_POS = 0.95
 PROBE_IMPULSE_TIP_GAP_PCT = 0.20
+# Spark: одиночная 5м только в начале бара (не дубль ступеньки на 4–5-й минуте).
+# Pos до 0.90; без потолка 30м +2.2%; tip-gap не режем — иначе pos 0.90 сам себе мешает.
+PROBE_SPARK_MAX_ELAPSED_SEC = 120.0
+PROBE_SPARK_MAX_BAR_POS = 0.90
+PROBE_SPARK_HOLD_SEC = 1.0
+PROBE_SPARK_CHASE_PCT = 1.2
 # Grind: горячее candle нельзя; у хая дня (+25%) — уже догон.
 PROBE_GRIND_MAX_DAY_PCT = 18.0
 # Лестница: ближе к началу хода, не только у самого хая. Свежий пробой +4% — не grind.
@@ -316,7 +326,7 @@ def probe_period_sec() -> float:
 def probe_scan_algo_order() -> tuple[str, ...]:
     tier = probe_tune_tier()
     if tier >= 3:
-        return (PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE)
+        return (PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK)
     return PROBE_ALGO_ORDER
 
 
@@ -605,7 +615,7 @@ def probe_should_handoff(reason: str | None) -> bool:
 
 
 def probe_night_halted(now: float | None = None) -> bool:
-    """Ночное окно щупа 21:00–06:00 YEKT: не стоп, а узкий фильтр (stair/flag + $1.5M)."""
+    """Ночное окно щупа 23:00–06:00 YEKT: не стоп, а узкий фильтр (сильный сетап + $250k)."""
     ts = time.time() if now is None else float(now)
     hr = datetime.fromtimestamp(ts, _YEKT).hour
     return hr >= PROBE_NIGHT_START_HOUR_YEKT or hr < PROBE_NIGHT_END_HOUR_YEKT
@@ -644,7 +654,7 @@ def probe_setup_ok_now(
     turnover: float | None = None,
     strict: bool = False,
 ) -> bool:
-    """Ночь и жёсткий режим: только ступенька/флаг/выстрел и оборот ≥ $1.5M."""
+    """Ночь: сильный сетап и ≥ $250k. Жёсткий режим: то же и ≥ $1.5M."""
     if not setup:
         return False
     if not strict and not probe_night_halted(now):
@@ -652,6 +662,7 @@ def probe_setup_ok_now(
     strong = (
         float(setup.get("stair") or 0) >= 1.0 - 1e-12
         or float(setup.get("impulse") or 0) >= 1.0 - 1e-12
+        or float(setup.get("spark") or 0) >= 1.0 - 1e-12
     )
     if not strong:
         return False
@@ -659,12 +670,15 @@ def probe_setup_ok_now(
         turn = float(turnover) if turnover is not None else 0.0
     except (TypeError, ValueError):
         turn = 0.0
-    return turn >= float(PROBE_NIGHT_MIN_TURNOVER_USD) - 1e-9
+    floor = PROBE_STRICT_MIN_TURNOVER_USD if strict else PROBE_NIGHT_MIN_TURNOVER_USD
+    return turn >= float(floor) - 1e-9
 
 
 def probe_min_turnover_usd(now: float | None = None, *, strict: bool = False) -> float:
-    """Порог оборота: днём $150k; ночь и жёсткий режим — $1.5M."""
-    if strict or (now is not None and probe_night_halted(now)):
+    """Порог оборота: день $150k, ночь $250k, жёсткий режим $1.5M."""
+    if strict:
+        return float(PROBE_STRICT_MIN_TURNOVER_USD)
+    if now is not None and probe_night_halted(now):
         return float(PROBE_NIGHT_MIN_TURNOVER_USD)
     return float(PROBE_MIN_TURNOVER_USD)
 
@@ -1003,6 +1017,85 @@ def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_o
         if pos < PROBE_CANDLE_MIN_BAR_POS - 1e-12 or pos > PROBE_CANDLE_MAX_BAR_POS + 1e-12:
             return False
     return True
+
+
+def probe_spark_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
+    """Первые 1–2 мин 5м: тело 0.6..2.0%, pos до 0.90, без слива под open."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or lo <= 0 or op <= 0 or hi < lo:
+        return False
+    if px <= op + 1e-12:
+        return False
+    body = (px / op - 1.0) * 100.0
+    min_body = probe_candle_min_body_pct()
+    if body < min_body or body > PROBE_CANDLE_MAX_BODY_PCT + 1e-12:
+        return False
+    upper_wick = (hi - px) / op * 100.0
+    if upper_wick > PROBE_CANDLE_MAX_WICK_PCT + 1e-12:
+        return False
+    if lo < op:
+        dip = (op - lo) / op * 100.0
+        if dip > PROBE_CANDLE_MAX_DIP_PCT + 1e-12:
+            return False
+    span = hi - lo
+    if span > 1e-12:
+        pos = (px - lo) / span
+        if pos < PROBE_CANDLE_MIN_BAR_POS - 1e-12 or pos > PROBE_SPARK_MAX_BAR_POS + 1e-12:
+            return False
+    return True
+
+
+def probe_spark_buy_ok(
+    price: float,
+    live_high: float,
+    live_low: float,
+    live_open: float,
+    *,
+    elapsed_sec: float | None = None,
+) -> bool:
+    """Перед buy spark: окно 2 мин ещё живо и свеча не слилась."""
+    if elapsed_sec is not None and float(elapsed_sec) > PROBE_SPARK_MAX_ELAPSED_SEC + 1e-12:
+        return False
+    return probe_spark_live_ok(price, live_high, live_low, live_open)
+
+
+def probe_spark_setup(
+    bars: list[dict[str, Any]],
+    *,
+    now: float | None = None,
+) -> dict[str, float] | None:
+    """Одиночная 5м в первые 1–2 минуты бара. Без потолка 30м +2.2%."""
+    if now is None or len(bars) < PROBE_CANDLE_LOOKBACK + 2:
+        return None
+    forming = bars[-1]
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        bar_ts = float(forming.get("ts") or 0)
+        vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if bar_ts <= 0 or not vols:
+        return None
+    elapsed = float(now) - bar_ts
+    if elapsed < 0.0 or elapsed > PROBE_SPARK_MAX_ELAPSED_SEC + 1e-12:
+        return None
+    typical = _median(vols)
+    if typical <= 0:
+        return None
+    elapsed_frac = max(PROBE_CANDLE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
+    if vol < typical * PROBE_CANDLE_VOL_MULT * elapsed_frac:
+        return None
+    if not probe_spark_live_ok(px, hi, lo, op):
+        return None
+    return {"shelf": op, "price": px, "spark": 1.0}
 
 
 def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
@@ -1538,6 +1631,11 @@ def probe_algo_params(algo: str) -> dict[str, float]:
             "hold_sec": float(PROBE_IMPULSE_HOLD_SEC),
             "chase_pct": float(PROBE_IMPULSE_CHASE_PCT),
         }
+    if name == PROBE_ALGO_SPARK:
+        return {
+            "hold_sec": float(PROBE_SPARK_HOLD_SEC),
+            "chase_pct": float(PROBE_SPARK_CHASE_PCT),
+        }
     if name == PROBE_ALGO_SPRINT:
         return {
             "hold_sec": float(PROBE_SPRINT_HOLD_SEC),
@@ -1563,7 +1661,7 @@ def probe_pick_setup(
     day_high: float | None = None,
     now: float | None = None,
 ) -> dict[str, Any] | None:
-    """Первый сработавший по order. Живой стол: ступенька/флаг, затем выстрел с базы.
+    """Первый сработавший по order. Живой стол: ступенька, выстрел, spark.
 
     Sprint/shelf/grind — только явный order= в тестах.
     """
@@ -1593,6 +1691,15 @@ def probe_pick_setup(
                 continue
         elif name == PROBE_ALGO_IMPULSE:
             setup = probe_impulse_setup(bars5 or [])
+        elif name == PROBE_ALGO_SPARK:
+            setup = probe_spark_setup(bars5 or [], now=now)
+            if setup and not probe_candle_day_ok(
+                price=float(setup.get("price") or 0),
+                day_high=float(day_high or 0),
+                day_chg=day_chg,
+                stair=False,
+            ):
+                continue
         elif name == PROBE_ALGO_GRIND:
             setup = probe_grind_setup(bars15)
         elif name == PROBE_ALGO_SPRINT:
@@ -1622,7 +1729,7 @@ def probe_trends_ok(
     Candle: 15м может быть ещё neutral в начале свечи — лишь бы не bear.
     """
     name = str(algo or "").strip().lower()
-    if name == PROBE_ALGO_CANDLE:
+    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}:
         if trend15 == "bear" or trend1h == "bear":
             return False
         if trend15 != "bull" and trend1h != "bull":
@@ -1657,7 +1764,7 @@ def probe_arm_action(
     if shelf <= 0 or price <= shelf:
         return "drop"
     # Candle допускает neutral 15м (как на скане); bear — снять.
-    if name == PROBE_ALGO_CANDLE:
+    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}:
         if trend15 == "bear":
             return "drop"
     elif trend15 != "bull":
@@ -1668,7 +1775,7 @@ def probe_arm_action(
         and float(day_chg) >= PROBE_IMPULSE_MAX_DAY_PCT
     ):
         return "drop"
-    if name == PROBE_ALGO_CANDLE and day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
+    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK} and day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
         return "drop"
     if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
         return "drop"
@@ -1716,7 +1823,7 @@ def probe_exit_reason(
         return "стоп"
     if level > 0 and px <= level:
         # Candle: INIT держался над open. Фитиль к open не продаём — только пробой.
-        if name == PROBE_ALGO_CANDLE:
+        if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}:
             floor = level * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0)
             if px <= floor + 1e-12:
                 return "полка"
@@ -1750,6 +1857,7 @@ def probe_exit_reason(
     footboard = name in {
         PROBE_ALGO_CANDLE,
         PROBE_ALGO_IMPULSE,
+        PROBE_ALGO_SPARK,
         PROBE_ALGO_SPRINT,
         PROBE_ALGO_GRIND,
     }
@@ -1761,7 +1869,7 @@ def probe_exit_reason(
             return "ожидание"
     # candle/grind: купить рост → ждать ловушку → продать. Soft «тренд» не режем
     # (BLEND: −0.3% bear → handoff → потом +20%). Только полка / стоп / вершина.
-    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_GRIND}:
+    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_GRIND}:
         return None
     if run and trend15 == "bear":
         return "тренд"

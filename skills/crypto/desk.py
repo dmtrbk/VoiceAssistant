@@ -60,6 +60,7 @@ from .desk_policy import (
     probe_entry_obi_floor,
     probe_exit_reason,
     probe_candle_buy_ok,
+    probe_spark_buy_ok,
     probe_candle_day_ok,
     probe_scan_day_ok,
     probe_daily_loss_blocked,
@@ -67,6 +68,7 @@ from .desk_policy import (
     probe_should_handoff,
     PROBE_ALGO_CANDLE,
     PROBE_ALGO_IMPULSE,
+    PROBE_ALGO_SPARK,
     PROBE_ALGO_GRIND,
     probe_max_legs,
     probe_setup_ok_now,
@@ -1183,7 +1185,7 @@ class CryptoDeskMixin:
                     float(live.get("low") or 0),
                 )
                 return
-        if str(algo or "") == PROBE_ALGO_CANDLE:
+        if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}:
             # Актуальных 5м: buy_ok мягче live_ok — иначе hold убивает вход (CPOOL).
             try:
                 bars5 = self._probe_bars(ticker, "5", 20, cache_sec=2.0)
@@ -1217,19 +1219,26 @@ class CryptoDeskMixin:
                 return
             if ask > 0:
                 check_px = max(price, ask)
-            if not probe_candle_buy_ok(
-                check_px,
-                max(float(live.get("high") or 0), check_px),
-                float(live.get("low") or 0),
-                float(live.get("open") or 0),
-            ):
+            live_hi = max(float(live.get("high") or 0), check_px)
+            live_lo = float(live.get("low") or 0)
+            live_op = float(live.get("open") or 0)
+            if str(algo or "") == PROBE_ALGO_SPARK:
+                bar_ts = float(live.get("ts") or 0)
+                elapsed = (time.time() - bar_ts) if bar_ts > 0 else None
+                tip_ok = probe_spark_buy_ok(
+                    check_px, live_hi, live_lo, live_op, elapsed_sec=elapsed
+                )
+            else:
+                tip_ok = probe_candle_buy_ok(check_px, live_hi, live_lo, live_op)
+            if not tip_ok:
                 write_probe(drop_arm=ticker)
                 logger.info(
-                    "[Крипта] щуп %s снят (candle tip): сейчас %.4g open %.4g high %.4g",
+                    "[Крипта] щуп %s снят (%s tip): сейчас %.4g open %.4g high %.4g",
                     ticker,
+                    algo or "candle",
                     check_px,
-                    float(live.get("open") or 0),
-                    float(live.get("high") or 0),
+                    live_op,
+                    live_hi,
                 )
                 return
         obi = None
@@ -1253,7 +1262,11 @@ class CryptoDeskMixin:
             arm_px=float(state.get("arm_px") or price),
             entry_low=float(bars[-1].get("low") or 0) if bars else 0.0,
             algo=algo or "shelf",
-            note={"obi": obi, "bid": bid if str(algo or "") == PROBE_ALGO_CANDLE else None, "ask": ask if str(algo or "") == PROBE_ALGO_CANDLE else None},
+            note={
+                "obi": obi,
+                "bid": bid if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK} else None,
+                "ask": ask if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK} else None,
+            },
         )
 
     def _probe_park_in_pocket2(self, leg: dict[str, Any], *, reason: str) -> bool:
@@ -1709,10 +1722,12 @@ class CryptoDeskMixin:
         ranked = probe_scan_ranked_rows(
             candidates,
             now=time.time(),
-            min_turnover=probe_min_turnover_usd(strict=strict),
+            min_turnover=probe_min_turnover_usd(now=time.time(), strict=strict),
         )
         order = probe_scan_algo_order()
-        classic = tuple(a for a in order if a != PROBE_ALGO_CANDLE)
+        classic = tuple(
+            a for a in order if a not in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}
+        )
 
         def _arm_slots_left() -> int:
             left = cap - len(probe_legs()) - len(probe_arms())
@@ -1755,7 +1770,11 @@ class CryptoDeskMixin:
             setup = probe_pick_setup(
                 [],
                 bars5,
-                order=(PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE),
+                order=tuple(
+                    a
+                    for a in order
+                    if a in {PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK}
+                ),
                 day_chg=float(row.get("chg") or 0),
                 day_high=float(row.get("high") or 0),
                 now=time.time(),
