@@ -148,6 +148,19 @@ PROBE_ARMED_PERIOD_SEC = 6
 PROBE_REENTRY_HOURS = 0.75
 # Если цена уже выше продажи на этот % — блок снимаем (продолжение хода).
 PROBE_REENTRY_BREAKOUT_PCT = 2.5
+# Мягкий автопин: 1 слот сначала смотрит лидера суток, не занимает его вхолостую.
+PROBE_PIN_ON = True
+PROBE_PIN_MIN_TURNOVER_USD = 1_500_000.0
+PROBE_PIN_MIN_DAY_PCT = 8.0
+PROBE_PIN_MAX_DAY_PCT = 30.0
+PROBE_PIN_MIN_ROOM_PCT = 1.5
+PROBE_PIN_MAX_ROOM_PCT = 10.0
+PROBE_PIN_DROP_ROOM_PCT = 0.5
+PROBE_PIN_HOLD_SEC = 45 * 60
+PROBE_PIN_MAX_HOLD_SEC = 90 * 60
+PROBE_PIN_TOP_N = 30
+PROBE_PIN_LOSS_LOOKBACK_SEC = 6 * 3600
+PROBE_PIN_SWITCH_SCORE_MULT = 1.15
 PROBE_EMA_FAST = 20
 PROBE_EMA_SLOW = 50
 PROBE_SHELF_BARS = 96
@@ -836,6 +849,201 @@ def probe_scan_ranked_rows(
     prime.sort(key=lambda item: (float(item[1].get("turnover") or 0), item[0]), reverse=True)
     combined = head + prime + other
     return combined[:cap]
+
+
+def probe_pin_room_pct(row: dict[str, Any] | None) -> float:
+    """Запас до хая суток, %."""
+    if not isinstance(row, dict):
+        return -1.0
+    try:
+        price = float(row.get("price") or 0)
+        high = float(row.get("high") or 0)
+    except (TypeError, ValueError):
+        return -1.0
+    if price <= 0 or high <= 0:
+        return -1.0
+    return (high - price) / high * 100.0
+
+
+def probe_day_ranks(rows: list[dict[str, Any]] | None) -> dict[str, int]:
+    """Место по росту за 24ч среди ликвидных имён (1 — лидер)."""
+    ranked: list[tuple[float, str]] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker or ticker in seen or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+            continue
+        try:
+            chg = float(row.get("chg") or 0)
+            turn = float(row.get("turnover") or 0)
+            price = float(row.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if turn < PROBE_MIN_TURNOVER_USD or price <= 0:
+            continue
+        seen.add(ticker)
+        ranked.append((chg, ticker))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return {ticker: index + 1 for index, (_chg, ticker) in enumerate(ranked)}
+
+
+def probe_pin_row_ok(row: dict[str, Any] | None) -> bool:
+    """Кандидат пина: ликвидный продолжатель, не парабола и не у самого хая."""
+    if not isinstance(row, dict):
+        return False
+    ticker = str(row.get("ticker") or "").upper()
+    if not ticker or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+        return False
+    try:
+        chg = float(row.get("chg") or 0)
+        turn = float(row.get("turnover") or 0)
+        price = float(row.get("price") or 0)
+    except (TypeError, ValueError):
+        return False
+    if price <= 0 or turn < PROBE_PIN_MIN_TURNOVER_USD - 1e-9:
+        return False
+    if chg < PROBE_PIN_MIN_DAY_PCT - 1e-12 or chg > PROBE_PIN_MAX_DAY_PCT + 1e-12:
+        return False
+    room = probe_pin_room_pct(row)
+    return PROBE_PIN_MIN_ROOM_PCT - 1e-12 <= room <= PROBE_PIN_MAX_ROOM_PCT + 1e-12
+
+
+def probe_pin_score(row: dict[str, Any], *, rank: int) -> float:
+    """Скор пина: место в топе + рост + воздух до хая + оборот сверх пола."""
+    try:
+        chg = float(row.get("chg") or 0)
+        turn = float(row.get("turnover") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    span = max(1e-9, PROBE_PIN_MAX_DAY_PCT - PROBE_PIN_MIN_DAY_PCT)
+    room_span = max(1e-9, PROBE_PIN_MAX_ROOM_PCT - PROBE_PIN_MIN_ROOM_PCT)
+    rank_pts = max(0.0, (PROBE_PIN_TOP_N - int(rank) + 1) / PROBE_PIN_TOP_N) * 40.0
+    chg_pts = max(0.0, min(1.0, (chg - PROBE_PIN_MIN_DAY_PCT) / span)) * 25.0
+    room_pts = max(0.0, min(1.0, (probe_pin_room_pct(row) - PROBE_PIN_MIN_ROOM_PCT) / room_span)) * 25.0
+    turn_pts = max(0.0, min(10.0, (turn / PROBE_PIN_MIN_TURNOVER_USD - 1.0) * 2.0))
+    return rank_pts + chg_pts + room_pts + turn_pts
+
+
+def probe_pin_hard_drop_reason(
+    row: dict[str, Any] | None,
+    *,
+    ticker: str,
+    rank: int | None,
+    lost: set[str] | None = None,
+) -> str | None:
+    """Снять пин сразу: срез, нет воздуха, выпал из топа, тонкий стакан, перегрев."""
+    name = str(ticker or "").upper()
+    if not name:
+        return "пусто"
+    if lost and name in lost:
+        return "убыток щупа"
+    if not isinstance(row, dict):
+        return "нет в ленте"
+    try:
+        chg = float(row.get("chg") or 0)
+        turn = float(row.get("turnover") or 0)
+    except (TypeError, ValueError):
+        return "нет в ленте"
+    if turn < PROBE_MIN_TURNOVER_USD - 1e-9:
+        return "оборот"
+    if chg >= PROBE_CANDLE_MAX_DAY_PCT - 1e-12:
+        return "перегрев"
+    if probe_pin_room_pct(row) < PROBE_PIN_DROP_ROOM_PCT - 1e-12:
+        return "нет воздуха"
+    if rank is None or int(rank) > PROBE_PIN_TOP_N:
+        return "вне топа"
+    return None
+
+
+def probe_choose_pin(
+    rows: list[dict[str, Any]] | None,
+    current: dict[str, Any] | None = None,
+    *,
+    now: float,
+    lost: set[str] | None = None,
+    skip: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Выбрать или удержать мягкий пин. Пусто — бродячие слоты как обычно."""
+    if not PROBE_PIN_ON:
+        return None
+    lost_names = {str(name).upper() for name in (lost or set()) if name}
+    skip_names = {str(name).upper() for name in (skip or set()) if name}
+    ranks = probe_day_ranks(rows)
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker:
+            by_ticker[ticker] = row
+    scored: list[tuple[float, str, dict[str, Any]]] = []
+    for ticker, row in by_ticker.items():
+        if ticker in lost_names or ticker in skip_names:
+            continue
+        rank = ranks.get(ticker)
+        if rank is None or rank > PROBE_PIN_TOP_N:
+            continue
+        if not probe_pin_row_ok(row):
+            continue
+        scored.append((probe_pin_score(row, rank=rank), ticker, row))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    cur = current if isinstance(current, dict) else {}
+    cur_ticker = str(cur.get("ticker") or "").upper()
+    try:
+        cur_ts = float(cur.get("ts") or 0)
+        cur_score = float(cur.get("score") or 0)
+    except (TypeError, ValueError):
+        cur_ts = 0.0
+        cur_score = 0.0
+    age = (float(now) - cur_ts) if cur_ticker and cur_ts > 0 else 1e18
+    cur_row = by_ticker.get(cur_ticker)
+    cur_rank = ranks.get(cur_ticker)
+    forced = bool(cur.get("forced"))
+    if cur_ticker and forced and age < PROBE_PIN_HOLD_SEC:
+        try:
+            turn = float((cur_row or {}).get("turnover") or 0)
+        except (TypeError, ValueError):
+            turn = 0.0
+        if isinstance(cur_row, dict) and turn >= PROBE_MIN_TURNOVER_USD - 1e-9:
+            return {
+                "ticker": cur_ticker,
+                "ts": cur_ts,
+                "score": cur_score,
+                "forced": True,
+            }
+    drop = (
+        probe_pin_hard_drop_reason(cur_row, ticker=cur_ticker, rank=cur_rank, lost=lost_names)
+        if cur_ticker
+        else "пусто"
+    )
+    if cur_ticker and cur_ticker not in skip_names and drop is None:
+        if age < PROBE_PIN_HOLD_SEC:
+            return {
+                "ticker": cur_ticker,
+                "ts": cur_ts,
+                "score": cur_score or probe_pin_score(cur_row or {}, rank=int(cur_rank or PROBE_PIN_TOP_N)),
+            }
+        if age < PROBE_PIN_MAX_HOLD_SEC:
+            best = scored[0] if scored else None
+            keep_score = cur_score or probe_pin_score(
+                cur_row or {}, rank=int(cur_rank or PROBE_PIN_TOP_N)
+            )
+            if (
+                best is None
+                or best[1] == cur_ticker
+                or best[0] <= keep_score * PROBE_PIN_SWITCH_SCORE_MULT
+            ):
+                return {"ticker": cur_ticker, "ts": cur_ts, "score": keep_score}
+
+    if not scored:
+        return None
+    score, ticker, _row = scored[0]
+    if ticker == cur_ticker and cur_ts > 0:
+        return {"ticker": ticker, "ts": cur_ts, "score": score}
+    return {"ticker": ticker, "ts": float(now), "score": score}
 
 
 def probe_is_paper() -> bool:

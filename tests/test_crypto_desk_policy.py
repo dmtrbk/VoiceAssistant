@@ -1876,6 +1876,66 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         cool = crypto_journal.cooldown_tickers(12.0, trades, now=now)
         self.assertNotIn("BTC", cool)
 
+    def test_probe_auto_pin_picks_continuation_not_parabolic(self):
+        now = 1_800_000_000.0
+        rows = [
+            {"ticker": "KOR", "chg": 448.0, "turnover": 1_860_000, "price": 0.4, "high": 0.95},
+            {"ticker": "CAP", "chg": 26.1, "turnover": 6_050_000, "price": 0.093, "high": 0.0956},
+            {"ticker": "ARX", "chg": 25.5, "turnover": 3_590_000, "price": 0.28, "high": 0.2966},
+            {"ticker": "ELSA", "chg": 24.6, "turnover": 1_410_000, "price": 0.077, "high": 0.0771},
+            {"ticker": "PYBOBO", "chg": 24.0, "turnover": 1_450_000, "price": 0.0005, "high": 0.000605},
+        ]
+        self.assertTrue(policy.probe_pin_row_ok(rows[2]))
+        self.assertTrue(policy.probe_pin_row_ok(rows[1]))
+        self.assertFalse(policy.probe_pin_row_ok(rows[0]))
+        self.assertFalse(policy.probe_pin_row_ok(rows[3]))
+        picked = policy.probe_choose_pin(rows, None, now=now, lost=set())
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked["ticker"], "ARX")
+        lost_arx = policy.probe_choose_pin(rows, picked, now=now + 60, lost={"ARX", "PYBOBO"})
+        self.assertEqual(lost_arx["ticker"] if lost_arx else "", "CAP")
+        held = policy.probe_choose_pin(
+            rows,
+            {"ticker": "ARX", "ts": now, "score": 50.0},
+            now=now + 20 * 60,
+            lost=set(),
+        )
+        self.assertEqual(held["ticker"] if held else "", "ARX")
+        dropped = policy.probe_choose_pin(
+            rows,
+            {"ticker": "ELSA", "ts": now, "score": 40.0},
+            now=now + 60,
+            lost=set(),
+        )
+        self.assertNotEqual(dropped["ticker"] if dropped else "", "ELSA")
+        forced = policy.probe_choose_pin(
+            rows,
+            {"ticker": "KOR", "ts": now, "score": 0.0, "forced": True},
+            now=now + 20 * 60,
+            lost=set(),
+        )
+        self.assertEqual(forced["ticker"] if forced else "", "KOR")
+        after = policy.probe_choose_pin(
+            rows,
+            {"ticker": "KOR", "ts": now, "score": 0.0, "forced": True},
+            now=now + 46 * 60,
+            lost=set(),
+        )
+        self.assertEqual(after["ticker"] if after else "", "ARX")
+
+    def test_probe_recent_loss_tickers_for_pin(self):
+        now = 1_800_000_000.0
+        trades = [
+            {"ticker": "BEAM", "side": "buy", "quote": 40.0, "price": 0.005, "ts_epoch": now - 8000},
+            {"ticker": "BEAM", "side": "sell", "quote": 38.8, "price": 0.00485, "ts_epoch": now - 100},
+            {"ticker": "CAP", "side": "buy", "quote": 40.0, "price": 0.08, "ts_epoch": now - 8000},
+            {"ticker": "CAP", "side": "sell", "quote": 41.7, "price": 0.0834, "ts_epoch": now - 90},
+        ]
+        lost = crypto_journal.probe_recent_loss_tickers(now=now, trades=trades)
+        self.assertIn("BEAM", lost)
+        self.assertNotIn("CAP", lost)
+
     def test_probe_reentry_blocks_recent_sell(self):
         now = time.time()
         trades = [

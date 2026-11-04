@@ -727,6 +727,58 @@ def recently_sold(
     return out
 
 
+def probe_recent_loss_tickers(
+    *,
+    now: float | None = None,
+    lookback_sec: float | None = None,
+    loss_usd: float | None = None,
+    trades: list[dict[str, Any]] | None = None,
+) -> set[str]:
+    """Тикеры с закрытием щупа/ноги ≤ −loss за lookback — пин туда не вешаем."""
+    from .desk_policy import (
+        PROBE_PIN_LOSS_LOOKBACK_SEC,
+        PROBE_SHELF_COOLDOWN_LOSS_USD,
+    )
+
+    now_ts = float(now if now is not None else time.time())
+    window = float(PROBE_PIN_LOSS_LOOKBACK_SEC if lookback_sec is None else lookback_sec)
+    floor = float(PROBE_SHELF_COOLDOWN_LOSS_USD if loss_usd is None else loss_usd)
+    rows = trades if trades is not None else _read_trades()
+    lots: dict[str, dict[str, float]] = {}
+    lost: set[str] = set()
+    for entry in rows:
+        ticker = str(entry.get("ticker") or "").upper()
+        side = str(entry.get("side") or "").lower()
+        quote = float(entry.get("quote") or 0)
+        price = float(entry.get("price") or 0)
+        if not ticker or price <= 0 or quote <= 0:
+            continue
+        qty = quote / price
+        lot = lots.setdefault(ticker, {"qty": 0.0, "cost": 0.0})
+        if side == "buy":
+            lot["qty"] += qty
+            lot["cost"] += quote
+            continue
+        if side != "sell" or lot["qty"] <= 0:
+            continue
+        sell_qty = min(qty, lot["qty"])
+        avg = lot["cost"] / lot["qty"]
+        cost_sold = avg * sell_qty
+        proceeds = quote * (sell_qty / qty)
+        pnl = proceeds - cost_sold
+        epoch = _entry_epoch(entry)
+        lot["qty"] -= sell_qty
+        lot["cost"] -= cost_sold
+        if lot["qty"] < 1e-12:
+            lot["qty"] = 0.0
+            lot["cost"] = 0.0
+        if epoch is None or not (now_ts - window <= epoch <= now_ts + 1.0):
+            continue
+        if pnl <= -floor + 1e-9:
+            lost.add(ticker)
+    return lost
+
+
 def last_sell_price(
     ticker: str,
     trades: list[dict[str, Any]] | None = None,

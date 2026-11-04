@@ -57,6 +57,7 @@ _SUI_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_ava_dip.json")
 _SECOND_POCKET_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_second_pocket.json")
 _PROBE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe.json")
 _PROBE_PAPER_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe_paper.json")
+_PROBE_PIN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe_pin.json")
 _ENTRY_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_entry_arm.json")
 _ANCHOR_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_anchor.json")
 
@@ -1222,6 +1223,67 @@ def write_probe(
         os.replace(tmp_path, path)
     except Exception as exc:
         logger.warning("[Крипта] не записал щуп: %s", exc)
+
+
+def read_probe_pin(path: str | None = None) -> dict[str, Any]:
+    """Мягкий автопин щупа: тикер и время выбора."""
+    path = path or _PROBE_PIN_PATH
+    empty = {"ticker": "", "ts": 0.0, "score": 0.0, "forced": False}
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    ticker = _normalize_ticker(raw.get("ticker"))
+    try:
+        ts = float(raw.get("ts") or 0)
+        score = float(raw.get("score") or 0)
+    except (TypeError, ValueError):
+        ts = 0.0
+        score = 0.0
+    if not ticker:
+        return empty
+    return {
+        "ticker": ticker,
+        "ts": ts,
+        "score": score,
+        "forced": bool(raw.get("forced")),
+    }
+
+
+def write_probe_pin(
+    ticker: str = "",
+    ts: float = 0.0,
+    score: float = 0.0,
+    forced: bool = False,
+    path: str | None = None,
+) -> None:
+    path = path or _PROBE_PIN_PATH
+    name = _normalize_ticker(ticker)
+    if not name:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("[Крипта] не стёр пин щупа: %s", exc)
+        return
+    payload = {
+        "ticker": name,
+        "ts": float(ts or 0),
+        "score": float(score or 0),
+        "forced": bool(forced),
+    }
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал пин щупа: %s", exc)
 
 
 def write_sui_dip(
