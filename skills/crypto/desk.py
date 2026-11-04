@@ -1218,7 +1218,7 @@ class CryptoDeskMixin:
                     arm_px,
                 )
                 return
-            if ask > 0:
+            if ask > 0 and str(algo or "") != PROBE_ALGO_SPARK:
                 check_px = max(price, ask)
             live_hi = max(float(live.get("high") or 0), check_px)
             live_lo = float(live.get("low") or 0)
@@ -1663,22 +1663,34 @@ class CryptoDeskMixin:
         ):
             return False
         hold = int(float(setup.get("hold_sec") or PROBE_ENTRY_HOLD_SEC))
+        arm_ts = time.time()
         write_probe(
             arm_ticker=ticker,
             arm_shelf=float(setup["shelf"]),
-            arm_ts=time.time(),
+            arm_ts=arm_ts,
             arm_px=float(setup["price"]),
             arm_algo=algo,
         )
+        wait_bit = "беру сразу" if hold <= 0 else f"жду {hold}с"
         logger.info(
-            "[Крипта] щуп %s %s полка %.4g сейчас %.4g — жду %dс%s",
+            "[Крипта] щуп %s %s полка %.4g сейчас %.4g — %s%s",
             ticker,
             algo,
             setup["shelf"],
             setup["price"],
-            hold,
+            wait_bit,
             " (имитация)" if probe_is_paper() else "",
         )
+        if hold <= 0 and not probe_is_paper():
+            self._probe_arm(
+                {
+                    "arm_ticker": ticker,
+                    "arm_shelf": float(setup["shelf"]),
+                    "arm_ts": arm_ts,
+                    "arm_px": float(setup["price"]),
+                    "arm_algo": algo,
+                }
+            )
         return True
 
     def _btc_day_chg(self, tape: list[dict[str, Any]] | None = None) -> float | None:

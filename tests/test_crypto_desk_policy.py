@@ -903,7 +903,7 @@ class TestDeskPolicy(unittest.TestCase):
                 rising["close"], rising["high"], rising["low"], rising["open"]
             )
         )
-        # Одиночная 5м в candle выключена; spark — только первые 1–2 мин, pos до 0.90.
+        # Одиночная 5м в candle выключена; spark — первые 1–2 мин, можно у хая.
         self.assertIsNone(policy.probe_candle_setup(base5 + [rising]))
         spark_early = {**rising, "ts": 1000.0, "close": 1.010, "high": 1.012, "volume": 25.0}
         self.assertIsNotNone(policy.probe_spark_setup(base5 + [spark_early], now=1060.0))
@@ -920,6 +920,13 @@ class TestDeskPolicy(unittest.TestCase):
         assert spark_pick is not None
         self.assertEqual(spark_pick["algo"], policy.PROBE_ALGO_SPARK)
         self.assertEqual(spark_pick.get("spark"), 1.0)
+        self.assertEqual(spark_pick.get("hold_sec"), 0.0)
+        at_high = {**spark_early, "close": 1.012, "high": 1.012, "low": 1.000}
+        self.assertTrue(
+            policy.probe_spark_live_ok(
+                at_high["close"], at_high["high"], at_high["low"], at_high["open"]
+            )
+        )
         # Перегрев 30м режет candle/stair, spark — нет.
         heat = [
             {"open": 1.0, "high": 1.002, "low": 0.998, "close": 1.0, "volume": 10.0}
@@ -1335,6 +1342,34 @@ class TestDeskPolicy(unittest.TestCase):
                 trend15="bull",
                 entry_low=1.04,
                 algo=policy.PROBE_ALGO_IMPULSE,
+            )
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=1.04,
+                entry=1.05,
+                shelf=1.0,
+                trend15="bull",
+                peak=1.05,
+                algo=policy.PROBE_ALGO_IMPULSE,
+                qty=40.0 / 1.05,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
+            ),
+            "срез",
+        )
+        self.assertFalse(policy.probe_should_handoff("срез"))
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.04,
+                entry=1.05,
+                shelf=1.0,
+                trend15="bull",
+                peak=1.05,
+                algo=policy.PROBE_ALGO_IMPULSE,
+                qty=40.0 / 1.05,
+                opened_ts=1000.0,
+                now=1000.0 + 30.0,
             )
         )
         self.assertEqual(

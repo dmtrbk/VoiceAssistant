@@ -30,8 +30,10 @@ POCKET_FROM_PROBE_MAX = 6
 # Мягкий выход щупа → передача во второй карман; жёсткий — продажа.
 # «дно» не передаём: цена уже у low щупа — карман2 сразу резал бы тем же дном.
 PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд", "застой"})
-PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "дно"})
+PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "дно", "срез"})
 PROBE_CANDLE_STALE_SEC = 2 * 3600
+# Impulse/spark не пошли в ловушку и уже под входом — не ждать полку −4…−8%.
+PROBE_FAIL_SCRATCH_SEC = 90.0
 # Парковка в карман2 ради свободного слота: свежую ногу не трогаем.
 PROBE_ROOM_MIN_AGE_SEC = 15 * 60
 POCKET_SCRATCH_PCT = -0.20
@@ -234,11 +236,11 @@ PROBE_IMPULSE_MAX_DAY_PCT = 35.0
 # Живая свеча выстрела идёт у хая — не требовать середину бара, только не кончик.
 PROBE_IMPULSE_MAX_BAR_POS = 0.95
 PROBE_IMPULSE_TIP_GAP_PCT = 0.20
-# Spark: одиночная 5м только в начале бара (не дубль ступеньки на 4–5-й минуте).
-# Pos до 0.90; без потолка 30м +2.2%; tip-gap не режем — иначе pos 0.90 сам себе мешает.
+# Spark: одиночная 5м в начале бара. Покупка сразу (hold 0): иначе 6–10с до buy и tip.
+# Pos до хая бара — ранняя свеча часто закрывается у high.
 PROBE_SPARK_MAX_ELAPSED_SEC = 120.0
-PROBE_SPARK_MAX_BAR_POS = 0.90
-PROBE_SPARK_HOLD_SEC = 1.0
+PROBE_SPARK_MAX_BAR_POS = 1.0
+PROBE_SPARK_HOLD_SEC = 0.0
 PROBE_SPARK_CHASE_PCT = 1.2
 # Grind: горячее candle нельзя; у хая дня (+25%) — уже догон.
 PROBE_GRIND_MAX_DAY_PCT = 18.0
@@ -1027,7 +1029,7 @@ def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_o
 
 
 def probe_spark_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
-    """Первые 1–2 мин 5м: тело 0.6..2.0%, pos до 0.90, без слива под open."""
+    """Первые 1–2 мин 5м: тело 0.6..2.0%, можно у хая бара, без слива под open."""
     px = float(price or 0)
     hi = float(live_high or 0)
     lo = float(live_low or 0)
@@ -1848,6 +1850,15 @@ def probe_exit_reason(
         and exit_gain >= 2.0 * EXIT_FEE_SIDE * 100.0 - 1e-6
     ):
         return "вершина"
+    if (
+        name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK}
+        and float(opened_ts or 0) > 0
+        and now is not None
+        and float(now) - float(opened_ts) >= PROBE_FAIL_SCRATCH_SEC
+        and peak_gain < arm_pct - 1e-6
+        and gain <= 1e-12
+    ):
+        return "срез"
     if (
         float(opened_ts or 0) > 0
         and now is not None
