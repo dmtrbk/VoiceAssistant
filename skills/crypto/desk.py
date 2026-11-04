@@ -74,6 +74,7 @@ from .desk_policy import (
     probe_max_legs,
     probe_setup_ok_now,
     probe_min_turnover_usd,
+    probe_strict_reason,
     tape_btc_day_chg,
     PROBE_REENTRY_HOURS,
     PROBE_REENTRY_BREAKOUT_PCT,
@@ -135,6 +136,8 @@ def _probe_pause_kind(reason: str) -> str:
         return "день"
     if text.startswith("падающий"):
         return "рынок"
+    if text.startswith("рынок растёт"):
+        return "рост"
     return text or "пауза"
 
 
@@ -931,6 +934,31 @@ class CryptoDeskMixin:
         if common.telegram_configured() and probe_places_buys():
             common.send_telegram_notification("Крипта: щуп снова обычный фильтр", background=True)
 
+    def _probe_loss_guard_reason(self, tape: list[dict[str, Any]] | None = None) -> str | None:
+        raw = crypto_journal.probe_loss_guard_reason()
+        rows = tape
+        if rows is None:
+            try:
+                rows = self._tape()
+            except Exception:
+                rows = []
+        applied = probe_strict_reason(raw, rows)
+        if raw and not applied:
+            self._note_probe_rising_skip()
+            return None
+        return applied
+
+    def _note_probe_rising_skip(self) -> None:
+        kind = "рост"
+        prev = str(getattr(self, "_probe_pause_kind", "") or "")
+        now = time.time()
+        last_log = float(getattr(self, "_probe_pause_log_ts", 0.0) or 0.0)
+        if kind == prev and now - last_log < _PROBE_PAUSE_LOG_SEC:
+            return
+        self._probe_pause_kind = kind
+        self._probe_pause_log_ts = now
+        logger.info("[Крипта] щуп обычный фильтр: рынок растёт, жёсткий режим не включаю")
+
     def _probe_locked(self) -> None:
         state = read_probe()
         for leg in probe_legs(state):
@@ -939,11 +967,11 @@ class CryptoDeskMixin:
             self._probe_paper_tick()
         if not cfg().probe_on:
             return
-        pause = crypto_journal.probe_loss_guard_reason()
+        pause = self._probe_loss_guard_reason()
         paper = probe_is_paper()
         if pause:
             self._note_probe_pause(pause)
-        else:
+        elif str(getattr(self, "_probe_pause_kind", "") or "") != "рост":
             self._note_probe_resume()
         state = read_probe()
         for arm in probe_arms(state):
@@ -1207,7 +1235,7 @@ class CryptoDeskMixin:
                 bid=bid,
                 ask=ask,
                 arm_px=arm_px,
-                strict=bool(crypto_journal.probe_loss_guard_reason()),
+                strict=bool(self._probe_loss_guard_reason()),
             ):
                 write_probe(drop_arm=ticker)
                 logger.info(
@@ -1246,7 +1274,7 @@ class CryptoDeskMixin:
         obi_fn = getattr(self, "_orderbook_obi", None)
         if callable(obi_fn):
             obi = obi_fn(ticker)
-        strict = bool(crypto_journal.probe_loss_guard_reason())
+        strict = bool(self._probe_loss_guard_reason())
         if not probe_entry_obi_ok(obi, strict=strict):
             write_probe(drop_arm=ticker)
             logger.info(
@@ -1637,7 +1665,7 @@ class CryptoDeskMixin:
             setup,
             now=time.time(),
             turnover=float(row.get("turnover") or 0),
-            strict=bool(crypto_journal.probe_loss_guard_reason()),
+            strict=bool(self._probe_loss_guard_reason()),
         ):
             return False
         cap = self._probe_cap()
@@ -1706,13 +1734,13 @@ class CryptoDeskMixin:
         return probe_max_legs(btc_day_chg=self._btc_day_chg(tape))
 
     def _probe_scan(self) -> None:
-        pause = crypto_journal.probe_loss_guard_reason()
-        strict = bool(pause)
         try:
             tape = self._tape()
         except Exception as exc:
             logger.info("[Крипта] щуп лента: %s", exc)
             return
+        pause = self._probe_loss_guard_reason(tape)
+        strict = bool(pause)
         cap = self._probe_cap(tape)
         self._probe_room_tried = False
         if (
@@ -1723,7 +1751,7 @@ class CryptoDeskMixin:
             return
         if pause:
             self._note_probe_pause(pause)
-        else:
+        elif str(getattr(self, "_probe_pause_kind", "") or "") != "рост":
             self._note_probe_resume()
         blocked = self._probe_blocked() | probe_tickers() | {arm["ticker"] for arm in probe_arms()}
         candidates: list[dict[str, Any]] = []

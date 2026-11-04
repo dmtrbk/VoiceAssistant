@@ -109,6 +109,11 @@ PROBE_STREAK_PAUSE_SEC = 3600.0
 # После среза «полка» не перерабатывать слот в тот же чоп (ZAMA→DOOD, LA→INIT).
 PROBE_SHELF_COOLDOWN_SEC = 25 * 60
 PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
+# Жёсткий режим (оборот $1.5M, OBI 0.70, только impulse/spark) после убытков.
+# На растущем рынке не включаем: резка входов мешает, пока идёт ход.
+PROBE_STRICT_MODE = True
+PROBE_RISING_BTC_MIN_PCT = 0.0
+PROBE_RISING_BREADTH_PCT = 50.0
 # Ниже 0.5% сутки 29.10 резали INIT-контекст и оставляли PARTI 18:25 (−$3.28).
 # Пол −3% на полном scan: щуп +$1.04, этой сделки нет.
 PROBE_DAY_MIN_PCT = -3.0
@@ -690,6 +695,48 @@ def probe_min_turnover_usd(now: float | None = None, *, strict: bool = False) ->
     if now is not None and probe_night_halted(now):
         return float(PROBE_NIGHT_MIN_TURNOVER_USD)
     return float(PROBE_MIN_TURNOVER_USD)
+
+
+def _tape_liquid_day_chgs(rows: list[dict[str, Any]] | None) -> list[float]:
+    chgs: list[float] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+            continue
+        try:
+            chg = float(row.get("chg") or 0)
+            turn = float(row.get("turnover") or 0)
+        except (TypeError, ValueError):
+            continue
+        if turn >= PROBE_MIN_TURNOVER_USD:
+            chgs.append(chg)
+    return chgs
+
+
+def probe_market_rising(rows: list[dict[str, Any]] | None) -> bool:
+    """Рынок растёт: BTC за сутки ≥ 0 или ≥ половины ликвидных имён в плюсе."""
+    btc = tape_btc_day_chg(rows)
+    if btc is not None and btc >= PROBE_RISING_BTC_MIN_PCT - 1e-12:
+        return True
+    liquid = _tape_liquid_day_chgs(rows)
+    if len(liquid) < 20:
+        return False
+    green_pct = sum(1 for chg in liquid if chg > 0) / len(liquid) * 100.0
+    return green_pct >= PROBE_RISING_BREADTH_PCT - 1e-9
+
+
+def probe_strict_reason(
+    reason: str | None,
+    rows: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """Жёсткий режим только если включён и рынок не растёт."""
+    if not PROBE_STRICT_MODE or not reason:
+        return None
+    if probe_market_rising(rows):
+        return None
+    return reason
 
 
 def probe_market_regime_ok(rows: list[dict[str, Any]]) -> tuple[bool, str]:

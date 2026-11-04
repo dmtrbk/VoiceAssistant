@@ -841,6 +841,7 @@ def probe_loss_guard_reason(
     now: float | None = None,
     trades: list[dict[str, Any]] | None = None,
     reset_ts: float | None = None,
+    enabled: bool | None = None,
 ) -> str | None:
     """Жёсткий режим входов (не стоп скана): дневной лимит, час, серия убытков или полка."""
     from .desk_policy import (
@@ -849,8 +850,14 @@ def probe_loss_guard_reason(
         PROBE_SHELF_COOLDOWN_LOSS_USD,
         PROBE_SHELF_COOLDOWN_SEC,
         PROBE_STREAK_PAUSE_SEC,
+        PROBE_STRICT_MODE,
         probe_daily_loss_blocked,
     )
+
+    if enabled is None:
+        enabled = bool(PROBE_STRICT_MODE)
+    if not enabled:
+        return None
 
     now_ts = float(now if now is not None else time.time())
     if reset_ts is None:

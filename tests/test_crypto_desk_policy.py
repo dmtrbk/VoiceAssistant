@@ -707,6 +707,25 @@ class TestDeskPolicy(unittest.TestCase):
             for i in range(25)
         ]
         self.assertTrue(policy.probe_market_regime_ok(normal_market)[0])
+        rising_btc = [{"ticker": "BTC", "chg": 1.2, "turnover": 50_000_000}]
+        self.assertTrue(policy.probe_market_rising(rising_btc))
+        self.assertIsNone(
+            policy.probe_strict_reason("после полки пауза 20м", rising_btc)
+        )
+        falling = [{"ticker": "BTC", "chg": -1.0, "turnover": 50_000_000}] + [
+            {"ticker": f"C{i}", "chg": -1.0 if i >= 8 else 0.5, "turnover": 500_000}
+            for i in range(25)
+        ]
+        self.assertFalse(policy.probe_market_rising(falling))
+        self.assertEqual(
+            policy.probe_strict_reason("после полки пауза 20м", falling),
+            "после полки пауза 20м",
+        )
+        alt_up = [{"ticker": "BTC", "chg": -0.4, "turnover": 50_000_000}] + [
+            {"ticker": f"C{i}", "chg": 2.0 if i < 15 else -0.5, "turnover": 500_000}
+            for i in range(25)
+        ]
+        self.assertTrue(policy.probe_market_rising(alt_up))
         self.assertEqual(policy.PROBE_MARKET_FALL_PAUSE_SEC, 3600.0)
         t0 = 1_700_000_000.0
         reason, until = policy.probe_market_regime_pause_reason(
@@ -1882,19 +1901,28 @@ class TestJournalChurnAndDaily(unittest.TestCase):
             {"ticker": "DOOD", "side": "buy", "quote": 40.0, "price": 0.002, "ts_epoch": day - 1800},
             {"ticker": "DOOD", "side": "sell", "quote": 39.22, "price": 0.001961, "ts_epoch": day - 120},
         ]
-        reason = crypto_journal.probe_loss_guard_reason(now=day, trades=shelf_trades)
+        reason = crypto_journal.probe_loss_guard_reason(
+            now=day, trades=shelf_trades, enabled=True
+        )
         self.assertIsNotNone(reason)
         self.assertTrue(str(reason).startswith("после полки пауза"))
         later = crypto_journal.probe_loss_guard_reason(
             now=day + policy.PROBE_SHELF_COOLDOWN_SEC,
             trades=shelf_trades,
+            enabled=True,
         )
         self.assertIsNone(later)
         scratch = [
             {"ticker": "PUMP", "side": "buy", "quote": 40.0, "price": 0.004, "ts_epoch": day - 1800},
             {"ticker": "PUMP", "side": "sell", "quote": 39.90, "price": 0.00399, "ts_epoch": day - 60},
         ]
-        self.assertIsNone(crypto_journal.probe_loss_guard_reason(now=day, trades=scratch))
+        self.assertIsNone(
+            crypto_journal.probe_loss_guard_reason(now=day, trades=scratch, enabled=True)
+        )
+        self.assertTrue(policy.PROBE_STRICT_MODE)
+        self.assertIsNotNone(
+            crypto_journal.probe_loss_guard_reason(now=day, trades=shelf_trades)
+        )
 
     def test_probe_daily_loss_reset_ignores_old_sells(self):
         now = datetime(2026, 11, 2, 18, 0, tzinfo=_MSK).timestamp()
@@ -1902,11 +1930,15 @@ class TestJournalChurnAndDaily(unittest.TestCase):
             {"ticker": "UNI", "side": "buy", "quote": 40.0, "price": 1.0, "ts_epoch": now - 8000},
             {"ticker": "UNI", "side": "sell", "quote": 34.0, "price": 0.85, "ts_epoch": now - 7000},
         ]
-        reason = crypto_journal.probe_loss_guard_reason(now=now, trades=trades, reset_ts=0.0)
+        reason = crypto_journal.probe_loss_guard_reason(
+            now=now, trades=trades, reset_ts=0.0, enabled=True
+        )
         self.assertIsNotNone(reason)
         self.assertTrue(str(reason).startswith("дневной лимит"))
         self.assertIsNone(
-            crypto_journal.probe_loss_guard_reason(now=now, trades=trades, reset_ts=now - 60)
+            crypto_journal.probe_loss_guard_reason(
+                now=now, trades=trades, reset_ts=now - 60, enabled=True
+            )
         )
 
     def test_daily_report_gate(self):
