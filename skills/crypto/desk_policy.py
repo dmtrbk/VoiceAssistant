@@ -773,7 +773,7 @@ def _tape_liquid_day_chgs(rows: list[dict[str, Any]] | None) -> list[float]:
         if not isinstance(row, dict):
             continue
         ticker = str(row.get("ticker") or "").upper()
-        if not ticker or ticker in SLEEVE_SKIP or ticker == "BTC" or _leveraged_base(ticker):
+        if not ticker or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
             continue
         try:
             chg = float(row.get("chg") or 0)
@@ -786,7 +786,10 @@ def _tape_liquid_day_chgs(rows: list[dict[str, Any]] | None) -> list[float]:
 
 
 def probe_market_rising(rows: list[dict[str, Any]] | None) -> bool:
-    """Рынок растёт: ≥ половины ликвидных альтов в плюсе. BTC в ширину не входит."""
+    """Рынок растёт: BTC за сутки ≥ 0 или ≥ половины ликвидных имён в плюсе."""
+    btc = tape_btc_day_chg(rows)
+    if btc is not None and btc >= PROBE_RISING_BTC_MIN_PCT - 1e-12:
+        return True
     liquid = _tape_liquid_day_chgs(rows)
     if len(liquid) < 20:
         return False
@@ -807,19 +810,21 @@ def probe_strict_reason(
 
 
 def probe_market_regime_ok(rows: list[dict[str, Any]]) -> tuple[bool, str]:
-    """Защита от падающего рынка: стоп щупа при широком обвале альтов. BTC не учитываем."""
+    """Защита от падающего рынка: стоп щупа при сливе BTC или широком обвале спота."""
     liquid_chgs: list[float] = []
     for row in rows or []:
         if not isinstance(row, dict):
             continue
         ticker = str(row.get("ticker") or "").upper()
-        if not ticker or ticker in SLEEVE_SKIP or ticker == "BTC" or _leveraged_base(ticker):
+        if not ticker or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
             continue
         try:
             chg = float(row.get("chg") or 0)
             turn = float(row.get("turnover") or 0)
         except (TypeError, ValueError):
             continue
+        if ticker == "BTC" and chg <= PROBE_BTC_MAX_DROP_DAY_PCT + 1e-9:
+            return False, f"BTC {chg:+.1f}% ≤ {PROBE_BTC_MAX_DROP_DAY_PCT:.1f}%"
         if turn >= PROBE_MIN_TURNOVER_USD:
             liquid_chgs.append(chg)
     if len(liquid_chgs) >= 20:

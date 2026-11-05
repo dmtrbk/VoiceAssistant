@@ -698,7 +698,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.probe_min_turnover_usd(strict=True), 1_500_000.0)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_SEC, 25 * 60)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_LOSS_USD, 0.25)
-        self.assertTrue(
+        self.assertFalse(
             policy.probe_market_regime_ok([{"ticker": "BTC", "chg": -3.1, "turnover": 50_000_000}])[0]
         )
         red_market = [{"ticker": f"C{i}", "chg": -2.0, "turnover": 500_000} for i in range(25)]
@@ -709,7 +709,7 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         self.assertTrue(policy.probe_market_regime_ok(normal_market)[0])
         rising_btc = [{"ticker": "BTC", "chg": 1.2, "turnover": 50_000_000}]
-        self.assertFalse(policy.probe_market_rising(rising_btc))
+        self.assertTrue(policy.probe_market_rising(rising_btc))
         falling = [{"ticker": "BTC", "chg": -1.0, "turnover": 50_000_000}] + [
             {"ticker": f"C{i}", "chg": -1.0 if i >= 8 else 0.5, "turnover": 500_000}
             for i in range(25)
@@ -721,9 +721,8 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         self.assertTrue(policy.probe_market_rising(alt_up))
         with patch.object(policy, "PROBE_STRICT_MODE", True):
-            self.assertEqual(
-                policy.probe_strict_reason("после полки пауза 20м", rising_btc),
-                "после полки пауза 20м",
+            self.assertIsNone(
+                policy.probe_strict_reason("после полки пауза 20м", rising_btc)
             )
             self.assertEqual(
                 policy.probe_strict_reason("после полки пауза 20м", falling),
@@ -731,15 +730,8 @@ class TestDeskPolicy(unittest.TestCase):
             )
         self.assertEqual(policy.PROBE_MARKET_FALL_PAUSE_SEC, 3600.0)
         t0 = 1_700_000_000.0
-        btc_only, btc_until = policy.probe_market_regime_pause_reason(
-            [{"ticker": "BTC", "chg": -4.0, "turnover": 50_000_000}],
-            now=t0,
-            pause_until=0.0,
-        )
-        self.assertIsNone(btc_only)
-        self.assertEqual(btc_until, 0.0)
         reason, until = policy.probe_market_regime_pause_reason(
-            red_market,
+            [{"ticker": "BTC", "chg": -4.0, "turnover": 50_000_000}],
             now=t0,
             pause_until=0.0,
         )
