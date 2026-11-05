@@ -938,13 +938,6 @@ def probe_market_regime_pause_reason(
         left_min = max(1, int((until - float(now) + 59) // 60))
         return f"падающий рынок: пауза {left_min}м после обвала", until
     return None, 0.0
-    until = float(pause_until or 0.0)
-    if not ok:
-        return f"падающий рынок: {note}", float(now) + float(PROBE_MARKET_FALL_PAUSE_SEC)
-    if until > float(now) + 1e-9:
-        left_min = max(1, int((until - float(now) + 59) // 60))
-        return f"падающий рынок: пауза {left_min}м после обвала", until
-    return None, 0.0
 
 
 def probe_scan_rank(
