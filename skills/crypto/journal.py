@@ -946,7 +946,7 @@ def probe_loss_guard_reason(
     reset_ts: float | None = None,
     enabled: bool | None = None,
 ) -> str | None:
-    """Дневной −$6 — полный стоп покупок до конца суток. Час, серия и полка — жёсткий режим, не стоп скана."""
+    """Жёсткий режим входов (не стоп скана): дневной лимит, час, серия убытков или полка."""
     from .desk_policy import (
         PROBE_HOURLY_MAX_LOSS_USD,
         PROBE_MAX_CONSECUTIVE_LOSSES,

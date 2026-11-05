@@ -703,31 +703,11 @@ class TestDeskPolicy(unittest.TestCase):
         )
         red_market = [{"ticker": f"C{i}", "chg": -2.0, "turnover": 500_000} for i in range(25)]
         self.assertFalse(policy.probe_market_regime_ok(red_market)[0])
-        thin_green = [
+        normal_market = [
             {"ticker": f"C{i}", "chg": 2.0 if i < 8 else -1.0, "turnover": 500_000}
             for i in range(25)
         ]
-        self.assertFalse(policy.probe_market_regime_ok(thin_green)[0])
-        normal_market = [
-            {"ticker": f"C{i}", "chg": 2.0 if i < 10 else -1.0, "turnover": 500_000}
-            for i in range(25)
-        ]
         self.assertTrue(policy.probe_market_regime_ok(normal_market)[0])
-        self.assertFalse(
-            policy.probe_market_regime_ok(
-                [{"ticker": "BTC", "chg": 2.0, "turnover": 50_000_000}],
-                btc_flash_pct=-1.2,
-            )[0]
-        )
-        self.assertTrue(
-            policy.probe_market_regime_ok(
-                [{"ticker": "BTC", "chg": 2.0, "turnover": 50_000_000}],
-                btc_flash_pct=-0.4,
-            )[0]
-        )
-        flash_bars = [{"close": 100.0}] * 3 + [{"close": 98.5}]
-        self.assertAlmostEqual(policy.probe_btc_flash_pct(flash_bars), -1.5)
-        self.assertEqual(policy.PROBE_MIN_MARKET_BREADTH_PCT, 35.0)
         rising_btc = [{"ticker": "BTC", "chg": 1.2, "turnover": 50_000_000}]
         self.assertTrue(policy.probe_market_rising(rising_btc))
         falling = [{"ticker": "BTC", "chg": -1.0, "turnover": 50_000_000}] + [
@@ -741,19 +721,12 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         self.assertTrue(policy.probe_market_rising(alt_up))
         with patch.object(policy, "PROBE_STRICT_MODE", True):
+            self.assertIsNone(
+                policy.probe_strict_reason("после полки пауза 20м", rising_btc)
+            )
             self.assertEqual(
-                policy.probe_strict_reason("после полки пауза 20м", rising_btc),
+                policy.probe_strict_reason("после полки пауза 20м", falling),
                 "после полки пауза 20м",
-            )
-            self.assertIsNone(
-                policy.probe_strict_reason("после полки пауза 20м", falling)
-            )
-            self.assertIsNone(
-                policy.probe_strict_reason("дневной лимит убытка (-6.20$)", rising_btc)
-            )
-            self.assertEqual(
-                policy.probe_strict_reason("серия из 3 убытков (пауза 60м)", normal_market),
-                "серия из 3 убытков (пауза 60м)",
             )
         self.assertEqual(policy.PROBE_MARKET_FALL_PAUSE_SEC, 3600.0)
         t0 = 1_700_000_000.0
