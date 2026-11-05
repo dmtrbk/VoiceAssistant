@@ -733,16 +733,34 @@ def probe_recent_loss_tickers(
     lookback_sec: float | None = None,
     loss_usd: float | None = None,
     trades: list[dict[str, Any]] | None = None,
+    tape: list[dict[str, Any]] | None = None,
 ) -> set[str]:
-    """Тикеры с закрытием щупа/ноги ≤ −loss за lookback — пин туда не вешаем."""
+    """Тикеры с закрытием щупа/ноги ≤ −loss за lookback — пин туда не вешаем.
+
+    Крошечный срез на сильном дне (рост ≥ PROBE_PIN_MIN_DAY_PCT) не банит.
+    """
     from .desk_policy import (
         PROBE_PIN_LOSS_LOOKBACK_SEC,
+        PROBE_PIN_MIN_DAY_PCT,
+        PROBE_PIN_SCRATCH_IGNORE_USD,
         PROBE_SHELF_COOLDOWN_LOSS_USD,
     )
 
     now_ts = float(now if now is not None else time.time())
     window = float(PROBE_PIN_LOSS_LOOKBACK_SEC if lookback_sec is None else lookback_sec)
     floor = float(PROBE_SHELF_COOLDOWN_LOSS_USD if loss_usd is None else loss_usd)
+    ignore = float(PROBE_PIN_SCRATCH_IGNORE_USD)
+    day_chg: dict[str, float] = {}
+    for row in tape or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("ticker") or "").upper()
+        if not name:
+            continue
+        try:
+            day_chg[name] = float(row.get("chg"))
+        except (TypeError, ValueError):
+            continue
     rows = trades if trades is not None else _read_trades()
     lots: dict[str, dict[str, float]] = {}
     lost: set[str] = set()
@@ -766,6 +784,12 @@ def probe_recent_loss_tickers(
         cost_sold = avg * sell_qty
         proceeds = quote * (sell_qty / qty)
         pnl = proceeds - cost_sold
+        raw_pnl = entry.get("pnl_usd")
+        if raw_pnl is not None:
+            try:
+                pnl = float(raw_pnl)
+            except (TypeError, ValueError):
+                pass
         epoch = _entry_epoch(entry)
         lot["qty"] -= sell_qty
         lot["cost"] -= cost_sold
@@ -774,8 +798,16 @@ def probe_recent_loss_tickers(
             lot["cost"] = 0.0
         if epoch is None or not (now_ts - window <= epoch <= now_ts + 1.0):
             continue
-        if pnl <= -floor + 1e-9:
-            lost.add(ticker)
+        if pnl > -floor + 1e-9:
+            continue
+        chg = day_chg.get(ticker)
+        if (
+            chg is not None
+            and chg >= PROBE_PIN_MIN_DAY_PCT - 1e-12
+            and pnl > -ignore + 1e-9
+        ):
+            continue
+        lost.add(ticker)
     return lost
 
 

@@ -32,7 +32,7 @@ POCKET_FROM_PROBE_MAX = 6
 PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд", "застой"})
 PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "дно", "срез"})
 PROBE_CANDLE_STALE_SEC = 2 * 3600
-# Impulse/spark не пошли в ловушку и уже под входом — не ждать полку −4…−8%.
+# Срез только если сломана полка. Минус к входу за 90 с при живой полке — не режем (ICNT).
 PROBE_FAIL_SCRATCH_SEC = 90.0
 # Парковка в карман2 ради свободного слота: свежую ногу не трогаем.
 PROBE_ROOM_MIN_AGE_SEC = 15 * 60
@@ -162,6 +162,8 @@ PROBE_PIN_TOP_N = 30
 PROBE_PIN_KEEP_TOP_N = 8
 PROBE_PIN_MIN_SCORE = 45.0
 PROBE_PIN_LOSS_LOOKBACK_SEC = 12 * 3600
+# Крошечный срез на сильном дне (ICNT −$0.30 при +13%) пин не банит.
+PROBE_PIN_SCRATCH_IGNORE_USD = 0.50
 PROBE_PIN_SWITCH_SCORE_MULT = 1.15
 PROBE_NIGHT_PIN_MAX_LEGS = 2
 PROBE_EMA_FAST = 20
@@ -175,7 +177,7 @@ PROBE_ALGO_SPARK = "spark"
 PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
-# Ступенька выключена (полки −$4.8/сутки). Candle — только флаг; выстрел — impulse; старт — spark.
+# Candle: ступенька 2/3 бара, иначе флаг. Выстрел — impulse; старт — spark.
 PROBE_ALGO_ORDER = (PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK)
 # 5м зелёная свеча: ловим начало восходящей свечи от open, без верхнего фитиля (слива).
 PROBE_CANDLE_LOOKBACK = 12
@@ -1649,11 +1651,11 @@ def probe_candle_setup(
     *,
     now: float | None = None,
 ) -> dict[str, float] | None:
-    """Вход: только пробой флага. Ступенька 2/3 бара выключена (полки без хода).
+    """Вход: ступенька 2/3 бара, иначе пробой флага.
 
     Одиночная 5м свеча выключена: главный поставщик ложных полок.
     bars — 5м, от старых к новым; нужен open (опционально ts старта бара).
-    Полка — основание флага.
+    Полка — open предыдущей ступени или основание флага.
     """
     need = PROBE_CANDLE_LOOKBACK + 2
     if len(bars) < need:
@@ -1733,7 +1735,13 @@ def probe_candle_setup(
         prior_body = (prior_c / prior_o - 1.0) * 100.0
         if prior_body > probe_candle_prior_max_body_pct() + 1e-12:
             return None
-    # Ступенька 2/3 бара выключена. Candle — только пробой 15м флага.
+    stair = _probe_staircase_setup(
+        bars, typical_vol=typical, elapsed_frac=elapsed_frac
+    ) or _probe_staircase_2bar_setup(
+        bars, typical_vol=typical, elapsed_frac=elapsed_frac
+    )
+    if stair:
+        return stair
     return _probe_flag_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
 
 
@@ -2098,7 +2106,7 @@ def probe_exit_reason(
     Пока ловушка не взведена: shelf режется «ожиданием»/«дном»; подножка
     impulse/sprint/grind эти срезы не берёт. Большой ход (+PROBE_RUN) ещё и медвежьим 15м.
     Если нога в минусе висит ≥ PROBE_CANDLE_STALE_SEC — «застой» (handoff в карман2).
-    Пока цена над входом — ждём ловушку или полку, плюс в scratch не режем.
+    Срез impulse/spark — только потеря полки, не минус к входу за 90 с.
     """
     px = float(price or 0)
     ent = float(entry or 0)
@@ -2139,9 +2147,14 @@ def probe_exit_reason(
         and now is not None
         and float(now) - float(opened_ts) >= PROBE_FAIL_SCRATCH_SEC
         and peak_gain < arm_pct - 1e-6
-        and gain <= 1e-12
     ):
-        return "срез"
+        if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}:
+            floor = level * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0) if level > 0 else 0.0
+            shelf_lost = level > 0 and px <= floor + 1e-12
+        else:
+            shelf_lost = level > 0 and px <= level + 1e-12
+        if shelf_lost:
+            return "срез"
     if (
         float(opened_ts or 0) > 0
         and now is not None

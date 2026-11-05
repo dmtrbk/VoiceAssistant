@@ -1013,28 +1013,36 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_book_buy_ok(bid=0.00727, ask=0.00729, arm_px=0.007281, strict=True)
         )
-        # Ступенька 2/3 бара выключена — candle setup молчит (остался только флаг).
+        # Ступенька 3 бара — вход candle (лестница ICNT).
         stair_bars = base5[:-2] + [
             {"open": 1.000, "high": 1.004, "low": 1.000, "close": 1.003, "volume": 12.0},
             {"open": 1.003, "high": 1.008, "low": 1.003, "close": 1.007, "volume": 20.0},
             {"open": 1.007, "high": 1.011, "low": 1.007, "close": 1.0105, "volume": 18.0},
         ]
-        self.assertIsNone(policy.probe_candle_setup(stair_bars))
-        self.assertIsNone(
-            policy.probe_pick_setup(
-                [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-                stair_bars,
-                day_chg=7.2,
-                day_high=1.015,
-            )
+        stair = policy.probe_candle_setup(stair_bars)
+        self.assertIsNotNone(stair)
+        assert stair is not None
+        self.assertEqual(stair.get("stair"), 1.0)
+        picked_stair = policy.probe_pick_setup(
+            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+            stair_bars,
+            day_chg=7.2,
+            day_high=1.015,
         )
+        self.assertIsNotNone(picked_stair)
+        assert picked_stair is not None
+        self.assertEqual(picked_stair.get("stair"), 1.0)
+        self.assertEqual(picked_stair.get("algo"), policy.PROBE_ALGO_CANDLE)
         self.assertLessEqual(policy.PROBE_CANDLE_HOLD_SEC, 2)
         stair2_bars = base5[:-2] + [
             {"open": 1.001, "high": 1.001, "low": 0.999, "close": 1.000, "volume": 10.0},
             {"open": 1.000, "high": 1.005, "low": 1.000, "close": 1.0045, "volume": 20.0},
             {"open": 1.0045, "high": 1.0095, "low": 1.0045, "close": 1.009, "volume": 16.0},
         ]
-        self.assertIsNone(policy.probe_candle_setup(stair2_bars))
+        stair2 = policy.probe_candle_setup(stair2_bars)
+        self.assertIsNotNone(stair2)
+        assert stair2 is not None
+        self.assertEqual(stair2.get("stair"), 1.0)
         self.assertFalse(policy.probe_daily_loss_blocked(-5.5))
         self.assertTrue(policy.probe_daily_loss_blocked(-6.0))
         self.assertEqual(
@@ -1049,8 +1057,8 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertGreaterEqual(policy.PROBE_CANDLE_MIN_BODY_PCT, 0.6)
         weak = {**rising, "close": 1.004, "high": 1.012}
         self.assertIsNone(policy.probe_candle_setup(base5 + [weak]))
-        # Ступенька не вход. +48% и пик суток — по-прежнему нет.
-        self.assertIsNone(
+        # Ступенька — вход. +48% и пик суток — по-прежнему нет.
+        self.assertIsNotNone(
             policy.probe_pick_setup(
                 [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
                 stair_bars,
@@ -1367,7 +1375,8 @@ class TestDeskPolicy(unittest.TestCase):
                 algo=policy.PROBE_ALGO_IMPULSE,
             )
         )
-        self.assertEqual(
+        # Минус к входу за 90 с при живой полке — держим (ICNT 0.2306→0.2295 над 0.2279).
+        self.assertIsNone(
             policy.probe_exit_reason(
                 price=1.04,
                 entry=1.05,
@@ -1378,8 +1387,34 @@ class TestDeskPolicy(unittest.TestCase):
                 qty=40.0 / 1.05,
                 opened_ts=1000.0,
                 now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
+            )
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.2295,
+                entry=0.2306,
+                shelf=0.2279,
+                trend15="bull",
+                peak=0.2306,
+                algo=policy.PROBE_ALGO_SPARK,
+                qty=40.0 / 0.2306,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
+            )
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.99,
+                entry=1.05,
+                shelf=1.0,
+                trend15="bull",
+                peak=1.05,
+                algo=policy.PROBE_ALGO_IMPULSE,
+                qty=40.0 / 1.05,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
             ),
-            "срез",
+            "полка",
         )
         self.assertFalse(policy.probe_should_handoff("срез"))
         self.assertIsNone(
@@ -1962,6 +1997,31 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         lost = crypto_journal.probe_recent_loss_tickers(now=now, trades=trades)
         self.assertIn("BEAM", lost)
         self.assertNotIn("CAP", lost)
+        icnt = [
+            {"ticker": "ICNT", "side": "buy", "quote": 39.99, "price": 0.2306, "ts_epoch": now - 200},
+            {
+                "ticker": "ICNT",
+                "side": "sell",
+                "quote": 39.70,
+                "price": 0.2295,
+                "pnl_usd": -0.30,
+                "ts_epoch": now - 80,
+            },
+        ]
+        tape_hot = [{"ticker": "ICNT", "chg": 13.5, "turnover": 1_700_000, "price": 0.236, "high": 0.243}]
+        tape_cold = [{"ticker": "ICNT", "chg": 3.0, "turnover": 1_700_000, "price": 0.210, "high": 0.243}]
+        self.assertNotIn(
+            "ICNT",
+            crypto_journal.probe_recent_loss_tickers(now=now, trades=icnt, tape=tape_hot),
+        )
+        self.assertIn(
+            "ICNT",
+            crypto_journal.probe_recent_loss_tickers(now=now, trades=icnt, tape=tape_cold),
+        )
+        self.assertIn(
+            "ICNT",
+            crypto_journal.probe_recent_loss_tickers(now=now, trades=icnt),
+        )
 
     def test_probe_reentry_blocks_recent_sell(self):
         now = time.time()

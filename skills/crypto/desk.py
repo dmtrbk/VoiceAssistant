@@ -1755,7 +1755,7 @@ class CryptoDeskMixin:
             tape,
             prev,
             now=time.time(),
-            lost=crypto_journal.probe_recent_loss_tickers(),
+            lost=crypto_journal.probe_recent_loss_tickers(tape=tape),
             skip=probe_tickers() | second_pocket_tickers(),
         )
         prev_name = str(prev.get("ticker") or "").upper()
