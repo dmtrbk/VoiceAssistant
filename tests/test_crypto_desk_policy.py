@@ -1937,8 +1937,8 @@ class TestJournalChurnAndDaily(unittest.TestCase):
             {"ticker": "MET", "chg": 8.2, "turnover": 1_600_000, "price": 0.31, "high": 0.315},
         ]
         self.assertIsNone(policy.probe_choose_pin(weak, None, now=now, lost=set()))
-        self.assertEqual(policy.PROBE_PIN_LOSS_LOOKBACK_SEC, 24 * 3600)
-        self.assertEqual(policy.PROBE_PIN_MIN_SCORE, 55.0)
+        self.assertEqual(policy.PROBE_PIN_LOSS_LOOKBACK_SEC, 12 * 3600)
+        self.assertEqual(policy.PROBE_PIN_MIN_SCORE, 45.0)
         self.assertEqual(policy.PROBE_NIGHT_PIN_MAX_LEGS, 2)
         falling = rows + [
             {"ticker": "MET", "chg": 9.0, "turnover": 1_600_000, "price": 0.25, "high": 0.32},
