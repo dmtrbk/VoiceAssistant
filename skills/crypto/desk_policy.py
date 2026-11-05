@@ -152,13 +152,12 @@ PROBE_SHELF_DRIFT_PCT = 1.5
 PROBE_SHELF_DRIFT_BARS = 8
 PROBE_RUN_PCT = 6.0
 PROBE_MAX_LOSS_PCT = 8.0
-# Сначала candle по широкому списку (только 5м); остальные алго — укороченный топ.
-# При floor $25k кандидатов ~120–130 — лимит почти = вся очередь, не топ-48.
-PROBE_SCAN_LIMIT = 128
-# Impulse по тем же лидерам суток, не по узким 16.
-PROBE_SCAN_CLASSIC_LIMIT = 50
-# Топ-N по росту за 24ч всегда первыми: свежие 5м и spark, не хвост за ликвидными середняками.
-PROBE_SCAN_MANDATORY_TOP = 50
+# Узкий топ лидеров суток: на прогоне Топ-4 бьёт комиссию, хвост 7–12 съедает плюс.
+# Candle и classic смотрят одни и те же 4 имени — 2 слота не занимают середняки.
+PROBE_SCAN_LIMIT = 4
+PROBE_SCAN_CLASSIC_LIMIT = 4
+# Топ-N по росту за 24ч всегда первыми (при лимите 4 = весь скан).
+PROBE_SCAN_MANDATORY_TOP = 4
 # Чаще сканируем: растущую 5м свечу надо брать в первой половине, не раз в минуту у хая.
 PROBE_PERIOD_SEC = 10
 PROBE_ARMED_PERIOD_SEC = 6
@@ -973,7 +972,7 @@ def probe_scan_ranked_rows(
     now: float | None = None,
     min_turnover: float | None = None,
 ) -> list[tuple[float, dict[str, Any]]]:
-    """Список для щупа: топ-50 по 24h %, затем высоколиквидные ($1.5M+) в фазе разгона, затем остальные."""
+    """Список для щупа: топ-N по 24h %, затем высоколиквидные ($1.5M+) в фазе разгона, затем остальные."""
     cap = int(PROBE_SCAN_LIMIT if limit is None else limit)
     floor_turn = (
         float(min_turnover)

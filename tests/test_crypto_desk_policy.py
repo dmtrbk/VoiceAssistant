@@ -790,8 +790,8 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             policy.PROBE_DAY_MIN_PCT,
         )
-        self.assertGreaterEqual(policy.PROBE_SCAN_LIMIT, 100)
-        self.assertLess(policy.PROBE_SCAN_CLASSIC_LIMIT, policy.PROBE_SCAN_LIMIT)
+        self.assertEqual(policy.PROBE_SCAN_LIMIT, 4)
+        self.assertEqual(policy.PROBE_SCAN_CLASSIC_LIMIT, 4)
         self.assertEqual(
             policy.probe_scan_rank({
                 "chg": 40.0, "price": 0.0265, "low": 0.017, "high": 0.027, "turnover": 2_000_000,
@@ -818,8 +818,8 @@ class TestDeskPolicy(unittest.TestCase):
             [str(r[1]["ticker"]) for r in ranked[:5]],
             ["D", "F", "B", "C", "A"],
         )
-        self.assertGreaterEqual(policy.PROBE_SCAN_MANDATORY_TOP, 50)
-        # Лидеры суток стоят впереди ликвидного середняка, даже если у середняка оборот больше.
+        self.assertEqual(policy.PROBE_SCAN_MANDATORY_TOP, 4)
+        # Боевой скан — только топ-4; ликвидный середняк в хвост не лезет.
         crowd = [
             {"ticker": f"G{i}", "chg": 40.0 - i * 0.4, "price": 1.0, "turnover": 200_000}
             for i in range(50)
@@ -827,9 +827,15 @@ class TestDeskPolicy(unittest.TestCase):
             {"ticker": "LIQ", "chg": 4.0, "price": 1.0, "turnover": 8_000_000},
         ]
         crowd_ranked = policy.probe_scan_ranked_rows(crowd)
-        self.assertEqual(str(crowd_ranked[0][1]["ticker"]), "G0")
-        self.assertEqual(str(crowd_ranked[49][1]["ticker"]), "G49")
-        self.assertEqual(str(crowd_ranked[50][1]["ticker"]), "LIQ")
+        self.assertEqual(
+            [str(r[1]["ticker"]) for r in crowd_ranked],
+            ["G0", "G1", "G2", "G3"],
+        )
+        # При широком cap после mandatory-top высоколиквидный разгон встаёт раньше хвоста.
+        wide = policy.probe_scan_ranked_rows(crowd, limit=60)
+        self.assertEqual(str(wide[0][1]["ticker"]), "G0")
+        self.assertEqual(str(wide[3][1]["ticker"]), "G3")
+        self.assertEqual(str(wide[4][1]["ticker"]), "LIQ")
         mild_red = policy.probe_scan_ranked_rows([
             {"ticker": "RED", "chg": -2.0, "price": 1.0, "turnover": 500_000},
             {"ticker": "DEAD", "chg": -4.0, "price": 1.0, "turnover": 500_000},

@@ -2035,7 +2035,7 @@ class CryptoDeskMixin:
             }:
                 self._note_pin_idle(pin)
 
-        # 1) Широкий обзор: только 5м candle — 15м/1h только если свеча уже живая.
+        # 1) Узкий топ лидеров: только 5м candle — 15м/1h только если свеча уже живая.
         for scan_idx, (_rank, row) in enumerate(ranked[:PROBE_SCAN_LIMIT]):
             if _arm_slots_left() <= 0:
                 break
