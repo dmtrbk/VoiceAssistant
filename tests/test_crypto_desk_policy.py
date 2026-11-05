@@ -657,10 +657,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.probe_night_halt_reason(night_ts))
         self.assertIsNone(policy.probe_night_halt_reason(day_ts))
         self.assertEqual(policy.PROBE_MAX_LEGS_BTC_DOWN, 2)
-        self.assertEqual(policy.probe_max_legs(now=day_ts), 4)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 4)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 4)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 4)
+        self.assertEqual(policy.probe_max_legs(now=day_ts), 2)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 2)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 2)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 2)
         self.assertEqual(policy.probe_max_legs(now=night_ts), 2)
         self.assertEqual(policy.tape_btc_day_chg([{"ticker": "ETH", "chg": 1.0}]), None)
         self.assertEqual(
@@ -698,7 +698,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.probe_min_turnover_usd(strict=True), 1_500_000.0)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_SEC, 25 * 60)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_LOSS_USD, 0.25)
-        self.assertFalse(
+        self.assertTrue(
             policy.probe_market_regime_ok([{"ticker": "BTC", "chg": -3.1, "turnover": 50_000_000}])[0]
         )
         red_market = [{"ticker": f"C{i}", "chg": -2.0, "turnover": 500_000} for i in range(25)]
@@ -709,7 +709,7 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         self.assertTrue(policy.probe_market_regime_ok(normal_market)[0])
         rising_btc = [{"ticker": "BTC", "chg": 1.2, "turnover": 50_000_000}]
-        self.assertTrue(policy.probe_market_rising(rising_btc))
+        self.assertFalse(policy.probe_market_rising(rising_btc))
         falling = [{"ticker": "BTC", "chg": -1.0, "turnover": 50_000_000}] + [
             {"ticker": f"C{i}", "chg": -1.0 if i >= 8 else 0.5, "turnover": 500_000}
             for i in range(25)
@@ -721,8 +721,9 @@ class TestDeskPolicy(unittest.TestCase):
         ]
         self.assertTrue(policy.probe_market_rising(alt_up))
         with patch.object(policy, "PROBE_STRICT_MODE", True):
-            self.assertIsNone(
-                policy.probe_strict_reason("после полки пауза 20м", rising_btc)
+            self.assertEqual(
+                policy.probe_strict_reason("после полки пауза 20м", rising_btc),
+                "после полки пауза 20м",
             )
             self.assertEqual(
                 policy.probe_strict_reason("после полки пауза 20м", falling),
@@ -730,8 +731,15 @@ class TestDeskPolicy(unittest.TestCase):
             )
         self.assertEqual(policy.PROBE_MARKET_FALL_PAUSE_SEC, 3600.0)
         t0 = 1_700_000_000.0
-        reason, until = policy.probe_market_regime_pause_reason(
+        btc_only, btc_until = policy.probe_market_regime_pause_reason(
             [{"ticker": "BTC", "chg": -4.0, "turnover": 50_000_000}],
+            now=t0,
+            pause_until=0.0,
+        )
+        self.assertIsNone(btc_only)
+        self.assertEqual(btc_until, 0.0)
+        reason, until = policy.probe_market_regime_pause_reason(
+            red_market,
             now=t0,
             pause_until=0.0,
         )
@@ -919,14 +927,21 @@ class TestDeskPolicy(unittest.TestCase):
             "close": 1.008,  # ~0.8% тело, pos=0.60 в рабочей зоне 0.35..0.65
             "volume": 25.0,
         }
-        self.assertTrue(
+        self.assertFalse(
             policy.probe_candle_live_ok(
                 rising["close"], rising["high"], rising["low"], rising["open"]
             )
         )
-        # Одиночная 5м в candle выключена; spark — первые 1–2 мин, можно у хая.
+        # Тело 0.8% ниже probe_break_min_pct. Пробой 4.5% — candle и spark.
         self.assertIsNone(policy.probe_candle_setup(base5 + [rising]))
-        spark_early = {**rising, "ts": 1000.0, "close": 1.010, "high": 1.012, "volume": 25.0}
+        spark_early = {
+            **rising,
+            "ts": 1000.0,
+            "close": 1.045,
+            "high": 1.048,
+            "low": 0.998,
+            "volume": 25.0,
+        }
         self.assertIsNotNone(policy.probe_spark_setup(base5 + [spark_early], now=1060.0))
         self.assertIsNone(policy.probe_spark_setup(base5 + [spark_early], now=1130.0))
         self.assertIsNone(policy.probe_spark_setup(base5 + [spark_early]))
@@ -934,15 +949,14 @@ class TestDeskPolicy(unittest.TestCase):
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
             base5 + [spark_early],
             day_chg=8.0,
-            day_high=1.04,
+            day_high=1.08,
             now=1060.0,
         )
         self.assertIsNotNone(spark_pick)
         assert spark_pick is not None
-        self.assertEqual(spark_pick["algo"], policy.PROBE_ALGO_SPARK)
-        self.assertEqual(spark_pick.get("spark"), 1.0)
-        self.assertEqual(spark_pick.get("hold_sec"), 0.0)
-        self.assertEqual(policy.probe_setup_hold_sec(spark_pick), 0.0)
+        self.assertEqual(spark_pick["algo"], policy.PROBE_ALGO_CANDLE)
+        self.assertEqual(policy.probe_algo_params(policy.PROBE_ALGO_SPARK)["hold_sec"], 0.0)
+        self.assertEqual(policy.probe_setup_hold_sec({"algo": "spark", "hold_sec": 0.0}), 0.0)
         self.assertEqual(policy.probe_setup_hold_sec({"algo": "spark"}), 90.0)
         # Подскок ICNT: тело 2.77% после окна spark, объём 4×, фитиль короткий.
         pop_bar = {
@@ -1021,7 +1035,7 @@ class TestDeskPolicy(unittest.TestCase):
                 {"pop": 1.0}, now=1_700_000_000.0, turnover=1_600_000, strict=True
             )
         )
-        at_high = {**spark_early, "close": 1.012, "high": 1.012, "low": 1.000}
+        at_high = {**spark_early, "close": 1.045, "high": 1.048, "low": 1.000}
         self.assertTrue(
             policy.probe_spark_live_ok(
                 at_high["close"], at_high["high"], at_high["low"], at_high["open"]
@@ -1044,7 +1058,10 @@ class TestDeskPolicy(unittest.TestCase):
             "ts": 1000.0,
         }
         self.assertIsNone(policy.probe_candle_setup(heat + [heat_bar], now=1060.0))
-        self.assertIsNotNone(policy.probe_spark_setup(heat + [heat_bar], now=1060.0))
+        self.assertIsNone(policy.probe_spark_setup(heat + [heat_bar], now=1060.0))
+        heat_break = {**heat_bar, "close": 1.045, "high": 1.050}
+        self.assertIsNotNone(policy.probe_candle_setup(heat + [heat_break], now=1060.0))
+        self.assertIsNotNone(policy.probe_spark_setup(heat + [heat_break], now=1060.0))
         collapsed_wick = {**rising, "close": 1.006, "high": 1.020}
         self.assertIsNone(policy.probe_candle_setup(base5 + [collapsed_wick]))
         tip_candle = {**rising, "close": 1.011, "high": 1.012}
@@ -1080,8 +1097,8 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertEqual(policy.PROBE_MIN_ENTRY_OBI, 0.55)
         self.assertTrue(policy.probe_entry_obi_ok(None))
-        self.assertTrue(policy.probe_entry_obi_ok(0.40))
-        self.assertTrue(policy.probe_entry_obi_ok(0.549))
+        self.assertFalse(policy.probe_entry_obi_ok(0.40))
+        self.assertFalse(policy.probe_entry_obi_ok(0.549))
         self.assertTrue(policy.probe_entry_obi_ok(0.55))
         self.assertTrue(policy.probe_entry_obi_ok(0.80))
         self.assertTrue(policy.probe_entry_obi_ok(0.70, strict=True))
@@ -1090,36 +1107,28 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_book_buy_ok(bid=0.00727, ask=0.00729, arm_px=0.007281, strict=True)
         )
-        # Ступенька 3 бара — вход candle (лестница ICNT).
+        # Ступенька мельче probe_break_min_pct — не вход.
         stair_bars = base5[:-2] + [
             {"open": 1.000, "high": 1.004, "low": 1.000, "close": 1.003, "volume": 12.0},
             {"open": 1.003, "high": 1.008, "low": 1.003, "close": 1.007, "volume": 20.0},
             {"open": 1.007, "high": 1.011, "low": 1.007, "close": 1.0105, "volume": 18.0},
         ]
-        stair = policy.probe_candle_setup(stair_bars)
-        self.assertIsNotNone(stair)
-        assert stair is not None
-        self.assertEqual(stair.get("stair"), 1.0)
-        picked_stair = policy.probe_pick_setup(
-            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-            stair_bars,
-            day_chg=7.2,
-            day_high=1.015,
+        self.assertIsNone(policy.probe_candle_setup(stair_bars))
+        self.assertIsNone(
+            policy.probe_pick_setup(
+                [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+                stair_bars,
+                day_chg=7.2,
+                day_high=1.015,
+            )
         )
-        self.assertIsNotNone(picked_stair)
-        assert picked_stair is not None
-        self.assertEqual(picked_stair.get("stair"), 1.0)
-        self.assertEqual(picked_stair.get("algo"), policy.PROBE_ALGO_CANDLE)
         self.assertLessEqual(policy.PROBE_CANDLE_HOLD_SEC, 2)
         stair2_bars = base5[:-2] + [
             {"open": 1.001, "high": 1.001, "low": 0.999, "close": 1.000, "volume": 10.0},
             {"open": 1.000, "high": 1.005, "low": 1.000, "close": 1.0045, "volume": 20.0},
             {"open": 1.0045, "high": 1.0095, "low": 1.0045, "close": 1.009, "volume": 16.0},
         ]
-        stair2 = policy.probe_candle_setup(stair2_bars)
-        self.assertIsNotNone(stair2)
-        assert stair2 is not None
-        self.assertEqual(stair2.get("stair"), 1.0)
+        self.assertIsNone(policy.probe_candle_setup(stair2_bars))
         self.assertFalse(policy.probe_daily_loss_blocked(-5.5))
         self.assertTrue(policy.probe_daily_loss_blocked(-6.0))
         self.assertEqual(
@@ -1133,10 +1142,12 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertNotIn(policy.PROBE_ALGO_GRIND, policy.PROBE_ALGO_ORDER)
         self.assertGreaterEqual(policy.PROBE_CANDLE_MIN_BODY_PCT, 0.6)
+        self.assertEqual(policy.probe_candle_min_body_pct(), policy.cfg().probe_break_min_pct)
+        self.assertEqual(policy.probe_candle_max_body_pct(), policy.cfg().probe_break_max_pct)
         weak = {**rising, "close": 1.004, "high": 1.012}
         self.assertIsNone(policy.probe_candle_setup(base5 + [weak]))
-        # Ступенька — вход. +48% и пик суток — по-прежнему нет.
-        self.assertIsNotNone(
+        # Ступенька мельче пробоя — не вход. +48% и пик суток — тоже нет.
+        self.assertIsNone(
             policy.probe_pick_setup(
                 [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
                 stair_bars,
@@ -1526,8 +1537,8 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.probe_should_handoff("полка"))
         self.assertFalse(policy.probe_should_handoff("стоп"))
         self.assertFalse(policy.probe_should_handoff("вершина"))
-        self.assertEqual(policy.pocket_from_probe_max(), 6)
-        self.assertEqual(policy.PROBE_MAX_LEGS, 4)
+        self.assertEqual(policy.pocket_from_probe_max(), 3)
+        self.assertEqual(policy.PROBE_MAX_LEGS, 2)
         best_leg = policy.pick_second_pocket_leg_for_funding(
             [
                 {"ticker": "AGLD", "qty": 160.0, "entry": 0.1872},
@@ -1558,10 +1569,21 @@ class TestDeskPolicy(unittest.TestCase):
                 now=now,
             )
         )
-        # BASED $30: пик +2.0% взвёл ловушку щупа (~1.56%+), откат ≥0.60% закрывает в плюс.
-        self.assertEqual(
+        # BASED: пик +2% взводит ловушку (~+1.56%). Откат 0.67% держим, 1.5% продаём.
+        self.assertIsNone(
             policy.probe_exit_reason(
                 price=0.05440,
+                entry=0.053678,
+                shelf=0.05279,
+                trend15="bull",
+                peak=0.05477,
+                algo=policy.PROBE_ALGO_CANDLE,
+                qty=558.89,
+            )
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.05394,
                 entry=0.053678,
                 shelf=0.05279,
                 trend15="bull",

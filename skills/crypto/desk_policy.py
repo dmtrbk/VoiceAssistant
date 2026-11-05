@@ -22,7 +22,7 @@ DESK_ALT_SLEEVE = frozenset({
 })
 ALT_SLEEVE_MAX_PCT = 50.0
 ALT_MAX_NAMES = 2
-PROBE_MAX_LEGS = 4
+PROBE_MAX_LEGS = 2
 # BTC за сутки в минусе — не четыре коррелированные полки, а 1–2 слота.
 PROBE_MAX_LEGS_BTC_DOWN = 2
 # Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
@@ -76,11 +76,11 @@ ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
 # Суточный потолок +25% остался только у impulse: уже разогнанную свечу не догоняем.
 # Ловушка кармана/рукава: круг комиссий (taker 0,18% × 2) + $0.12 сверх (на $40 ~+0.66%).
-# Щуп: взвод позже (~+1.56% на $40) и откат 0.60% — иначе вершина забирает +$0.05 и не даёт ходу.
+# Щуп: взвод позже (~+1.56% на $40) и откат 1.50% — первый выдох тренда не продаём.
 EXIT_FEE_SIDE = 0.0018
 EXIT_TRAP_EXTRA_USD = 0.12
 PROBE_TRAP_EXTRA_USD = 0.48
-PROBE_TRAP_PULLBACK_PCT = 0.60
+PROBE_TRAP_PULLBACK_PCT = 1.50
 EXIT_TRAP_DEFAULT_COST_USD = 100.0
 
 # Стейблы не рукав, даже если оборот большой. Базовый список остаётся всегда.
@@ -244,7 +244,7 @@ PROBE_STAIR2_MIN_1H_POS = 0.88
 # Защита от проскальзывания по пустому стакану перед рыночной покупкой щупа (GROVE 0.007281->0.007409):
 PROBE_MAX_SPREAD_PCT = 0.35
 PROBE_MAX_ASK_SLIP_PCT = 0.45
-# OBI на входе только в жёстком режиме. Днём стакан не режет взвод (ICNT снимали 4 раза).
+# OBI на каждом входе. Нет котировки стакана — не блокируем.
 PROBE_MIN_ENTRY_OBI = 0.55
 # Жёсткий режим (бывшие паузы: полка, час, серия, день): щуп не молчит, фильтры туже.
 PROBE_STRICT_MIN_ENTRY_OBI = 0.70
@@ -389,9 +389,13 @@ def probe_candle_prior_max_body_pct() -> float:
 
 
 def probe_candle_min_body_pct() -> float:
-    if probe_tune_tier() >= 4:
-        return 0.4
-    return float(PROBE_CANDLE_MIN_BODY_PCT)
+    """Нижняя граница тела candle/spark: настройка «пробой от», не константа 0.6%."""
+    return float(cfg().probe_break_min_pct)
+
+
+def probe_candle_max_body_pct() -> float:
+    """Верхняя граница того же пробоя: настройка «пробой до»."""
+    return float(cfg().probe_break_max_pct)
 
 
 def update_exclusions(
@@ -708,7 +712,7 @@ def tape_btc_day_chg(rows: list[dict[str, Any]] | None) -> float | None:
 
 
 def probe_max_legs(*, btc_day_chg: float | None = None, now: float | None = None) -> int:
-    """Днём до 4 ног. Ночью с пином: 1 пин + 1 бродячий."""
+    """Днём и ночью 2 ноги. Сутки BTC на число слотов не влияют."""
     del btc_day_chg
     if PROBE_PIN_ON and probe_night_halted(now):
         return int(PROBE_NIGHT_PIN_MAX_LEGS)
@@ -765,7 +769,7 @@ def _tape_liquid_day_chgs(rows: list[dict[str, Any]] | None) -> list[float]:
         if not isinstance(row, dict):
             continue
         ticker = str(row.get("ticker") or "").upper()
-        if not ticker or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+        if not ticker or ticker in SLEEVE_SKIP or ticker == "BTC" or _leveraged_base(ticker):
             continue
         try:
             chg = float(row.get("chg") or 0)
@@ -778,10 +782,7 @@ def _tape_liquid_day_chgs(rows: list[dict[str, Any]] | None) -> list[float]:
 
 
 def probe_market_rising(rows: list[dict[str, Any]] | None) -> bool:
-    """Рынок растёт: BTC за сутки ≥ 0 или ≥ половины ликвидных имён в плюсе."""
-    btc = tape_btc_day_chg(rows)
-    if btc is not None and btc >= PROBE_RISING_BTC_MIN_PCT - 1e-12:
-        return True
+    """Рынок растёт: ≥ половины ликвидных альтов в плюсе. BTC в ширину не входит."""
     liquid = _tape_liquid_day_chgs(rows)
     if len(liquid) < 20:
         return False
@@ -802,21 +803,19 @@ def probe_strict_reason(
 
 
 def probe_market_regime_ok(rows: list[dict[str, Any]]) -> tuple[bool, str]:
-    """Защита от падающего рынка: стоп щупа при сливе BTC или широком обвале спота."""
+    """Защита от падающего рынка: стоп щупа при широком обвале альтов. BTC не учитываем."""
     liquid_chgs: list[float] = []
     for row in rows or []:
         if not isinstance(row, dict):
             continue
         ticker = str(row.get("ticker") or "").upper()
-        if not ticker or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+        if not ticker or ticker in SLEEVE_SKIP or ticker == "BTC" or _leveraged_base(ticker):
             continue
         try:
             chg = float(row.get("chg") or 0)
             turn = float(row.get("turnover") or 0)
         except (TypeError, ValueError):
             continue
-        if ticker == "BTC" and chg <= PROBE_BTC_MAX_DROP_DAY_PCT + 1e-9:
-            return False, f"BTC {chg:+.1f}% ≤ {PROBE_BTC_MAX_DROP_DAY_PCT:.1f}%"
         if turn >= PROBE_MIN_TURNOVER_USD:
             liquid_chgs.append(chg)
     if len(liquid_chgs) >= 20:
@@ -1326,7 +1325,7 @@ def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_o
         return False
     body = (px / op - 1.0) * 100.0
     min_body = probe_candle_min_body_pct()
-    if body < min_body or body > PROBE_CANDLE_MAX_BODY_PCT + 1e-12:
+    if body < min_body - 1e-12 or body > probe_candle_max_body_pct() + 1e-12:
         return False
     # Откат сверху от high свечи (верхний фитиль) — признак уже продавленной свечи.
     upper_wick = (hi - px) / op * 100.0
@@ -1360,7 +1359,7 @@ def probe_spark_live_ok(price: float, live_high: float, live_low: float, live_op
         return False
     body = (px / op - 1.0) * 100.0
     min_body = probe_candle_min_body_pct()
-    if body < min_body or body > PROBE_CANDLE_MAX_BODY_PCT + 1e-12:
+    if body < min_body - 1e-12 or body > probe_candle_max_body_pct() + 1e-12:
         return False
     upper_wick = (hi - px) / op * 100.0
     if upper_wick > PROBE_CANDLE_MAX_WICK_PCT + 1e-12:
@@ -1524,7 +1523,13 @@ def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_op
     if px <= op + 1e-12:
         return False
     body = (px / op - 1.0) * 100.0
-    if body > PROBE_CANDLE_MAX_BODY_PCT * 1.5 + 1e-12:
+    if (
+        probe_candle_min_body_pct() - 1e-12
+        <= body
+        <= probe_candle_max_body_pct() + 1e-12
+    ):
+        return probe_spark_live_ok(px, hi, lo, op)
+    if body > probe_candle_max_body_pct() + 1e-12:
         return False
     upper_wick = (hi - px) / op * 100.0
     pos = (px - lo) / (hi - lo) if (lo > 0 and hi > lo + 1e-12) else 1.0
@@ -1566,23 +1571,21 @@ def probe_book_buy_ok(
 
 
 def probe_entry_obi_floor(*, strict: bool = False) -> float:
-    """Порог OBI: обычный вход без фильтра, жёсткий режим — 0.70."""
-    if not strict:
-        return 0.0
-    return float(PROBE_STRICT_MIN_ENTRY_OBI)
+    """Порог OBI: обычный вход 0.55, жёсткий режим 0.70."""
+    if strict:
+        return float(PROBE_STRICT_MIN_ENTRY_OBI)
+    return float(PROBE_MIN_ENTRY_OBI)
 
 
 def probe_entry_obi_ok(obi: float | None, *, strict: bool = False) -> bool:
-    """OBI перед Buy только в жёстком режиме. Нет котировки стакана — не блокируем."""
-    if not strict:
-        return True
+    """OBI перед Buy. Нет котировки стакана — не блокируем."""
     if obi is None:
         return True
     try:
         value = float(obi)
     except (TypeError, ValueError):
         return True
-    return value >= probe_entry_obi_floor(strict=True) - 1e-12
+    return value >= probe_entry_obi_floor(strict=strict) - 1e-12
 
 
 def _probe_staircase_setup(
@@ -1745,7 +1748,7 @@ def _probe_flag_setup(
     if px <= op or px <= flag_hi:
         return None
     body = (px / op - 1.0) * 100.0
-    if body < PROBE_CANDLE_MIN_BODY_PCT - 1e-12 or body > PROBE_CANDLE_MAX_BODY_PCT + 1e-12:
+    if body < probe_candle_min_body_pct() - 1e-12 or body > probe_candle_max_body_pct() + 1e-12:
         return None
     if (hi - px) / op * 100.0 > 0.50 + 1e-12:
         return None
@@ -1827,7 +1830,12 @@ def probe_candle_setup(
             ref_30m = float(window[-6].get("close") or 0)
         except (TypeError, ValueError):
             ref_30m = 0.0
-        if ref_30m > 0 and (price / ref_30m - 1.0) * 100.0 > PROBE_CANDLE_MAX_30M_CHG_PCT + 1e-12:
+        body_now = (price / op - 1.0) * 100.0 if op > 0 else 0.0
+        if (
+            ref_30m > 0
+            and (price / ref_30m - 1.0) * 100.0 > PROBE_CANDLE_MAX_30M_CHG_PCT + 1e-12
+            and body_now < probe_candle_min_body_pct() - 1e-12
+        ):
             return None
     # Отсечение длинных верхних фитилей продавца (> 0.85%) на 3 предыдущих 5м свечах.
     for prev_bar in bars[-4:-1]:
@@ -1850,20 +1858,33 @@ def probe_candle_setup(
         prior_high = max(float(bar["high"]) for bar in window)
     except (TypeError, ValueError, KeyError):
         return None
-    if prior_high > 0 and price > prior_high * (1.0 + PROBE_CANDLE_MAX_BODY_PCT / 100.0):
+    if prior_high > 0 and price > prior_high * (1.0 + probe_candle_max_body_pct() / 100.0):
         return None
     if prior_o > 0 and prior_c > prior_o:
         prior_body = (prior_c / prior_o - 1.0) * 100.0
         if prior_body > probe_candle_prior_max_body_pct() + 1e-12:
             return None
+    body = (price / op - 1.0) * 100.0 if op > 0 else 0.0
+    min_body = probe_candle_min_body_pct()
+    max_body = probe_candle_max_body_pct()
+    in_break = min_body - 1e-12 <= body <= max_body + 1e-12
     stair = _probe_staircase_setup(
         bars, typical_vol=typical, elapsed_frac=elapsed_frac
     ) or _probe_staircase_2bar_setup(
         bars, typical_vol=typical, elapsed_frac=elapsed_frac
     )
-    if stair:
+    if stair and in_break:
         return stair
-    return _probe_flag_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
+    flag = _probe_flag_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
+    if flag and in_break:
+        return flag
+    if not in_break:
+        return None
+    if vol < typical * PROBE_CANDLE_VOL_MULT * elapsed_frac:
+        return None
+    if not probe_spark_live_ok(price, hi, lo, op):
+        return None
+    return {"shelf": op, "price": price}
 
 
 def probe_scan_day_ok(
