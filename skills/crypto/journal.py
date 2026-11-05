@@ -619,6 +619,25 @@ class CryptoJournalMixin:
             conky_markets.poke_refresh()
         except Exception:
             pass
+        if common.telegram_configured():
+            for note in notes:
+                if "закрыл по бирже" not in note:
+                    continue
+                ticker = str(note.split()[0] or "").upper()
+                sell = next(
+                    (
+                        entry
+                        for entry in reversed(updated)
+                        if str(entry.get("ticker") or "").upper() == ticker
+                        and str(entry.get("side") or "") == "sell"
+                    ),
+                    None,
+                )
+                if sell is None:
+                    continue
+                line = "Дневник крипты: " + format_trade_line(sell)
+                logger.info("[Крипта] %s", line)
+                common.send_telegram_notification(line, background=False)
         return notes
 
 
