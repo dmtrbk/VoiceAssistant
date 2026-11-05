@@ -1625,6 +1625,10 @@ class TestDeskPolicy(unittest.TestCase):
             policy.btc_dip_exit_reason(price=0.9985, entry=1.0, scratch=True),
             "безубыток",
         )
+        self.assertTrue(policy.pocket_unwind_ready(price=0.2803, bid=0.2795))
+        self.assertFalse(policy.pocket_unwind_ready(price=0.2803, bid=0.2780))
+        self.assertTrue(policy.pocket_unwind_ready(price=0.2803, bid=0.0))
+        self.assertFalse(policy.pocket_unwind_ready(price=0.0, bid=0.2795))
 
     def test_btc_dip_rules(self):
         self.assertTrue(policy.btc_dip_should_buy(day_chg=-3.0, qty=0))

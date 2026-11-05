@@ -103,6 +103,7 @@ from .desk_policy import (
     ma_trend,
     position_basis,
     btc_dip_exit_reason,
+    pocket_unwind_ready,
     update_pocket_exit_arm,
     exit_trap_arm_pct,
     pocket_bounce_ready,
@@ -593,16 +594,27 @@ class CryptoDeskMixin:
                 obi_fn = getattr(self, "_orderbook_obi", None)
                 if callable(obi_fn):
                     obi = obi_fn(ticker)
-            reason = btc_dip_exit_reason(
-                price=price,
-                entry=entry,
-                exit_arm=exit_state,
-                now=now,
-                swing_low=float(leg.get("low") or 0),
-                scratch=bool(leg.get("scratch")),
-                bid=live_bid,
-                obi=obi,
-            )
+            unwind = bool(leg.get("unwind"))
+            if unwind:
+                reason = "срез" if pocket_unwind_ready(price=price, bid=live_bid) else None
+                if reason is None and price > 0:
+                    logger.info(
+                        "[Крипта] карман2 %s жду стакан для среза: цена %.4g bid %.4g",
+                        ticker,
+                        price,
+                        live_bid,
+                    )
+            else:
+                reason = btc_dip_exit_reason(
+                    price=price,
+                    entry=entry,
+                    exit_arm=exit_state,
+                    now=now,
+                    swing_low=float(leg.get("low") or 0),
+                    scratch=bool(leg.get("scratch")),
+                    bid=live_bid,
+                    obi=obi,
+                )
             if not reason or price <= 0:
                 if exit_state and price > 0:
                     need = float(exit_state["high"]) * (
@@ -623,7 +635,9 @@ class CryptoDeskMixin:
                 self._drop_anchor(ticker)
                 continue
             seen = getattr(self, "_last_fill", None)
-            use_maker = not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
+            use_maker = (not unwind) and not (
+                obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12
+            )
             try:
                 phrase = self._place_order(
                     ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker

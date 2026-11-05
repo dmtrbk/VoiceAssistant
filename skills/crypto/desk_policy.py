@@ -321,6 +321,8 @@ POCKET_EXIT_PULLBACK_PCT = 0.35
 POCKET_EXIT_WALL_PULLBACK_PCT = 0.20
 POCKET_EXIT_DEEP_PULLBACK_PCT = 1.0
 POCKET_EXIT_HOLD_SEC = 60
+# Срочный выход из кармана2: продаём, пока bid не хуже последней цены больше чем на 0.45%.
+POCKET_UNWIND_MAX_BID_GAP_PCT = 0.45
 EXIT_TRAP_BEAR_OBI = 0.28
 EXIT_TRAP_BULL_OBI = 0.72
 BTC_DIP_STOP_PCT = 15.0
@@ -539,6 +541,17 @@ def orderbook_obi(
     if tot <= 0:
         return None
     return bid_usd / tot
+
+
+def pocket_unwind_ready(*, price: float, bid: float = 0.0) -> bool:
+    """Срочный выход: стакан рядом с ценой, лишний проскальзывание не добавляем."""
+    px = float(price or 0)
+    if px <= 0:
+        return False
+    b = float(bid or 0)
+    if b <= 0:
+        return True
+    return (px - b) / px * 100.0 <= POCKET_UNWIND_MAX_BID_GAP_PCT + 1e-12
 
 
 def btc_dip_exit_reason(

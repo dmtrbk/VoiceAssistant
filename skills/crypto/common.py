@@ -700,6 +700,8 @@ def _parse_second_pocket_leg(raw: Any) -> dict[str, Any] | None:
     }
     if bool(raw.get("scratch")):
         out["scratch"] = True
+    if bool(raw.get("unwind")):
+        out["unwind"] = True
     return out
 
 
@@ -850,6 +852,8 @@ def upsert_second_pocket_leg(
         row["exit_ts"] = float(exit_ts or prev.get("exit_ts") or 0)
         if scratch or bool(prev.get("scratch")):
             row["scratch"] = True
+        if bool(prev.get("unwind")):
+            row["unwind"] = True
         legs[found] = row
     write_second_pocket_legs(legs, path=path)
     return True
