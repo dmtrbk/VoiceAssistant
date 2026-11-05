@@ -174,11 +174,17 @@ PROBE_SHELF_BARS = 96
 PROBE_ALGO_CANDLE = "candle"
 PROBE_ALGO_IMPULSE = "impulse"
 PROBE_ALGO_SPARK = "spark"
+PROBE_ALGO_POP = "pop"
 PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
-# Candle: ступенька 2/3 бара, иначе флаг. Выстрел — impulse; старт — spark.
-PROBE_ALGO_ORDER = (PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK)
+# Candle: ступенька/флаг. Выстрел — impulse. Старт — spark. Подскок 2–3.2% — pop.
+PROBE_ALGO_ORDER = (
+    PROBE_ALGO_CANDLE,
+    PROBE_ALGO_IMPULSE,
+    PROBE_ALGO_SPARK,
+    PROBE_ALGO_POP,
+)
 # 5м зелёная свеча: ловим начало восходящей свечи от open, без верхнего фитиля (слива).
 PROBE_CANDLE_LOOKBACK = 12
 # 0,25% ловил шум (CSPR/BICO +0,5%). INIT был +0,67…1,3% от open.
@@ -265,6 +271,16 @@ PROBE_SPARK_MAX_ELAPSED_SEC = 120.0
 PROBE_SPARK_MAX_BAR_POS = 1.0
 PROBE_SPARK_HOLD_SEC = 0.0
 PROBE_SPARK_CHASE_PCT = 1.2
+# Pop: та же 5м, когда тело уже выше потолка spark и ещё не пробой impulse +3%.
+# ICNT 07:15 +2.77% и 11:45 +2.72% проходят; кульминация 12:00 (+6.5% за 30м) нет.
+PROBE_POP_MIN_BODY_PCT = 2.0
+PROBE_POP_MAX_BODY_PCT = 3.2
+PROBE_POP_MAX_ELAPSED_SEC = 300.0
+PROBE_POP_VOL_MULT = 2.0
+PROBE_POP_MAX_WICK_PCT = 0.50
+PROBE_POP_MAX_30M_CHG_PCT = 5.5
+PROBE_POP_HOLD_SEC = 0.0
+PROBE_POP_CHASE_PCT = 2.0
 # Grind: горячее candle нельзя; у хая дня (+25%) — уже догон.
 PROBE_GRIND_MAX_DAY_PCT = 18.0
 # Лестница: ближе к началу хода, не только у самого хая. Свежий пробой +4% — не grind.
@@ -355,7 +371,12 @@ def probe_period_sec() -> float:
 def probe_scan_algo_order() -> tuple[str, ...]:
     tier = probe_tune_tier()
     if tier >= 3:
-        return (PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK)
+        return (
+            PROBE_ALGO_CANDLE,
+            PROBE_ALGO_IMPULSE,
+            PROBE_ALGO_SPARK,
+            PROBE_ALGO_POP,
+        )
     return PROBE_ALGO_ORDER
 
 
@@ -704,6 +725,7 @@ def probe_setup_ok_now(
         float(setup.get("stair") or 0) >= 1.0 - 1e-12
         or float(setup.get("impulse") or 0) >= 1.0 - 1e-12
         or float(setup.get("spark") or 0) >= 1.0 - 1e-12
+        or float(setup.get("pop") or 0) >= 1.0 - 1e-12
     )
     if not strong:
         return False
@@ -1392,6 +1414,92 @@ def probe_spark_setup(
     return {"shelf": op, "price": px, "spark": 1.0}
 
 
+def probe_pop_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
+    """Подскок: тело 2.0..3.2% от open, фитиль ≤ 0.5%, без слива под open."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or lo <= 0 or op <= 0 or hi < lo:
+        return False
+    body = (px / op - 1.0) * 100.0
+    if body < PROBE_POP_MIN_BODY_PCT - 1e-12 or body > PROBE_POP_MAX_BODY_PCT + 1e-12:
+        return False
+    if (hi - px) / op * 100.0 > PROBE_POP_MAX_WICK_PCT + 1e-12:
+        return False
+    if lo < op and (op - lo) / op * 100.0 > PROBE_CANDLE_MAX_DIP_PCT + 1e-12:
+        return False
+    return True
+
+
+def probe_pop_30m_ok(bars: list[dict[str, Any]], price: float) -> bool:
+    """Ход за 30м вместе с живой свечой. Выше 5.5% — уже кульминация, не первый подскок."""
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    if len(window) < 6 or float(price or 0) <= 0:
+        return True
+    try:
+        ref = float(window[-6].get("close") or 0)
+    except (TypeError, ValueError):
+        return True
+    if ref <= 0:
+        return True
+    return (float(price) / ref - 1.0) * 100.0 <= PROBE_POP_MAX_30M_CHG_PCT + 1e-12
+
+
+def probe_pop_buy_ok(
+    price: float,
+    live_high: float,
+    live_low: float,
+    live_open: float,
+    *,
+    elapsed_sec: float | None = None,
+) -> bool:
+    """Перед buy pop: бар ещё не закрыт и свеча всё ещё в полосе тела."""
+    if elapsed_sec is not None and (
+        float(elapsed_sec) < 0.0 or float(elapsed_sec) > PROBE_POP_MAX_ELAPSED_SEC + 1e-12
+    ):
+        return False
+    return probe_pop_live_ok(price, live_high, live_low, live_open)
+
+
+def probe_pop_setup(
+    bars: list[dict[str, Any]],
+    *,
+    now: float | None = None,
+) -> dict[str, float] | None:
+    """Живая 5м с телом 2–3.2% в любом месте бара. Полка — open. Покупка сразу."""
+    if now is None or len(bars) < PROBE_CANDLE_LOOKBACK + 2:
+        return None
+    forming = bars[-1]
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        bar_ts = float(forming.get("ts") or 0)
+        vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if bar_ts <= 0 or not vols:
+        return None
+    elapsed = float(now) - bar_ts
+    if elapsed < 0.0 or elapsed > PROBE_POP_MAX_ELAPSED_SEC + 1e-12:
+        return None
+    typical = _median(vols)
+    if typical <= 0:
+        return None
+    elapsed_frac = max(PROBE_CANDLE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
+    if vol < typical * PROBE_POP_VOL_MULT * elapsed_frac:
+        return None
+    if not probe_pop_live_ok(px, hi, lo, op):
+        return None
+    if not probe_pop_30m_ok(bars, px):
+        return None
+    return {"shelf": op, "price": px, "pop": 1.0}
+
+
 def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
     """Перед buy после arm: свеча всё ещё восходящая, не у самого кончика (кроме плотной ступеньки) и без слива."""
     px = float(price or 0)
@@ -1932,6 +2040,11 @@ def probe_algo_params(algo: str) -> dict[str, float]:
             "hold_sec": float(PROBE_SPARK_HOLD_SEC),
             "chase_pct": float(PROBE_SPARK_CHASE_PCT),
         }
+    if name == PROBE_ALGO_POP:
+        return {
+            "hold_sec": float(PROBE_POP_HOLD_SEC),
+            "chase_pct": float(PROBE_POP_CHASE_PCT),
+        }
     if name == PROBE_ALGO_SPRINT:
         return {
             "hold_sec": float(PROBE_SPRINT_HOLD_SEC),
@@ -1957,7 +2070,7 @@ def probe_pick_setup(
     day_high: float | None = None,
     now: float | None = None,
 ) -> dict[str, Any] | None:
-    """Первый сработавший по order. Живой стол: ступенька, выстрел, spark.
+    """Первый сработавший по order. Живой стол: ступенька, выстрел, spark, pop.
 
     Sprint/shelf/grind — только явный order= в тестах.
     """
@@ -1996,6 +2109,15 @@ def probe_pick_setup(
                 stair=False,
             ):
                 continue
+        elif name == PROBE_ALGO_POP:
+            setup = probe_pop_setup(bars5 or [], now=now)
+            if setup and not probe_candle_day_ok(
+                price=float(setup.get("price") or 0),
+                day_high=float(day_high or 0),
+                day_chg=day_chg,
+                stair=False,
+            ):
+                continue
         elif name == PROBE_ALGO_GRIND:
             setup = probe_grind_setup(bars15)
         elif name == PROBE_ALGO_SPRINT:
@@ -2025,7 +2147,7 @@ def probe_trends_ok(
     Candle: 15м может быть ещё neutral в начале свечи — лишь бы не bear.
     """
     name = str(algo or "").strip().lower()
-    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}:
+    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
         if trend15 == "bear" or trend1h == "bear":
             return False
         if trend15 != "bull" and trend1h != "bull":
@@ -2060,7 +2182,7 @@ def probe_arm_action(
     if shelf <= 0 or price <= shelf:
         return "drop"
     # Candle допускает neutral 15м (как на скане); bear — снять.
-    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}:
+    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
         if trend15 == "bear":
             return "drop"
     elif trend15 != "bull":
@@ -2071,7 +2193,7 @@ def probe_arm_action(
         and float(day_chg) >= PROBE_IMPULSE_MAX_DAY_PCT
     ):
         return "drop"
-    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK} and day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
+    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP} and day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
         return "drop"
     if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
         return "drop"
@@ -2119,7 +2241,7 @@ def probe_exit_reason(
         return "стоп"
     if level > 0 and px <= level:
         # Candle: INIT держался над open. Фитиль к open не продаём — только пробой.
-        if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}:
+        if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
             floor = level * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0)
             if px <= floor + 1e-12:
                 return "полка"
@@ -2142,13 +2264,13 @@ def probe_exit_reason(
     ):
         return "вершина"
     if (
-        name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK}
+        name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
         and float(opened_ts or 0) > 0
         and now is not None
         and float(now) - float(opened_ts) >= PROBE_FAIL_SCRATCH_SEC
         and peak_gain < arm_pct - 1e-6
     ):
-        if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}:
+        if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
             floor = level * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0) if level > 0 else 0.0
             shelf_lost = level > 0 and px <= floor + 1e-12
         else:
@@ -2168,6 +2290,7 @@ def probe_exit_reason(
         PROBE_ALGO_CANDLE,
         PROBE_ALGO_IMPULSE,
         PROBE_ALGO_SPARK,
+        PROBE_ALGO_POP,
         PROBE_ALGO_SPRINT,
         PROBE_ALGO_GRIND,
     }
@@ -2179,7 +2302,7 @@ def probe_exit_reason(
             return "ожидание"
     # candle/grind: купить рост → ждать ловушку → продать. Soft «тренд» не режем
     # (BLEND: −0.3% bear → handoff → потом +20%). Только полка / стоп / вершина.
-    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_GRIND}:
+    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP, PROBE_ALGO_GRIND}:
         return None
     if run and trend15 == "bear":
         return "тренд"

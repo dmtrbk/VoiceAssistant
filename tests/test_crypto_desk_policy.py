@@ -944,6 +944,83 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(spark_pick.get("hold_sec"), 0.0)
         self.assertEqual(policy.probe_setup_hold_sec(spark_pick), 0.0)
         self.assertEqual(policy.probe_setup_hold_sec({"algo": "spark"}), 90.0)
+        # Подскок ICNT: тело 2.77% после окна spark, объём 4×, фитиль короткий.
+        pop_bar = {
+            "ts": 1000.0,
+            "open": 1.0,
+            "high": 1.0285,
+            "low": 0.998,
+            "close": 1.0277,
+            "volume": 40.0,
+        }
+        self.assertIsNone(policy.probe_spark_setup(base5 + [pop_bar], now=1180.0))
+        pop = policy.probe_pop_setup(base5 + [pop_bar], now=1180.0)
+        self.assertIsNotNone(pop)
+        assert pop is not None
+        self.assertAlmostEqual(pop["shelf"], 1.0)
+        self.assertEqual(pop.get("pop"), 1.0)
+        picked_pop = policy.probe_pick_setup(
+            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+            base5 + [pop_bar],
+            day_chg=8.0,
+            day_high=1.05,
+            now=1180.0,
+        )
+        self.assertIsNotNone(picked_pop)
+        assert picked_pop is not None
+        self.assertEqual(picked_pop["algo"], policy.PROBE_ALGO_POP)
+        self.assertEqual(picked_pop.get("hold_sec"), 0.0)
+        self.assertIsNone(policy.probe_pop_setup(base5 + [spark_early], now=1180.0))
+        fat = {**pop_bar, "close": 1.035, "high": 1.036}
+        self.assertIsNone(policy.probe_pop_setup(base5 + [fat], now=1180.0))
+        wide_wick = {**pop_bar, "high": 1.034}
+        self.assertIsNone(policy.probe_pop_setup(base5 + [wide_wick], now=1180.0))
+        thin = {**pop_bar, "volume": 11.0}
+        self.assertIsNone(policy.probe_pop_setup(base5 + [thin], now=1180.0))
+        climax_base = list(base5)
+        climax_base[-6] = {**climax_base[-6], "open": 0.96, "close": 0.96}
+        self.assertIsNone(policy.probe_pop_setup(climax_base + [pop_bar], now=1180.0))
+        self.assertIsNone(
+            policy.probe_pick_setup(
+                [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+                base5 + [pop_bar],
+                day_chg=8.0,
+                day_high=1.028,
+                now=1180.0,
+            )
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.02,
+                entry=1.0277,
+                shelf=1.0,
+                trend15="bear",
+                peak=1.0277,
+                algo=policy.PROBE_ALGO_POP,
+                qty=40.0 / 1.0277,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
+            )
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.995,
+                entry=1.0277,
+                shelf=1.0,
+                trend15="bull",
+                peak=1.0277,
+                algo=policy.PROBE_ALGO_POP,
+                qty=40.0 / 1.0277,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
+            ),
+            "полка",
+        )
+        self.assertTrue(
+            policy.probe_setup_ok_now(
+                {"pop": 1.0}, now=1_700_000_000.0, turnover=1_600_000, strict=True
+            )
+        )
         at_high = {**spark_early, "close": 1.012, "high": 1.012, "low": 1.000}
         self.assertTrue(
             policy.probe_spark_live_ok(
@@ -1051,6 +1128,7 @@ class TestDeskPolicy(unittest.TestCase):
                 policy.PROBE_ALGO_CANDLE,
                 policy.PROBE_ALGO_IMPULSE,
                 policy.PROBE_ALGO_SPARK,
+                policy.PROBE_ALGO_POP,
             ),
         )
         self.assertNotIn(policy.PROBE_ALGO_GRIND, policy.PROBE_ALGO_ORDER)

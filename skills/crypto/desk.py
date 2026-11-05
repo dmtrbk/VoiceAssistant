@@ -64,6 +64,7 @@ from .desk_policy import (
     probe_exit_reason,
     probe_candle_buy_ok,
     probe_spark_buy_ok,
+    probe_pop_buy_ok,
     probe_candle_day_ok,
     probe_scan_day_ok,
     probe_daily_loss_blocked,
@@ -72,6 +73,7 @@ from .desk_policy import (
     PROBE_ALGO_CANDLE,
     PROBE_ALGO_IMPULSE,
     PROBE_ALGO_SPARK,
+    PROBE_ALGO_POP,
     PROBE_ALGO_GRIND,
     probe_max_legs,
     probe_setup_ok_now,
@@ -1225,7 +1227,7 @@ class CryptoDeskMixin:
                     float(live.get("low") or 0),
                 )
                 return
-        if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}:
+        if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
             # Актуальных 5м: buy_ok мягче live_ok — иначе hold убивает вход (CPOOL).
             try:
                 bars5 = self._probe_bars(ticker, "5", 20, cache_sec=2.0)
@@ -1257,15 +1259,19 @@ class CryptoDeskMixin:
                     arm_px,
                 )
                 return
-            if ask > 0 and str(algo or "") != PROBE_ALGO_SPARK:
+            if ask > 0 and str(algo or "") not in {PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
                 check_px = max(price, ask)
             live_hi = max(float(live.get("high") or 0), check_px)
             live_lo = float(live.get("low") or 0)
             live_op = float(live.get("open") or 0)
+            bar_ts = float(live.get("ts") or 0)
+            elapsed = (time.time() - bar_ts) if bar_ts > 0 else None
             if str(algo or "") == PROBE_ALGO_SPARK:
-                bar_ts = float(live.get("ts") or 0)
-                elapsed = (time.time() - bar_ts) if bar_ts > 0 else None
                 tip_ok = probe_spark_buy_ok(
+                    check_px, live_hi, live_lo, live_op, elapsed_sec=elapsed
+                )
+            elif str(algo or "") == PROBE_ALGO_POP:
+                tip_ok = probe_pop_buy_ok(
                     check_px, live_hi, live_lo, live_op, elapsed_sec=elapsed
                 )
             else:
@@ -1304,8 +1310,8 @@ class CryptoDeskMixin:
             algo=algo or "shelf",
             note={
                 "obi": obi,
-                "bid": bid if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK} else None,
-                "ask": ask if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK} else None,
+                "bid": bid if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP} else None,
+                "ask": ask if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP} else None,
             },
         )
 
@@ -1837,7 +1843,7 @@ class CryptoDeskMixin:
             order=tuple(
                 a
                 for a in order
-                if a in {PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK}
+                if a in {PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
             ),
             day_chg=day_chg,
             day_high=day_high,
@@ -1894,7 +1900,7 @@ class CryptoDeskMixin:
         )
         order = probe_scan_algo_order()
         classic = tuple(
-            a for a in order if a not in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK}
+            a for a in order if a not in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
         )
 
         def _arm_slots_left() -> int:
