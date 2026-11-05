@@ -892,6 +892,7 @@ class CryptoDeskMixin:
         blocked = {BTC_DIP_TICKER} | second_pocket_tickers()
         # Убыточный выход (MEGA/HAEDAL) — не сразу обратно в ту же монету.
         blocked |= set(crypto_journal.cooldown_tickers(cfg().cooldown_hours))
+        blocked |= set(crypto_journal.shelf_reentry_tickers())
         # Недавняя продажа — блок; если цена уже выше продажи — продолжение хода, пускаем.
         recent = set(crypto_journal.recently_sold(PROBE_REENTRY_HOURS))
         if recent:
@@ -1179,6 +1180,7 @@ class CryptoDeskMixin:
             return
         seen = getattr(self, "_last_fill", None)
         use_maker = not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
+        self._pending_exit_reason = reason if reason == "полка" else ""
         try:
             self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker)
         except Exception as exc:

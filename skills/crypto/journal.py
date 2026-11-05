@@ -512,6 +512,9 @@ class CryptoJournalMixin:
         quote_usd = round(float(quote or 0), 2)
         px = round(float(price or 0), 6)
         fee = round(max(0.0, float(fee_usd or 0)), 6)
+        pending = str(getattr(self, "_pending_exit_reason", "") or "")
+        self._pending_exit_reason = ""
+        note = str(pending or "")
         trades = _read_trades()
         entry: dict[str, Any] = {
             "ts": now.strftime("%d.%m %H:%M"),
@@ -523,6 +526,8 @@ class CryptoJournalMixin:
             "price": px,
             "fee_usd": fee,
         }
+        if note:
+            entry["reason"] = note
         if side_norm == "sell":
             pnl = realized_pnl_for_sell(
                 trades, ticker=ticker, quote=quote_usd, price=px, fee_usd=fee
@@ -736,6 +741,33 @@ def recently_sold(
     out: set[str] = set()
     for entry in rows:
         if str(entry.get("side") or "").lower() != "sell":
+            continue
+        epoch = _entry_epoch(entry)
+        if epoch is None or epoch < cutoff:
+            continue
+        ticker = str(entry.get("ticker") or "").upper()
+        if ticker:
+            out.add(ticker)
+    return out
+
+
+def shelf_reentry_tickers(
+    trades: list[dict[str, Any]] | None = None,
+    *,
+    now: float | None = None,
+    block_sec: float | None = None,
+) -> set[str]:
+    """После выхода «полка» ту же монету не берём PROBE_SHELF_REENTRY_SEC."""
+    from .desk_policy import PROBE_SHELF_REENTRY_SEC
+
+    rows = trades if trades is not None else _read_trades()
+    window = float(PROBE_SHELF_REENTRY_SEC if block_sec is None else block_sec)
+    cutoff = (now if now is not None else time.time()) - max(0.0, window)
+    out: set[str] = set()
+    for entry in rows:
+        if str(entry.get("side") or "").lower() != "sell":
+            continue
+        if str(entry.get("reason") or "") != "полка":
             continue
         epoch = _entry_epoch(entry)
         if epoch is None or epoch < cutoff:

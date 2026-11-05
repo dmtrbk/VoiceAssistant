@@ -77,17 +77,25 @@ MIN_TURNOVER_USD = 5_000_000.0
 # Суточный потолок +25% остался только у impulse: уже разогнанную свечу не догоняем.
 # Ловушка кармана/рукава: круг комиссий (taker 0,18% × 2) + $0.12 сверх (на $40 ~+0.66%).
 # Щуп impulse/grind: взвод ~+1.56% на $40 и откат 1.50% — первый выдох тренда не продаём.
-# Candle/spark/pop: взвод ~+0.91% ($0.22) и откат 0.45%, иначе пик +1.7% после 1.5%
-# отката остаётся ниже круга комиссии 0.36% и «вершина» не продаёт.
-# Пик от +4% — откат 1.0%, ходу есть чем дышать.
+# Candle/spark/pop: запас $0.36. На ноге $30 взвод ~+1.56% (чистыми около +1.2% после круга 0.36%).
+# Откат 0.45%, иначе мелкий пик после отката не покрывает комиссию.
+# Пик от +4% — откат 1.0%. Убыток глубже −1.4% режем сразу, не ждём полку свечи.
+# После пика +1.2% полка не ниже входа: возврат к entry−0.2% закрываем.
+# После продажи «полка» ту же монету не берём 90 минут.
 EXIT_FEE_SIDE = 0.0018
 EXIT_TRAP_EXTRA_USD = 0.12
 PROBE_TRAP_EXTRA_USD = 0.48
 PROBE_TRAP_PULLBACK_PCT = 1.50
-PROBE_FAST_TRAP_EXTRA_USD = 0.22
+PROBE_FAST_TRAP_EXTRA_USD = 0.36
 PROBE_FAST_TRAP_PULLBACK_PCT = 0.45
 PROBE_FAST_TRAP_RUN_PCT = 4.0
 PROBE_FAST_TRAP_RUN_PULLBACK_PCT = 1.0
+# Быстрый щуп: не отдавать серию плюсов одним сливом до open свечи.
+PROBE_FAST_LOSS_CAP_PCT = 1.4
+PROBE_FAST_BE_PEAK_PCT = 1.2
+PROBE_FAST_BE_BUFFER_PCT = 0.2
+# После «полки» не входить в ту же монету сразу (серия лосей на сползающем тренде).
+PROBE_SHELF_REENTRY_SEC = 90 * 60
 EXIT_TRAP_DEFAULT_COST_USD = 100.0
 
 # Стейблы не рукав, даже если оборот большой. Базовый список остаётся всегда.
@@ -2364,7 +2372,8 @@ def probe_exit_reason(
 ) -> str | None:
     """Стоп и полка. Плюс — ловушка: пик покрыл круг комиссии и запас, продажа на откате.
 
-    Подскок (candle/spark/pop): запас $0.22 и откат 0.45% (1.0% после пика +4%).
+    Подскок (candle/spark/pop): запас $0.36 и откат 0.45% (1.0% после пика +4%).
+    Убыток глубже −1.4% закрываем сразу. После пика +1.2% возврат к entry−0.2% тоже закрываем.
     Impulse: запас $0.48 и откат 1.50%. Медвежий стакан сжимает откат до 0.20%.
 
     Пока ловушка не взведена: shelf режется «ожиданием»/«дном»; подножка
@@ -2379,8 +2388,11 @@ def probe_exit_reason(
     if px <= 0 or ent <= 0:
         return None
     gain = (px / ent - 1.0) * 100.0
+    fast = name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
     if gain <= -cfg().probe_max_loss_pct:
         return "стоп"
+    if fast and gain <= -PROBE_FAST_LOSS_CAP_PCT + 1e-9:
+        return "полка"
     if level > 0 and px <= level:
         # Candle: INIT держался над open. Фитиль к open не продаём — только пробой.
         if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
@@ -2405,6 +2417,12 @@ def probe_exit_reason(
         and exit_gain >= 2.0 * EXIT_FEE_SIDE * 100.0 - 1e-6
     ):
         return "вершина"
+    if (
+        fast
+        and peak_gain >= PROBE_FAST_BE_PEAK_PCT - 1e-9
+        and px <= ent * (1.0 - PROBE_FAST_BE_BUFFER_PCT / 100.0) + 1e-12
+    ):
+        return "полка"
     if (
         name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
         and float(opened_ts or 0) > 0

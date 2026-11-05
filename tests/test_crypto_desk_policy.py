@@ -1653,8 +1653,54 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertAlmostEqual(
             policy.exit_trap_arm_pct(cost_usd=40.0, extra_usd=policy.PROBE_FAST_TRAP_EXTRA_USD),
-            0.91,
+            1.26,
             places=2,
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.985,
+                entry=1.0,
+                shelf=0.94,
+                trend15="bull",
+                peak=1.0,
+                algo=policy.PROBE_ALGO_SPARK,
+                qty=30.0,
+            ),
+            "полка",
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.990,
+                entry=1.0,
+                shelf=0.94,
+                trend15="bull",
+                peak=1.0,
+                algo=policy.PROBE_ALGO_CANDLE,
+                qty=30.0,
+            )
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.997,
+                entry=1.0,
+                shelf=0.97,
+                trend15="bull",
+                peak=1.013,
+                algo=policy.PROBE_ALGO_POP,
+                qty=30.0,
+            ),
+            "полка",
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.999,
+                entry=1.0,
+                shelf=0.97,
+                trend15="bull",
+                peak=1.013,
+                algo=policy.PROBE_ALGO_POP,
+                qty=30.0,
+            )
         )
         # Пик +1.7% и откат 0.5% ещё выше круга комиссии. Откат 1.5% уже ниже — не продаём.
         self.assertEqual(
@@ -2289,6 +2335,16 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertNotIn(
             "KAS",
             crypto_journal.recently_sold(policy.PROBE_REENTRY_HOURS, trades, now=now + 3 * 3600),
+        )
+        shelf = [
+            {"ticker": "FOGO", "side": "sell", "reason": "полка", "ts_epoch": now - 60 * 60},
+            {"ticker": "CAP", "side": "sell", "reason": "вершина", "ts_epoch": now - 60 * 60},
+        ]
+        self.assertIn("FOGO", crypto_journal.shelf_reentry_tickers(shelf, now=now))
+        self.assertNotIn("CAP", crypto_journal.shelf_reentry_tickers(shelf, now=now))
+        self.assertNotIn(
+            "FOGO",
+            crypto_journal.shelf_reentry_tickers(shelf, now=now + 40 * 60),
         )
 
     def test_probe_loss_guard_night_and_shelf_cooldown(self):
