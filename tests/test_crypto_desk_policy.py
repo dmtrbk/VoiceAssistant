@@ -2031,31 +2031,54 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertTrue(policy.probe_pin_row_ok(rows[1]))
         self.assertFalse(policy.probe_pin_row_ok(rows[0]))
         self.assertFalse(policy.probe_pin_row_ok(rows[3]))
-        picked = policy.probe_choose_pin(rows, None, now=now, lost=set())
+        picked = policy.probe_choose_pin(
+            rows, None, now=now, lost=set(), moves={"CAP": 2.4, "ARX": 1.6}
+        )
         self.assertIsNotNone(picked)
         assert picked is not None
-        self.assertEqual(picked["ticker"], "ARX")
-        lost_arx = policy.probe_choose_pin(rows, picked, now=now + 60, lost={"ARX", "PYBOBO"})
-        self.assertEqual(lost_arx["ticker"] if lost_arx else "", "CAP")
+        self.assertEqual(picked["ticker"], "CAP")
+        lost_cap = policy.probe_choose_pin(
+            rows, picked, now=now + 60, lost={"CAP"}, moves={"CAP": 2.4, "ARX": 1.6}
+        )
+        self.assertEqual(lost_cap["ticker"] if lost_cap else "", "ARX")
         held = policy.probe_choose_pin(
             rows,
-            {"ticker": "ARX", "ts": now, "score": 50.0},
-            now=now + 20 * 60,
+            {"ticker": "ARX", "ts": now, "score": 1.8},
+            now=now + 30,
             lost=set(),
+            moves={"ARX": 1.8, "CAP": 1.9},
         )
         self.assertEqual(held["ticker"] if held else "", "ARX")
+        switched = policy.probe_choose_pin(
+            rows,
+            {"ticker": "ARX", "ts": now, "score": 1.6},
+            now=now + 30,
+            lost=set(),
+            moves={"ARX": 1.6, "CAP": 2.4},
+        )
+        self.assertEqual(switched["ticker"] if switched else "", "CAP")
         dropped = policy.probe_choose_pin(
             rows,
-            {"ticker": "ELSA", "ts": now, "score": 40.0},
+            {"ticker": "ELSA", "ts": now, "score": 2.0},
             now=now + 60,
             lost=set(),
+            moves={"ELSA": 2.0, "CAP": 2.4},
         )
         self.assertNotEqual(dropped["ticker"] if dropped else "", "ELSA")
+        faded = policy.probe_choose_pin(
+            rows,
+            {"ticker": "FLUID", "ts": now, "score": 62.0},
+            now=now + 60,
+            lost=set(),
+            moves={"FLUID": 0.2, "CAP": 2.4},
+        )
+        self.assertEqual(faded["ticker"] if faded else "", "CAP")
         forced = policy.probe_choose_pin(
             rows,
             {"ticker": "KOR", "ts": now, "score": 0.0, "forced": True},
             now=now + 20 * 60,
             lost=set(),
+            moves={"CAP": 2.4},
         )
         self.assertEqual(forced["ticker"] if forced else "", "KOR")
         after = policy.probe_choose_pin(
@@ -2063,15 +2086,25 @@ class TestJournalChurnAndDaily(unittest.TestCase):
             {"ticker": "KOR", "ts": now, "score": 0.0, "forced": True},
             now=now + 46 * 60,
             lost=set(),
+            moves={"CAP": 2.4},
         )
-        self.assertEqual(after["ticker"] if after else "", "ARX")
-        stuck = policy.probe_choose_pin(
-            rows,
-            {"ticker": "ARX", "ts": now, "score": 72.0},
-            now=now + 2 * 3600,
-            lost=set(),
-        )
-        self.assertEqual(stuck["ticker"] if stuck else "", "ARX")
+        self.assertEqual(after["ticker"] if after else "", "CAP")
+        quiet = [
+            {"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0}
+            for _ in range(16)
+        ]
+        self.assertIsNone(policy.probe_pin_move(quiet))
+        cap_bars = quiet[:-4] + [
+            {"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0},
+            {"open": 1.0, "high": 1.002, "low": 0.998, "close": 1.003, "volume": 10.0},
+            {"open": 1.003, "high": 1.006, "low": 1.0, "close": 1.004, "volume": 12.0},
+            {"open": 1.004, "high": 1.028, "low": 1.004, "close": 1.024, "volume": 40.0},
+        ]
+        move = policy.probe_pin_move(cap_bars)
+        self.assertIsNotNone(move)
+        assert move is not None
+        self.assertGreaterEqual(move, policy.PROBE_PIN_MOVE_PCT)
+        self.assertIsNone(policy.probe_choose_pin(rows, None, now=now, lost=set()))
         weak = [
             {"ticker": "MET", "chg": 8.2, "turnover": 1_600_000, "price": 0.31, "high": 0.315},
         ]

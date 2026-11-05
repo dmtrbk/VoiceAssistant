@@ -92,6 +92,8 @@ from .desk_policy import (
     probe_scan_rank,
     probe_scan_ranked_rows,
     probe_choose_pin,
+    probe_pin_move,
+    probe_pin_row_ok,
     probe_setup_hold_sec,
     PROBE_PIN_ON,
     probe_trends_ok,
@@ -1777,6 +1779,7 @@ class CryptoDeskMixin:
             now=time.time(),
             lost=crypto_journal.probe_recent_loss_tickers(tape=tape),
             skip=probe_tickers() | second_pocket_tickers(),
+            moves=self._probe_pin_moves(tape),
         )
         prev_name = str(prev.get("ticker") or "").upper()
         name = str((chosen or {}).get("ticker") or "").upper()
@@ -1800,7 +1803,7 @@ class CryptoDeskMixin:
                 forced=forced,
             )
             logger.info(
-                "[Крипта] щуп пин: %s скор %.1f%s",
+                "[Крипта] щуп пин: %s ход %+.1f%%%s",
                 name,
                 float(chosen.get("score") or 0),
                 " вручную" if forced else "",
@@ -1809,6 +1812,43 @@ class CryptoDeskMixin:
                 note = " вручную" if forced else ""
                 common.send_telegram_notification(f"Крипта: щуп пин {name}{note}", background=True)
         return name
+
+    def _probe_pin_moves(self, tape: list[dict[str, Any]]) -> dict[str, float]:
+        """Ход за 15м у ликвидных имён. Кэш минуту, чтобы не долбить 5м."""
+        now = time.time()
+        cached = getattr(self, "_probe_pin_move_cache", None)
+        cached_at = float(getattr(self, "_probe_pin_move_ts", 0.0) or 0.0)
+        if isinstance(cached, dict) and now - cached_at < 60.0:
+            return cached
+        ranked: list[tuple[float, str]] = []
+        for row in tape:
+            if not probe_pin_row_ok(row):
+                continue
+            ticker = str(row.get("ticker") or "").upper()
+            try:
+                turn = float(row.get("turnover") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ticker:
+                ranked.append((turn, ticker))
+        ranked.sort(reverse=True)
+        names = [ticker for _turn, ticker in ranked[:16]]
+        current = str(read_probe_pin().get("ticker") or "").upper()
+        if current and current not in names:
+            names.append(current)
+        moves: dict[str, float] = {}
+        for ticker in names:
+            try:
+                bars = self._probe_bars(ticker, "5", 20, cache_sec=55.0)
+            except Exception as exc:
+                logger.info("[Крипта] щуп пин %s 15м: %s", ticker, exc)
+                continue
+            move = probe_pin_move(bars)
+            if move is not None:
+                moves[ticker] = move
+        self._probe_pin_move_cache = moves
+        self._probe_pin_move_ts = now
+        return moves
 
     def _note_pin_idle(self, ticker: str) -> None:
         name = str(ticker or "").upper()
@@ -1891,6 +1931,8 @@ class CryptoDeskMixin:
             and not probe_is_paper()
             and not cfg().second_on
         ):
+            self._refresh_probe_pin(tape)
+            self._note_probe_beat(cap=cap, pin=str(read_probe_pin().get("ticker") or ""))
             return
         if pause:
             self._note_probe_pause(pause)
@@ -1958,6 +2000,7 @@ class CryptoDeskMixin:
             self._probe_scan_one(row, blocked, order, cache_sec=8.0 if fast_bar else 45.0)
         # 2) Узкий топ: impulse/sprint/shelf. Пусто, пока в ORDER только candle.
         if not classic or _arm_slots_left() <= 0:
+            self._note_probe_beat(cap=cap, pin=pin)
             return
         for _rank, row in ranked[:PROBE_SCAN_CLASSIC_LIMIT]:
             if _arm_slots_left() <= 0:
@@ -1990,6 +2033,28 @@ class CryptoDeskMixin:
                 logger.info("[Крипта] щуп %s час: %s", ticker, exc)
                 continue
             _try_arm_row(row, setup, bars15, hour)
+        self._note_probe_beat(cap=cap, pin=pin)
+
+    def _note_probe_beat(self, *, cap: int, pin: str) -> None:
+        """Раз в минуту: слоты, пин и кто идёт за 15м. Иначе консоль молчит."""
+        now = time.time()
+        last = float(getattr(self, "_probe_beat_ts", 0.0) or 0.0)
+        if now - last < 60.0:
+            return
+        self._probe_beat_ts = now
+        moves = getattr(self, "_probe_pin_move_cache", None) or {}
+        top = sorted(moves.items(), key=lambda item: float(item[1]), reverse=True)[:3]
+        move_bit = ", ".join(f"{name} {float(chg):+.1f}%" for name, chg in top) or "никого"
+        held = len(probe_legs()) + len(probe_arms())
+        mode = "бумага" if probe_is_paper() else "бой"
+        logger.info(
+            "[Крипта] щуп: %s, слоты %s/%s, пин %s, ход: %s",
+            mode,
+            held,
+            cap,
+            pin or "нет",
+            move_bit,
+        )
 
     def _spot_buy_vwap(self, ticker: str, need_qty: float) -> float | None:
         """Средняя цена ручной покупки по свежим fill Bybit (spot)."""

@@ -161,6 +161,10 @@ PROBE_PIN_MAX_HOLD_SEC = 3 * 3600
 PROBE_PIN_TOP_N = 30
 PROBE_PIN_KEEP_TOP_N = 8
 PROBE_PIN_MIN_SCORE = 45.0
+PROBE_PIN_MOVE_PCT = 1.5
+PROBE_PIN_MOVE_BARS = 3
+PROBE_PIN_MOVE_VOL_MULT = 1.5
+PROBE_PIN_SWITCH_PCT = 0.3
 PROBE_PIN_LOSS_LOOKBACK_SEC = 12 * 3600
 # Крошечный срез на сильном дне (ICNT −$0.30 при +13%) пин не банит.
 PROBE_PIN_SCRATCH_IGNORE_USD = 0.50
@@ -938,7 +942,7 @@ def probe_day_ranks(rows: list[dict[str, Any]] | None) -> dict[str, int]:
 
 
 def probe_pin_row_ok(row: dict[str, Any] | None) -> bool:
-    """Кандидат пина: ликвидный продолжатель, не парабола и не у самого хая."""
+    """Фильтр пина: оборот, не парабола, есть воздух до хая. Сутки сами по себе не выбирают."""
     if not isinstance(row, dict):
         return False
     ticker = str(row.get("ticker") or "").upper()
@@ -952,26 +956,39 @@ def probe_pin_row_ok(row: dict[str, Any] | None) -> bool:
         return False
     if price <= 0 or turn < PROBE_PIN_MIN_TURNOVER_USD - 1e-9:
         return False
-    if chg < PROBE_PIN_MIN_DAY_PCT - 1e-12 or chg > PROBE_PIN_MAX_DAY_PCT + 1e-12:
+    if chg > PROBE_PIN_MAX_DAY_PCT + 1e-12:
         return False
     room = probe_pin_room_pct(row)
     return PROBE_PIN_MIN_ROOM_PCT - 1e-12 <= room <= PROBE_PIN_MAX_ROOM_PCT + 1e-12
 
 
-def probe_pin_score(row: dict[str, Any], *, rank: int) -> float:
-    """Скор пина: место в топе + рост + воздух до хая + оборот сверх пола."""
+def probe_pin_move(bars: list[dict[str, Any]] | None) -> float | None:
+    """Ход за 15м в процентах. None — тихо или объём не выше обычного.
+
+    bars — 5м от старых к новым, последняя может быть живой.
+    """
+    need = PROBE_PIN_MOVE_BARS + 13
+    if not bars or len(bars) < need:
+        return None
+    ref_bar = bars[-(PROBE_PIN_MOVE_BARS + 1)]
+    window = bars[-PROBE_PIN_MOVE_BARS:]
+    prior = bars[-(PROBE_PIN_MOVE_BARS + 13):-(PROBE_PIN_MOVE_BARS + 1)]
     try:
-        chg = float(row.get("chg") or 0)
-        turn = float(row.get("turnover") or 0)
+        ref = float(ref_bar.get("close") or 0)
+        price = float(bars[-1].get("close") or 0)
+        live_vol = max(float(bar.get("volume") or 0) for bar in window)
+        base = [float(bar.get("volume") or 0) for bar in prior if float(bar.get("volume") or 0) > 0]
     except (TypeError, ValueError):
-        return 0.0
-    span = max(1e-9, PROBE_PIN_MAX_DAY_PCT - PROBE_PIN_MIN_DAY_PCT)
-    room_span = max(1e-9, PROBE_PIN_MAX_ROOM_PCT - PROBE_PIN_MIN_ROOM_PCT)
-    rank_pts = max(0.0, (PROBE_PIN_TOP_N - int(rank) + 1) / PROBE_PIN_TOP_N) * 40.0
-    chg_pts = max(0.0, min(1.0, (chg - PROBE_PIN_MIN_DAY_PCT) / span)) * 25.0
-    room_pts = max(0.0, min(1.0, (probe_pin_room_pct(row) - PROBE_PIN_MIN_ROOM_PCT) / room_span)) * 25.0
-    turn_pts = max(0.0, min(10.0, (turn / PROBE_PIN_MIN_TURNOVER_USD - 1.0) * 2.0))
-    return rank_pts + chg_pts + room_pts + turn_pts
+        return None
+    if ref <= 0 or price <= 0 or not base:
+        return None
+    move = (price / ref - 1.0) * 100.0
+    if move < PROBE_PIN_MOVE_PCT - 1e-12:
+        return None
+    typical = _median(base)
+    if typical <= 0 or live_vol < typical * PROBE_PIN_MOVE_VOL_MULT - 1e-12:
+        return None
+    return move
 
 
 def probe_pin_hard_drop_reason(
@@ -1003,10 +1020,8 @@ def probe_pin_hard_drop_reason(
         return "нет воздуха"
     if room > PROBE_PIN_MAX_ROOM_PCT + 1e-12:
         return "слив с хая"
-    if chg < PROBE_PIN_MIN_DAY_PCT - 1e-12:
-        return "сутки ослабли"
-    if rank is None or int(rank) > PROBE_PIN_TOP_N:
-        return "вне топа"
+    if chg < 0.0:
+        return "сутки в минусе"
     return None
 
 
@@ -1017,13 +1032,21 @@ def probe_choose_pin(
     now: float,
     lost: set[str] | None = None,
     skip: set[str] | None = None,
+    moves: dict[str, float] | None = None,
 ) -> dict[str, Any] | None:
-    """Выбрать или удержать мягкий пин. Пусто — бродячие слоты как обычно."""
+    """Пин — кто идёт последние 15 минут. Ход сдулся — слот снова бродячий.
+
+    moves: тикер → ход за 15м в %. Сильнее текущего на PROBE_PIN_SWITCH_PCT — переключаемся сразу.
+    """
     if not PROBE_PIN_ON:
         return None
     lost_names = {str(name).upper() for name in (lost or set()) if name}
     skip_names = {str(name).upper() for name in (skip or set()) if name}
-    ranks = probe_day_ranks(rows)
+    live_moves = {
+        str(name).upper(): float(value)
+        for name, value in (moves or {}).items()
+        if name and float(value or 0) >= PROBE_PIN_MOVE_PCT - 1e-12
+    }
     by_ticker: dict[str, dict[str, Any]] = {}
     for row in rows or []:
         if not isinstance(row, dict):
@@ -1031,19 +1054,14 @@ def probe_choose_pin(
         ticker = str(row.get("ticker") or "").upper()
         if ticker:
             by_ticker[ticker] = row
-    scored: list[tuple[float, str, dict[str, Any]]] = []
-    for ticker, row in by_ticker.items():
+    scored: list[tuple[float, str]] = []
+    for ticker, move in live_moves.items():
         if ticker in lost_names or ticker in skip_names:
             continue
-        rank = ranks.get(ticker)
-        if rank is None or rank > PROBE_PIN_TOP_N:
-            continue
+        row = by_ticker.get(ticker)
         if not probe_pin_row_ok(row):
             continue
-        score = probe_pin_score(row, rank=rank)
-        if score < PROBE_PIN_MIN_SCORE - 1e-12:
-            continue
-        scored.append((score, ticker, row))
+        scored.append((float(move), ticker))
     scored.sort(key=lambda item: item[0], reverse=True)
 
     cur = current if isinstance(current, dict) else {}
@@ -1056,7 +1074,6 @@ def probe_choose_pin(
         cur_score = 0.0
     age = (float(now) - cur_ts) if cur_ticker and cur_ts > 0 else 1e18
     cur_row = by_ticker.get(cur_ticker)
-    cur_rank = ranks.get(cur_ticker)
     forced = bool(cur.get("forced"))
     if cur_ticker and forced and age < PROBE_PIN_HOLD_SEC:
         try:
@@ -1071,40 +1088,19 @@ def probe_choose_pin(
                 "forced": True,
             }
     drop = (
-        probe_pin_hard_drop_reason(cur_row, ticker=cur_ticker, rank=cur_rank, lost=lost_names)
+        probe_pin_hard_drop_reason(cur_row, ticker=cur_ticker, rank=None, lost=lost_names)
         if cur_ticker
         else "пусто"
     )
-    if cur_ticker and cur_ticker not in skip_names and drop is None:
-        live_score = (
-            probe_pin_score(cur_row, rank=int(cur_rank))
-            if cur_row and cur_rank
-            else cur_score
-        )
-        strong = (
-            int(cur_rank or 999) <= PROBE_PIN_KEEP_TOP_N
-            and live_score >= PROBE_PIN_MIN_SCORE - 1e-12
-        )
-        if strong:
-            return {"ticker": cur_ticker, "ts": cur_ts, "score": live_score}
-        if age < PROBE_PIN_HOLD_SEC and live_score >= PROBE_PIN_MIN_SCORE - 1e-12:
-            return {
-                "ticker": cur_ticker,
-                "ts": cur_ts,
-                "score": live_score or cur_score,
-            }
-        if age < PROBE_PIN_MAX_HOLD_SEC and live_score >= PROBE_PIN_MIN_SCORE - 1e-12:
-            best = scored[0] if scored else None
-            if (
-                best is None
-                or best[1] == cur_ticker
-                or best[0] <= live_score * PROBE_PIN_SWITCH_SCORE_MULT
-            ):
-                return {"ticker": cur_ticker, "ts": cur_ts, "score": live_score}
+    cur_move = live_moves.get(cur_ticker, 0.0)
+    if cur_ticker and cur_ticker not in skip_names and drop is None and cur_move >= PROBE_PIN_MOVE_PCT - 1e-12:
+        best = scored[0] if scored else None
+        if best is None or best[1] == cur_ticker or best[0] < cur_move + PROBE_PIN_SWITCH_PCT - 1e-12:
+            return {"ticker": cur_ticker, "ts": cur_ts or float(now), "score": cur_move}
 
     if not scored:
         return None
-    score, ticker, _row = scored[0]
+    score, ticker = scored[0]
     if ticker == cur_ticker and cur_ts > 0:
         return {"ticker": ticker, "ts": cur_ts, "score": score}
     return {"ticker": ticker, "ts": float(now), "score": score}
