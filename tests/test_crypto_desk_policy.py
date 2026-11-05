@@ -698,33 +698,49 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.probe_min_turnover_usd(strict=True), 1_500_000.0)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_SEC, 25 * 60)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_LOSS_USD, 0.25)
-        self.assertFalse(
+        self.assertFalse(policy.PROBE_MARKET_FALL_ON)
+        # Падающий рынок выключен — даже глубокий BTC/узкая ширина не стопят вход.
+        self.assertTrue(
             policy.probe_market_regime_ok([{"ticker": "BTC", "chg": -3.1, "turnover": 50_000_000}])[0]
         )
         red_market = [{"ticker": f"C{i}", "chg": -2.0, "turnover": 500_000} for i in range(25)]
-        self.assertFalse(policy.probe_market_regime_ok(red_market)[0])
+        self.assertTrue(policy.probe_market_regime_ok(red_market)[0])
         thin_green = [
             {"ticker": f"C{i}", "chg": 2.0 if i < 8 else -1.0, "turnover": 500_000}
             for i in range(25)
         ]
-        self.assertFalse(policy.probe_market_regime_ok(thin_green)[0])
+        self.assertTrue(policy.probe_market_regime_ok(thin_green)[0])
         normal_market = [
             {"ticker": f"C{i}", "chg": 2.0 if i < 10 else -1.0, "turnover": 500_000}
             for i in range(25)
         ]
         self.assertTrue(policy.probe_market_regime_ok(normal_market)[0])
-        self.assertFalse(
+        self.assertTrue(
             policy.probe_market_regime_ok(
                 [{"ticker": "BTC", "chg": 2.0, "turnover": 50_000_000}],
                 btc_flash_pct=-1.2,
             )[0]
         )
-        self.assertTrue(
-            policy.probe_market_regime_ok(
-                [{"ticker": "BTC", "chg": 2.0, "turnover": 50_000_000}],
-                btc_flash_pct=-0.4,
-            )[0]
-        )
+        with patch.object(policy, "PROBE_MARKET_FALL_ON", True):
+            self.assertFalse(
+                policy.probe_market_regime_ok(
+                    [{"ticker": "BTC", "chg": -3.1, "turnover": 50_000_000}]
+                )[0]
+            )
+            self.assertFalse(policy.probe_market_regime_ok(red_market)[0])
+            self.assertFalse(policy.probe_market_regime_ok(thin_green)[0])
+            self.assertFalse(
+                policy.probe_market_regime_ok(
+                    [{"ticker": "BTC", "chg": 2.0, "turnover": 50_000_000}],
+                    btc_flash_pct=-1.2,
+                )[0]
+            )
+            self.assertTrue(
+                policy.probe_market_regime_ok(
+                    [{"ticker": "BTC", "chg": 2.0, "turnover": 50_000_000}],
+                    btc_flash_pct=-0.4,
+                )[0]
+            )
         flash_bars = [{"close": 100.0}] * 3 + [{"close": 98.5}]
         self.assertAlmostEqual(policy.probe_btc_flash_pct(flash_bars), -1.5)
         self.assertEqual(policy.PROBE_MIN_MARKET_BREADTH_PCT, 35.0)
@@ -745,8 +761,10 @@ class TestDeskPolicy(unittest.TestCase):
                 policy.probe_strict_reason("после полки пауза 20м", rising_btc),
                 "после полки пауза 20м",
             )
-            self.assertIsNone(
-                policy.probe_strict_reason("после полки пауза 20м", falling)
+            # При выкл. рыночном стопе falling не глушит жёсткий режим.
+            self.assertEqual(
+                policy.probe_strict_reason("после полки пауза 20м", falling),
+                "после полки пауза 20м",
             )
             self.assertIsNone(
                 policy.probe_strict_reason("дневной лимит убытка (-6.20$)", rising_btc)
@@ -762,22 +780,30 @@ class TestDeskPolicy(unittest.TestCase):
             now=t0,
             pause_until=0.0,
         )
-        self.assertIn("падающий рынок", reason or "")
-        self.assertAlmostEqual(until, t0 + 3600.0)
-        reason2, until2 = policy.probe_market_regime_pause_reason(
-            normal_market,
-            now=t0 + 600.0,
-            pause_until=until,
-        )
-        self.assertIn("пауза", reason2 or "")
-        self.assertAlmostEqual(until2, until)
-        reason3, until3 = policy.probe_market_regime_pause_reason(
-            normal_market,
-            now=t0 + 3601.0,
-            pause_until=until,
-        )
-        self.assertIsNone(reason3)
-        self.assertEqual(until3, 0.0)
+        self.assertIsNone(reason)
+        self.assertEqual(until, 0.0)
+        with patch.object(policy, "PROBE_MARKET_FALL_ON", True):
+            reason_on, until_on = policy.probe_market_regime_pause_reason(
+                [{"ticker": "BTC", "chg": -4.0, "turnover": 50_000_000}],
+                now=t0,
+                pause_until=0.0,
+            )
+            self.assertIn("падающий рынок", reason_on or "")
+            self.assertAlmostEqual(until_on, t0 + 3600.0)
+            reason2, until2 = policy.probe_market_regime_pause_reason(
+                normal_market,
+                now=t0 + 600.0,
+                pause_until=until_on,
+            )
+            self.assertIn("пауза", reason2 or "")
+            self.assertAlmostEqual(until2, until_on)
+            reason3, until3 = policy.probe_market_regime_pause_reason(
+                normal_market,
+                now=t0 + 3601.0,
+                pause_until=until_on,
+            )
+            self.assertIsNone(reason3)
+            self.assertEqual(until3, 0.0)
         self.assertAlmostEqual(
             policy.probe_scan_rank({
                 "chg": -2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
@@ -790,8 +816,21 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             policy.PROBE_DAY_MIN_PCT,
         )
-        self.assertEqual(policy.PROBE_SCAN_LIMIT, 4)
-        self.assertEqual(policy.PROBE_SCAN_CLASSIC_LIMIT, 4)
+        self.assertEqual(policy.PROBE_SCAN_LIMIT_LIVE, 6)
+        self.assertEqual(policy.PROBE_SCAN_CLASSIC_LIMIT_LIVE, 6)
+        self.assertEqual(policy.PROBE_SCAN_LIMIT, 6)
+        self.assertEqual(
+            policy.probe_scan_limits(paper=False),
+            (6, 6, 6),
+        )
+        self.assertEqual(
+            policy.probe_scan_limits(paper=True),
+            (
+                policy.PROBE_SCAN_LIMIT_PAPER,
+                policy.PROBE_SCAN_CLASSIC_LIMIT_PAPER,
+                policy.PROBE_SCAN_MANDATORY_TOP_PAPER,
+            ),
+        )
         self.assertEqual(
             policy.probe_scan_rank({
                 "chg": 40.0, "price": 0.0265, "low": 0.017, "high": 0.027, "turnover": 2_000_000,
@@ -818,24 +857,29 @@ class TestDeskPolicy(unittest.TestCase):
             [str(r[1]["ticker"]) for r in ranked[:5]],
             ["D", "F", "B", "C", "A"],
         )
-        self.assertEqual(policy.PROBE_SCAN_MANDATORY_TOP, 4)
-        # Боевой скан — только топ-4; ликвидный середняк в хвост не лезет.
+        self.assertEqual(policy.PROBE_SCAN_MANDATORY_TOP_LIVE, 6)
+        # Боевой скан — только топ-6; ликвидный середняк в хвост не лезет.
         crowd = [
             {"ticker": f"G{i}", "chg": 40.0 - i * 0.4, "price": 1.0, "turnover": 200_000}
             for i in range(50)
         ] + [
             {"ticker": "LIQ", "chg": 4.0, "price": 1.0, "turnover": 8_000_000},
         ]
-        crowd_ranked = policy.probe_scan_ranked_rows(crowd)
+        crowd_ranked = policy.probe_scan_ranked_rows(crowd, paper=False)
         self.assertEqual(
             [str(r[1]["ticker"]) for r in crowd_ranked],
-            ["G0", "G1", "G2", "G3"],
+            ["G0", "G1", "G2", "G3", "G4", "G5"],
         )
-        # При широком cap после mandatory-top высоколиквидный разгон встаёт раньше хвоста.
-        wide = policy.probe_scan_ranked_rows(crowd, limit=60)
+        # Имитация: широкий скан; после mandatory-top высоколиквидный разгон раньше хвоста.
+        paper_ranked = policy.probe_scan_ranked_rows(crowd, paper=True)
+        self.assertGreaterEqual(len(paper_ranked), 50)
+        self.assertEqual(str(paper_ranked[0][1]["ticker"]), "G0")
+        self.assertEqual(str(paper_ranked[49][1]["ticker"]), "G49")
+        self.assertEqual(str(paper_ranked[50][1]["ticker"]), "LIQ")
+        wide = policy.probe_scan_ranked_rows(crowd, limit=60, paper=True)
         self.assertEqual(str(wide[0][1]["ticker"]), "G0")
-        self.assertEqual(str(wide[3][1]["ticker"]), "G3")
-        self.assertEqual(str(wide[4][1]["ticker"]), "LIQ")
+        self.assertEqual(str(wide[49][1]["ticker"]), "G49")
+        self.assertEqual(str(wide[50][1]["ticker"]), "LIQ")
         mild_red = policy.probe_scan_ranked_rows([
             {"ticker": "RED", "chg": -2.0, "price": 1.0, "turnover": 500_000},
             {"ticker": "DEAD", "chg": -4.0, "price": 1.0, "turnover": 500_000},
@@ -1155,8 +1199,11 @@ class TestDeskPolicy(unittest.TestCase):
             {"open": 1.0045, "high": 1.0095, "low": 1.0045, "close": 1.009, "volume": 16.0},
         ]
         self.assertIsNone(policy.probe_candle_setup(stair2_bars))
+        self.assertTrue(policy.PROBE_DAILY_LOSS_ON)
         self.assertFalse(policy.probe_daily_loss_blocked(-5.5))
         self.assertTrue(policy.probe_daily_loss_blocked(-6.0))
+        with patch.object(policy, "PROBE_DAILY_LOSS_ON", False):
+            self.assertFalse(policy.probe_daily_loss_blocked(-6.0))
         self.assertEqual(
             policy.PROBE_ALGO_ORDER,
             (
@@ -2166,6 +2213,10 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         ]
         cool = crypto_journal.cooldown_tickers(12.0, trades, now=now)
         self.assertIn("ETH", cool)
+        self.assertNotIn(
+            "ETH",
+            crypto_journal.cooldown_tickers(12.0, trades, now=now, reset_ts=now - 50),
+        )
 
     def test_no_cooldown_on_winning_sell(self):
         now = time.time()
@@ -2404,6 +2455,12 @@ class TestJournalChurnAndDaily(unittest.TestCase):
                 now=now, trades=trades, reset_ts=now - 60, enabled=True
             )
         )
+        with patch.object(policy, "PROBE_DAILY_LOSS_ON", False):
+            self.assertIsNone(
+                crypto_journal.probe_loss_guard_reason(
+                    now=now, trades=trades, reset_ts=0.0, enabled=True
+                )
+            )
 
     def test_daily_report_gate(self):
         morning = datetime(2026, 9, 18, 10, 0, tzinfo=_MSK)

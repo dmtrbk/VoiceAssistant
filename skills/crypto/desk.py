@@ -42,9 +42,7 @@ from .desk_policy import (
     probe_period_sec,
     probe_scan_algo_order,
     PROBE_ARMED_PERIOD_SEC,
-    PROBE_SCAN_LIMIT,
-    PROBE_SCAN_CLASSIC_LIMIT,
-    PROBE_SCAN_MANDATORY_TOP,
+    probe_scan_limits,
     PROBE_ALGO_ORDER,
     set_live_sleeve,
     SLEEVE_SKIP,
@@ -890,29 +888,30 @@ class CryptoDeskMixin:
     def _probe_blocked(self) -> set[str]:
         """Карманы, уже занятые слоты и любые живые позиции щуп не трогает."""
         blocked = {BTC_DIP_TICKER} | second_pocket_tickers()
-        # Убыточный выход (MEGA/HAEDAL) — не сразу обратно в ту же монету.
-        blocked |= set(crypto_journal.cooldown_tickers(cfg().cooldown_hours))
-        blocked |= set(crypto_journal.shelf_reentry_tickers())
-        # Недавняя продажа — блок; если цена уже выше продажи — продолжение хода, пускаем.
-        recent = set(crypto_journal.recently_sold(PROBE_REENTRY_HOURS))
-        if recent:
-            try:
-                tape = {str(r.get("ticker") or "").upper(): r for r in self._tape()}
-            except Exception:
-                tape = {}
-            for ticker in list(recent):
-                sell_px = crypto_journal.last_sell_price(ticker)
-                live = float((tape.get(ticker) or {}).get("price") or 0)
-                if (
-                    sell_px
-                    and live > 0
-                    and live >= sell_px * (1.0 + PROBE_REENTRY_BREAKOUT_PCT / 100.0)
-                ):
-                    recent.discard(ticker)
-            pin = str(read_probe_pin().get("ticker") or "").upper()
-            if pin:
-                recent.discard(pin)
-            blocked |= recent
+        # Боевые блоки журнала (cooldown / полка / reentry) — только в бою.
+        # Имитация смотрит рынок без этих ворот; журнал paper отдельный.
+        if probe_places_buys():
+            blocked |= set(crypto_journal.cooldown_tickers(cfg().cooldown_hours))
+            blocked |= set(crypto_journal.shelf_reentry_tickers())
+            recent = set(crypto_journal.recently_sold(PROBE_REENTRY_HOURS))
+            if recent:
+                try:
+                    tape = {str(r.get("ticker") or "").upper(): r for r in self._tape()}
+                except Exception:
+                    tape = {}
+                for ticker in list(recent):
+                    sell_px = crypto_journal.last_sell_price(ticker)
+                    live = float((tape.get(ticker) or {}).get("price") or 0)
+                    if (
+                        sell_px
+                        and live > 0
+                        and live >= sell_px * (1.0 + PROBE_REENTRY_BREAKOUT_PCT / 100.0)
+                    ):
+                        recent.discard(ticker)
+                pin = str(read_probe_pin().get("ticker") or "").upper()
+                if pin:
+                    recent.discard(pin)
+                blocked |= recent
         try:
             _cash, positions = self._wallet()
         except Exception as exc:
@@ -979,7 +978,7 @@ class CryptoDeskMixin:
             common.send_telegram_notification(f"Крипта: щуп стоп — {reason}", background=True)
 
     def _probe_entry_halt_reason(self, tape: list[dict[str, Any]] | None) -> str | None:
-        """Падающий рынок или дневной −$6: новых покупок нет. Выходы открытых ног не трогает."""
+        """Дневной −$6 (и падающий рынок, если PROBE_MARKET_FALL_ON). Выходы не трогает."""
         rows = list(tape or [])
         flash: float | None = None
         try:
@@ -1023,8 +1022,12 @@ class CryptoDeskMixin:
         state = read_probe()
         for leg in probe_legs(state):
             self._probe_exit(leg)
-        if probe_is_paper():
+        paper = probe_is_paper()
+        if paper:
             self._probe_paper_tick()
+            # Имитация не держит взвод в боевом jarvis_crypto_probe.json.
+            for arm in probe_arms(state):
+                write_probe(drop_arm=str(arm.get("ticker") or ""))
         if not cfg().probe_on:
             return
         try:
@@ -1032,27 +1035,31 @@ class CryptoDeskMixin:
         except Exception as exc:
             logger.info("[Крипта] щуп лента: %s", exc)
             tape = []
-        halt = self._probe_entry_halt_reason(tape)
-        if halt:
-            self._note_probe_halt(halt)
-            return
-        if str(getattr(self, "_probe_pause_kind", "") or "") in {"рынок", "день"}:
+        # Падающий рынок / дневной −$6 — только бой. Имитация сканирует без стопа.
+        if probe_places_buys():
+            halt = self._probe_entry_halt_reason(tape)
+            if halt:
+                self._note_probe_halt(halt)
+                return
+            if str(getattr(self, "_probe_pause_kind", "") or "") in {"рынок", "день"}:
+                self._note_probe_resume()
+            pause = self._probe_loss_guard_reason(tape)
+            if pause:
+                self._note_probe_pause(pause)
+            elif str(getattr(self, "_probe_pause_kind", "") or "") != "рост":
+                self._note_probe_resume()
+        elif str(getattr(self, "_probe_pause_kind", "") or ""):
             self._note_probe_resume()
-        pause = self._probe_loss_guard_reason(tape)
-        paper = probe_is_paper()
-        if pause:
-            self._note_probe_pause(pause)
-        elif str(getattr(self, "_probe_pause_kind", "") or "") != "рост":
-            self._note_probe_resume()
-        state = read_probe()
-        for arm in probe_arms(state):
-            self._probe_arm({
-                "arm_ticker": arm["ticker"],
-                "arm_shelf": arm["shelf"],
-                "arm_ts": arm["ts"],
-                "arm_px": arm["px"],
-                "arm_algo": arm["algo"],
-            })
+        if not paper:
+            state = read_probe()
+            for arm in probe_arms(state):
+                self._probe_arm({
+                    "arm_ticker": arm["ticker"],
+                    "arm_shelf": arm["shelf"],
+                    "arm_ts": arm["ts"],
+                    "arm_px": arm["px"],
+                    "arm_algo": arm["algo"],
+                })
         state = read_probe()
         cap = self._probe_cap()
         held = len(probe_legs(state)) + len(probe_arms(state))
@@ -1619,7 +1626,6 @@ class CryptoDeskMixin:
         algo: str,
         note: dict[str, Any] | None,
     ) -> None:
-        write_probe(drop_arm=ticker)
         if price <= 0:
             return
         open_names = {
@@ -1739,16 +1745,18 @@ class CryptoDeskMixin:
     ) -> bool:
         """Взвод, если тренд/неделя ок. True — слот занят, скан стоп."""
         ticker = str(row.get("ticker") or "")
+        paper = probe_is_paper()
+        strict = bool(self._probe_loss_guard_reason()) if probe_places_buys() else False
         if not probe_setup_ok_now(
             setup,
             now=time.time(),
             turnover=float(row.get("turnover") or 0),
-            strict=bool(self._probe_loss_guard_reason()),
+            strict=strict,
         ):
             return False
         cap = self._probe_cap()
         if len(probe_legs()) + len(probe_arms()) >= cap:
-            if probe_is_paper():
+            if paper:
                 self._probe_paper_signal(
                     ticker,
                     setup,
@@ -1768,6 +1776,22 @@ class CryptoDeskMixin:
             algo=algo,
         ):
             return False
+        # Имитация: сразу в свой журнал, без боевого взвода и без виджета.
+        if paper:
+            self._probe_paper_fill(
+                ticker,
+                shelf=float(setup["shelf"]),
+                price=float(setup["price"]),
+                arm_px=float(setup["price"]),
+                entry_low=float(setup.get("low") or 0),
+                algo=algo,
+                note={
+                    key: setup.get(key)
+                    for key in ("stair", "obi", "ask")
+                    if setup.get(key) is not None
+                },
+            )
+            return True
         hold = int(probe_setup_hold_sec(setup))
         arm_ts = time.time()
         write_probe(
@@ -1779,15 +1803,14 @@ class CryptoDeskMixin:
         )
         wait_bit = "беру сразу" if hold <= 0 else f"жду {hold}с"
         logger.info(
-            "[Крипта] щуп %s %s полка %.4g сейчас %.4g — %s%s",
+            "[Крипта] щуп %s %s полка %.4g сейчас %.4g — %s",
             ticker,
             algo,
             setup["shelf"],
             setup["price"],
             wait_bit,
-            " (имитация)" if probe_is_paper() else "",
         )
-        if hold <= 0 and not probe_is_paper():
+        if hold <= 0:
             self._probe_arm(
                 {
                     "arm_ticker": ticker,
@@ -1967,26 +1990,24 @@ class CryptoDeskMixin:
         except Exception as exc:
             logger.info("[Крипта] щуп лента: %s", exc)
             return
-        halt = self._probe_entry_halt_reason(tape)
-        if halt:
-            self._note_probe_halt(halt)
-            return
-        pause = self._probe_loss_guard_reason(tape)
-        strict = bool(pause)
+        paper = probe_is_paper()
+        pause: str | None = None
+        strict = False
+        if probe_places_buys():
+            halt = self._probe_entry_halt_reason(tape)
+            if halt:
+                self._note_probe_halt(halt)
+                return
+            pause = self._probe_loss_guard_reason(tape)
+            strict = bool(pause)
+            if pause:
+                self._note_probe_pause(pause)
+            elif str(getattr(self, "_probe_pause_kind", "") or "") != "рост":
+                self._note_probe_resume()
+        elif str(getattr(self, "_probe_pause_kind", "") or ""):
+            self._note_probe_resume()
         cap = self._probe_cap(tape)
         self._probe_room_tried = False
-        if (
-            len(probe_legs()) + len(probe_arms()) >= cap
-            and not probe_is_paper()
-            and not cfg().second_on
-        ):
-            self._refresh_probe_pin(tape)
-            self._note_probe_beat(cap=cap, pin=str(read_probe_pin().get("ticker") or ""))
-            return
-        if pause:
-            self._note_probe_pause(pause)
-        elif str(getattr(self, "_probe_pause_kind", "") or "") != "рост":
-            self._note_probe_resume()
         pin = self._refresh_probe_pin(tape)
         blocked = self._probe_blocked() | probe_tickers() | {arm["ticker"] for arm in probe_arms()}
         candidates: list[dict[str, Any]] = []
@@ -1998,11 +2019,25 @@ class CryptoDeskMixin:
             if not ticker or ticker in blocked or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
                 continue
             candidates.append(row)
+        scan_lim, classic_lim, mand_top = probe_scan_limits()
         ranked = probe_scan_ranked_rows(
             candidates,
             now=time.time(),
             min_turnover=probe_min_turnover_usd(now=time.time(), strict=strict),
+            limit=scan_lim,
         )
+        self._probe_scan_top = [
+            (str(row.get("ticker") or ""), float(score))
+            for score, row in ranked[:6]
+            if str(row.get("ticker") or "")
+        ]
+        if (
+            len(probe_legs()) + len(probe_arms()) >= cap
+            and not paper
+            and not cfg().second_on
+        ):
+            self._note_probe_beat(cap=cap, pin=pin)
+            return
         order = probe_scan_algo_order()
         classic = tuple(
             a for a in order if a not in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
@@ -2035,23 +2070,23 @@ class CryptoDeskMixin:
             }:
                 self._note_pin_idle(pin)
 
-        # 1) Узкий топ лидеров: только 5м candle — 15м/1h только если свеча уже живая.
-        for scan_idx, (_rank, row) in enumerate(ranked[:PROBE_SCAN_LIMIT]):
+        # 1) Скан candle: бой — Топ-6, имитация — широкий список.
+        for scan_idx, (_rank, row) in enumerate(ranked[:scan_lim]):
             if _arm_slots_left() <= 0:
                 break
             ticker = str(row["ticker"])
             if ticker in blocked:
                 continue
             fast_bar = (
-                scan_idx < PROBE_SCAN_MANDATORY_TOP
+                scan_idx < mand_top
                 or float(row.get("turnover") or 0) >= 1_000_000.0
             )
             self._probe_scan_one(row, blocked, order, cache_sec=8.0 if fast_bar else 45.0)
-        # 2) Узкий топ: impulse/sprint/shelf. Пусто, пока в ORDER только candle.
+        # 2) Classic (impulse/…): тот же потолок, что у candle.
         if not classic or _arm_slots_left() <= 0:
             self._note_probe_beat(cap=cap, pin=pin)
             return
-        for _rank, row in ranked[:PROBE_SCAN_CLASSIC_LIMIT]:
+        for _rank, row in ranked[:classic_lim]:
             if _arm_slots_left() <= 0:
                 break
             ticker = str(row["ticker"])
@@ -2085,20 +2120,27 @@ class CryptoDeskMixin:
         self._note_probe_beat(cap=cap, pin=pin)
 
     def _note_probe_beat(self, *, cap: int, pin: str) -> None:
-        """Раз в минуту: слоты, пин и кто идёт за ~10м. Иначе консоль молчит."""
+        """Раз в минуту: топ-6 суток, слоты, пин и кто идёт за ~10м."""
         now = time.time()
         last = float(getattr(self, "_probe_beat_ts", 0.0) or 0.0)
         if now - last < 60.0:
             return
         self._probe_beat_ts = now
+        scan_top = list(getattr(self, "_probe_scan_top", None) or [])
+        top_bit = (
+            ", ".join(f"{name} {chg:+.1f}%" for name, chg in scan_top)
+            if scan_top
+            else "пусто"
+        )
         moves = getattr(self, "_probe_pin_move_cache", None) or {}
         top = sorted(moves.items(), key=lambda item: float(item[1]), reverse=True)[:3]
         move_bit = ", ".join(f"{name} {float(chg):+.1f}%" for name, chg in top) or "никого"
         held = len(probe_legs()) + len(probe_arms())
         mode = "бумага" if probe_is_paper() else "бой"
         logger.info(
-            "[Крипта] щуп: %s, слоты %s/%s, пин %s, ход: %s",
+            "[Крипта] щуп: %s, топ %s, слоты %s/%s, пин %s, ход: %s",
             mode,
+            top_bit,
             held,
             cap,
             pin or "нет",

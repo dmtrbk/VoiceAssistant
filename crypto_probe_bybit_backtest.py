@@ -7,7 +7,7 @@
 Список монет — текущая лента, та же сортировка, что у скана щупа.
 
     PYTHONPATH=. .venv/bin/python crypto_probe_bybit_backtest.py
-    PYTHONPATH=. .venv/bin/python crypto_probe_bybit_backtest.py --top 4 --limit 1000
+    PYTHONPATH=. .venv/bin/python crypto_probe_bybit_backtest.py --top 6 --limit 1000
     PYTHONPATH=. .venv/bin/python crypto_probe_bybit_backtest.py --symbols SUI,SOL,DOGE
 """
 
@@ -206,7 +206,7 @@ def _print_rows(title: str, rows: list[dict[str, Any]]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Прогон щупа по живым правилам стола")
-    parser.add_argument("--top", type=int, default=4, help="Сколько имён взять из скана")
+    parser.add_argument("--top", type=int, default=6, help="Сколько имён взять из скана")
     parser.add_argument("--limit", type=int, default=1000, help="Сколько 5м свечей, максимум Bybit 1000")
     parser.add_argument("--symbols", type=str, default="", help="Явный список через запятую, без USDT")
     args = parser.parse_args()

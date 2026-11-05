@@ -82,18 +82,20 @@ def status_line() -> str:
         parts.append("Карман2 выкл")
     if not data.probe_on:
         parts.append("Щуп выключен")
+    elif data.probe_paper:
+        # Виджет только про бой. Имитация — в jarvis_crypto_probe_paper.json и логах.
+        parts.append("Щуп имитация")
     else:
-        mode = "имитация" if data.probe_paper else "боевой"
         held = probe_legs(probe)
         arms = probe_arms(probe)
         if held:
             names = ", ".join(str(leg["ticker"]) for leg in held)
-            parts.append(f"Щуп {mode} держит {names}")
+            parts.append(f"Щуп боевой держит {names}")
         if arms:
             names = ", ".join(str(arm["ticker"]) for arm in arms)
             parts.append(f"Щуп взведён {names}")
         if not held and not arms:
-            parts.append(f"Щуп {mode}")
+            parts.append("Щуп боевой")
     return " · ".join(parts)
 
 

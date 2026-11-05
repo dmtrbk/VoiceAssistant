@@ -34,7 +34,7 @@ class DeskSettings:
     sleeve_exit_hold_sec: float = 2 * 60
     sleeve_stop_pct: float = 4.0
     probe_on: bool = True
-    probe_paper: bool = False  # True — скан и логи, ордеров Buy нет
+    probe_paper: bool = False  # True — широкий скан без боевых стопов; журнал paper; Buy нет
     probe_usd: float = 40.0
     probe_max_loss_pct: float = 8.0
     probe_shelf_range_pct: float = 12.0

@@ -99,6 +99,8 @@ class TestDeskSettings(unittest.TestCase):
         self.assertTrue(from_payload({"sui": {"ticker": "SUI", "on": True}}).second_on)
 
     def test_probe_paper_blocks_buys_not_scan_flag(self):
+        from skills.crypto.settings import store as settings_status
+
         settings_store.update(probe_paper=True)
         data = settings_store.current()
         self.assertTrue(data.probe_on)
@@ -106,9 +108,23 @@ class TestDeskSettings(unittest.TestCase):
         self.assertTrue(policy.probe_is_paper())
         self.assertFalse(policy.probe_places_buys())
         self.assertEqual(policy.probe_reserve_quote(open_legs=0), 0.0)
+        # Имитация снимает боевой потолок скана; бой возвращает Топ-6.
+        self.assertEqual(
+            policy.probe_scan_limits(),
+            (
+                policy.PROBE_SCAN_LIMIT_PAPER,
+                policy.PROBE_SCAN_CLASSIC_LIMIT_PAPER,
+                policy.PROBE_SCAN_MANDATORY_TOP_PAPER,
+            ),
+        )
+        line = settings_status.status_line()
+        self.assertIn("Щуп имитация", line)
+        self.assertNotIn("держит", line)
         settings_store.update(probe_paper=False)
         self.assertTrue(policy.probe_places_buys())
         self.assertGreater(policy.probe_reserve_quote(open_legs=0), 0.0)
+        self.assertEqual(policy.probe_scan_limits(), (6, 6, 6))
+        self.assertIn("Щуп боевой", settings_status.status_line())
 
     def test_probe_paper_journal(self):
         from skills.crypto import journal as crypto_journal

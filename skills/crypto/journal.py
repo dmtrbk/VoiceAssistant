@@ -667,15 +667,45 @@ def _entry_epoch(entry: dict[str, Any]) -> float | None:
         return None
 
 
+def probe_cooldown_reset_ts(path: str | None = None) -> float:
+    """Метка сброса кулдауна щупа. Убытки до неё не блокируют вход."""
+    try:
+        return float(_read_daily_meta(path).get("probe_cooldown_reset_ts") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def reset_probe_cooldown(
+    *,
+    now: float | None = None,
+    path: str | None = None,
+) -> float:
+    """Сбросить кулдаун после убыточных продаж: блок смотрит только сделки после метки."""
+    ts = float(now if now is not None else time.time())
+    meta = _read_daily_meta(path)
+    meta["probe_cooldown_reset_ts"] = ts
+    _write_daily_meta(meta, path)
+    logger.info(
+        "[Крипта] кулдаун щупа сброшен, считаю с %s",
+        datetime.fromtimestamp(ts, _MSK).strftime("%d.%m %H:%M"),
+    )
+    return ts
+
+
 def cooldown_tickers(
     hours: float = 12.0,
     trades: list[dict[str, Any]] | None = None,
     *,
     now: float | None = None,
+    reset_ts: float | None = None,
 ) -> set[str]:
     """Тикеры с убыточной продажей за последние hours — не докупать автостолом."""
     rows = trades if trades is not None else _read_trades()
-    cutoff = (now if now is not None else time.time()) - max(0.0, hours) * 3600.0
+    now_ts = float(now if now is not None else time.time())
+    cutoff = now_ts - max(0.0, hours) * 3600.0
+    if reset_ts is None:
+        reset_ts = 0.0 if trades is not None else probe_cooldown_reset_ts()
+    cutoff = max(cutoff, float(reset_ts or 0.0))
     lots: dict[str, dict[str, float]] = {}
     cool: set[str] = set()
     for entry in rows:

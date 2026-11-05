@@ -114,9 +114,9 @@ PROBE_NIGHT_MIN_TURNOVER_USD = 250_000.0
 PROBE_STRICT_MIN_TURNOVER_USD = 1_500_000.0
 PROBE_NIGHT_START_HOUR_YEKT = 23
 PROBE_NIGHT_END_HOUR_YEKT = 6
-# Защита от падающего рынка и каскада стопов:
-# Сутки BTC ≤ −2.5% или пролив за 15м ≤ −1% — пауза входов на час.
-# Ширина < 35% зелёных ликвидных имён — тот же полный стоп, не жёсткий режим.
+# Защита от падающего рынка (выкл.): сутки BTC / flash 15м / ширина рынка.
+# Пороги оставлены на случай включения; сейчас полный стоп по рынку не режет входы.
+PROBE_MARKET_FALL_ON = False
 PROBE_BTC_MAX_DROP_DAY_PCT = -2.5
 PROBE_BTC_FLASH_DROP_PCT = -1.0
 PROBE_BTC_FLASH_BARS = 3
@@ -128,8 +128,8 @@ PROBE_STREAK_PAUSE_SEC = 3600.0
 # После среза «полка» не перерабатывать слот в тот же чоп (ZAMA→DOOD, LA→INIT).
 PROBE_SHELF_COOLDOWN_SEC = 25 * 60
 PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
-# Жёсткий режим (оборот $1.5M, OBI 0.70) только на свои локальные убытки,
-# и только если рынок не в стрессе. Дневной −$6 и падающий рынок — полный стоп входов.
+# Жёсткий режим (оборот $1.5M, OBI 0.70) только на свои локальные убытки.
+# Дневной −$6 — полный стоп входов. Падающий рынок выключен (PROBE_MARKET_FALL_ON).
 PROBE_STRICT_MODE = True
 PROBE_RISING_BTC_MIN_PCT = 0.0
 PROBE_RISING_BREADTH_PCT = 50.0
@@ -152,12 +152,17 @@ PROBE_SHELF_DRIFT_PCT = 1.5
 PROBE_SHELF_DRIFT_BARS = 8
 PROBE_RUN_PCT = 6.0
 PROBE_MAX_LOSS_PCT = 8.0
-# Узкий топ лидеров суток: на прогоне Топ-4 бьёт комиссию, хвост 7–12 съедает плюс.
-# Candle и classic смотрят одни и те же 4 имени — 2 слота не занимают середняки.
-PROBE_SCAN_LIMIT = 4
-PROBE_SCAN_CLASSIC_LIMIT = 4
-# Топ-N по росту за 24ч всегда первыми (при лимите 4 = весь скан).
-PROBE_SCAN_MANDATORY_TOP = 4
+# Бой: узкий топ лидеров суток (Топ-6). Имитация — широкий скан без потолка.
+PROBE_SCAN_LIMIT_LIVE = 6
+PROBE_SCAN_CLASSIC_LIMIT_LIVE = 6
+PROBE_SCAN_MANDATORY_TOP_LIVE = 6
+PROBE_SCAN_LIMIT_PAPER = 128
+PROBE_SCAN_CLASSIC_LIMIT_PAPER = 50
+PROBE_SCAN_MANDATORY_TOP_PAPER = 50
+# Совместимость импортов/реплеев: по умолчанию боевые лимиты.
+PROBE_SCAN_LIMIT = PROBE_SCAN_LIMIT_LIVE
+PROBE_SCAN_CLASSIC_LIMIT = PROBE_SCAN_CLASSIC_LIMIT_LIVE
+PROBE_SCAN_MANDATORY_TOP = PROBE_SCAN_MANDATORY_TOP_LIVE
 # Чаще сканируем: растущую 5м свечу надо брать в первой половине, не раз в минуту у хая.
 PROBE_PERIOD_SEC = 10
 PROBE_ARMED_PERIOD_SEC = 6
@@ -275,7 +280,8 @@ PROBE_MIN_ENTRY_OBI = 0.55
 PROBE_STRICT_MIN_ENTRY_OBI = 0.70
 PROBE_STRICT_MAX_SPREAD_PCT = 0.20
 PROBE_STRICT_MAX_ASK_SLIP_PCT = 0.25
-# Жёсткий дневной риск-лимит (Daily Max Drawdown) на новые входы щупа (~1.35% от депозита $440).
+# Жёсткий дневной риск-лимит (Daily Max Drawdown) на новые входы щупа.
+PROBE_DAILY_LOSS_ON = True
 PROBE_DAILY_MAX_LOSS_USD = 6.0
 PROBE_SPRINT_HOLD_SEC = 30
 PROBE_SPRINT_CHASE_PCT = 5.0
@@ -899,6 +905,8 @@ def probe_market_regime_ok(
     btc_flash_pct: float | None = None,
 ) -> tuple[bool, str]:
     """Стоп входов при проливе BTC (15м или сутки) или при ширине рынка < 35%."""
+    if not PROBE_MARKET_FALL_ON:
+        return True, ""
     if (
         btc_flash_pct is not None
         and float(btc_flash_pct) <= PROBE_BTC_FLASH_DROP_PCT + 1e-9
@@ -937,6 +945,8 @@ def probe_market_regime_pause_reason(
     btc_flash_pct: float | None = None,
 ) -> tuple[str | None, float]:
     """Падающий рынок: пауза новых входов на час. Жёсткий режим здесь не включается."""
+    if not PROBE_MARKET_FALL_ON:
+        return None, 0.0
     ok, note = probe_market_regime_ok(rows, btc_flash_pct=btc_flash_pct)
     until = float(pause_until or 0.0)
     if not ok:
@@ -965,15 +975,36 @@ def probe_scan_rank(
     return chg
 
 
+def probe_scan_limits(*, paper: bool | None = None) -> tuple[int, int, int]:
+    """Лимиты скана: (scan, classic, mandatory_top).
+
+    Имитация (`probe_paper`) — широкий скан. Бой — узкий Топ-6.
+    """
+    use_paper = bool(cfg().probe_paper) if paper is None else bool(paper)
+    if use_paper:
+        return (
+            PROBE_SCAN_LIMIT_PAPER,
+            PROBE_SCAN_CLASSIC_LIMIT_PAPER,
+            PROBE_SCAN_MANDATORY_TOP_PAPER,
+        )
+    return (
+        PROBE_SCAN_LIMIT_LIVE,
+        PROBE_SCAN_CLASSIC_LIMIT_LIVE,
+        PROBE_SCAN_MANDATORY_TOP_LIVE,
+    )
+
+
 def probe_scan_ranked_rows(
     rows: list[dict[str, Any]],
     *,
     limit: int | None = None,
     now: float | None = None,
     min_turnover: float | None = None,
+    paper: bool | None = None,
 ) -> list[tuple[float, dict[str, Any]]]:
     """Список для щупа: топ-N по 24h %, затем высоколиквидные ($1.5M+) в фазе разгона, затем остальные."""
-    cap = int(PROBE_SCAN_LIMIT if limit is None else limit)
+    scan_lim, _classic, mandatory = probe_scan_limits(paper=paper)
+    cap = int(scan_lim if limit is None else limit)
     floor_turn = (
         float(min_turnover)
         if min_turnover is not None
@@ -986,10 +1017,10 @@ def probe_scan_ranked_rows(
             continue
         scored.append((score, row))
     scored.sort(key=lambda item: item[0], reverse=True)
-    if len(scored) <= PROBE_SCAN_MANDATORY_TOP:
+    if len(scored) <= mandatory:
         return scored[:cap]
-    head = scored[:PROBE_SCAN_MANDATORY_TOP]
-    rest = scored[PROBE_SCAN_MANDATORY_TOP:]
+    head = scored[:mandatory]
+    rest = scored[mandatory:]
     prime: list[tuple[float, dict[str, Any]]] = []
     other: list[tuple[float, dict[str, Any]]] = []
     for item in rest:
@@ -2032,7 +2063,7 @@ def probe_candle_day_ok(
 
 def probe_daily_loss_blocked(daily_realized_usd: float | None) -> bool:
     """Жёсткий дневной стоп (Daily Max Drawdown): при убытке за сутки ≤ -PROBE_DAILY_MAX_LOSS_USD новые щупы стоп."""
-    if daily_realized_usd is None:
+    if not PROBE_DAILY_LOSS_ON or daily_realized_usd is None:
         return False
     return float(daily_realized_usd) <= -PROBE_DAILY_MAX_LOSS_USD + 1e-9
 
