@@ -107,8 +107,12 @@ PROBE_STRICT_MIN_TURNOVER_USD = 1_500_000.0
 PROBE_NIGHT_START_HOUR_YEKT = 23
 PROBE_NIGHT_END_HOUR_YEKT = 6
 # Защита от падающего рынка и каскада стопов:
+# Сутки BTC ≤ −2.5% или пролив за 15м ≤ −1% — пауза входов на час.
+# Ширина < 35% зелёных ликвидных имён — тот же полный стоп, не жёсткий режим.
 PROBE_BTC_MAX_DROP_DAY_PCT = -2.5
-PROBE_MIN_MARKET_BREADTH_PCT = 20.0
+PROBE_BTC_FLASH_DROP_PCT = -1.0
+PROBE_BTC_FLASH_BARS = 3
+PROBE_MIN_MARKET_BREADTH_PCT = 35.0
 PROBE_MARKET_FALL_PAUSE_SEC = 3600.0
 PROBE_HOURLY_MAX_LOSS_USD = 1.50
 PROBE_MAX_CONSECUTIVE_LOSSES = 3
@@ -116,8 +120,8 @@ PROBE_STREAK_PAUSE_SEC = 3600.0
 # После среза «полка» не перерабатывать слот в тот же чоп (ZAMA→DOOD, LA→INIT).
 PROBE_SHELF_COOLDOWN_SEC = 25 * 60
 PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
-# Жёсткий режим (оборот $1.5M, OBI 0.70, только impulse/spark) после убытков.
-# На растущем рынке не включаем: резка входов мешает, пока идёт ход.
+# Жёсткий режим (оборот $1.5M, OBI 0.70) только на свои локальные убытки,
+# и только если рынок не в стрессе. Дневной −$6 и падающий рынок — полный стоп входов.
 PROBE_STRICT_MODE = True
 PROBE_RISING_BTC_MIN_PCT = 0.0
 PROBE_RISING_BREADTH_PCT = 50.0
@@ -170,7 +174,8 @@ PROBE_PIN_TOP_N = 30
 PROBE_PIN_KEEP_TOP_N = 8
 PROBE_PIN_MIN_SCORE = 45.0
 PROBE_PIN_MOVE_PCT = 1.5
-PROBE_PIN_MOVE_BARS = 3
+# 2 живых 5м ≈ 10 минут: зарождение хода, не середина пятнадцатиминутного тренда.
+PROBE_PIN_MOVE_BARS = 2
 PROBE_PIN_MOVE_VOL_MULT = 1.5
 PROBE_PIN_SWITCH_PCT = 0.3
 PROBE_PIN_LOSS_LOOKBACK_SEC = 12 * 3600
@@ -831,20 +836,69 @@ def probe_market_rising(rows: list[dict[str, Any]] | None) -> bool:
     return green_pct >= PROBE_RISING_BREADTH_PCT - 1e-9
 
 
+def probe_btc_flash_pct(bars: list[dict[str, Any]] | None) -> float | None:
+    """Ход BTC за ~15м, %. None — свечей не хватает.
+
+    bars — 5м от старых к новым, последняя может быть живой.
+    """
+    need = int(PROBE_BTC_FLASH_BARS) + 1
+    if not bars or len(bars) < need:
+        return None
+    try:
+        ref = float(bars[-need].get("close") or 0)
+        price = float(bars[-1].get("close") or 0)
+    except (TypeError, ValueError):
+        return None
+    if ref <= 0 or price <= 0:
+        return None
+    return (price / ref - 1.0) * 100.0
+
+
+def probe_market_falling(
+    rows: list[dict[str, Any]] | None,
+    *,
+    btc_flash_pct: float | None = None,
+) -> tuple[bool, str]:
+    """Падающий рынок: пролив BTC или мало зелёных имён. Иначе (False, "")."""
+    ok, note = probe_market_regime_ok(rows or [], btc_flash_pct=btc_flash_pct)
+    return (not ok), note
+
+
 def probe_strict_reason(
     reason: str | None,
     rows: list[dict[str, Any]] | None = None,
+    *,
+    btc_flash_pct: float | None = None,
 ) -> str | None:
-    """Жёсткий режим только если включён и рынок не растёт."""
+    """Жёсткий режим только на свои локальные убытки и только вне рыночного стресса.
+
+    Дневной лимит и падающий рынок сюда не входят: это полный стоп входов.
+    """
     if not PROBE_STRICT_MODE or not reason:
         return None
-    if probe_market_rising(rows):
+    text = str(reason)
+    if text.startswith("дневной") or text.startswith("падающий"):
         return None
+    if rows is not None:
+        falling, _note = probe_market_falling(rows, btc_flash_pct=btc_flash_pct)
+        if falling:
+            return None
     return reason
 
 
-def probe_market_regime_ok(rows: list[dict[str, Any]]) -> tuple[bool, str]:
-    """Защита от падающего рынка: стоп щупа при сливе BTC или широком обвале спота."""
+def probe_market_regime_ok(
+    rows: list[dict[str, Any]],
+    *,
+    btc_flash_pct: float | None = None,
+) -> tuple[bool, str]:
+    """Стоп входов при проливе BTC (15м или сутки) или при ширине рынка < 35%."""
+    if (
+        btc_flash_pct is not None
+        and float(btc_flash_pct) <= PROBE_BTC_FLASH_DROP_PCT + 1e-9
+    ):
+        return False, (
+            f"BTC {float(btc_flash_pct):+.1f}% за 15м ≤ {PROBE_BTC_FLASH_DROP_PCT:.1f}%"
+        )
     liquid_chgs: list[float] = []
     for row in rows or []:
         if not isinstance(row, dict):
@@ -873,9 +927,17 @@ def probe_market_regime_pause_reason(
     *,
     now: float,
     pause_until: float = 0.0,
+    btc_flash_pct: float | None = None,
 ) -> tuple[str | None, float]:
-    """Падающий рынок: при срабатывании — пауза новых щупов на PROBE_MARKET_FALL_PAUSE_SEC."""
-    ok, note = probe_market_regime_ok(rows)
+    """Падающий рынок: пауза новых входов на час. Жёсткий режим здесь не включается."""
+    ok, note = probe_market_regime_ok(rows, btc_flash_pct=btc_flash_pct)
+    until = float(pause_until or 0.0)
+    if not ok:
+        return f"падающий рынок: {note}", float(now) + float(PROBE_MARKET_FALL_PAUSE_SEC)
+    if until > float(now) + 1e-9:
+        left_min = max(1, int((until - float(now) + 59) // 60))
+        return f"падающий рынок: пауза {left_min}м после обвала", until
+    return None, 0.0
     until = float(pause_until or 0.0)
     if not ok:
         return f"падающий рынок: {note}", float(now) + float(PROBE_MARKET_FALL_PAUSE_SEC)
@@ -981,7 +1043,7 @@ def probe_day_ranks(rows: list[dict[str, Any]] | None) -> dict[str, int]:
 
 
 def probe_pin_row_ok(row: dict[str, Any] | None) -> bool:
-    """Фильтр пина: оборот, не парабола, есть воздух до хая. Сутки сами по себе не выбирают."""
+    """Фильтр пина: оборот и не парабола. Перехай суток пускаем, слив глубже 12% — нет."""
     if not isinstance(row, dict):
         return False
     ticker = str(row.get("ticker") or "").upper()
@@ -1002,7 +1064,7 @@ def probe_pin_row_ok(row: dict[str, Any] | None) -> bool:
 
 
 def probe_pin_move(bars: list[dict[str, Any]] | None) -> float | None:
-    """Ход за 15м в процентах. None — тихо или объём не выше обычного.
+    """Ход за ~10м в процентах. None — тихо или объём не выше обычного.
 
     bars — 5м от старых к новым, последняя может быть живой.
     """
@@ -1037,7 +1099,7 @@ def probe_pin_hard_drop_reason(
     rank: int | None,
     lost: set[str] | None = None,
 ) -> str | None:
-    """Снять пин сразу: срез, нет воздуха, выпал из топа, тонкий стакан, перегрев."""
+    """Снять пин сразу: срез, ушёл далеко сквозь хай, тонкий стакан, перегрев."""
     name = str(ticker or "").upper()
     if not name:
         return "пусто"
@@ -1073,9 +1135,9 @@ def probe_choose_pin(
     skip: set[str] | None = None,
     moves: dict[str, float] | None = None,
 ) -> dict[str, Any] | None:
-    """Пин — кто идёт последние 15 минут. Ход сдулся — слот снова бродячий.
+    """Пин — кто идёт последние ~10 минут. Ход сдулся — имя снова бродячее.
 
-    moves: тикер → ход за 15м в %. Сильнее текущего на PROBE_PIN_SWITCH_PCT — переключаемся сразу.
+    moves: тикер → ход за окно пина в %. Сильнее текущего на PROBE_PIN_SWITCH_PCT — переключаемся сразу.
     """
     if not PROBE_PIN_ON:
         return None

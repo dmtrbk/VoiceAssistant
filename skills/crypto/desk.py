@@ -68,6 +68,8 @@ from .desk_policy import (
     probe_candle_day_ok,
     probe_scan_day_ok,
     probe_daily_loss_blocked,
+    probe_btc_flash_pct,
+    probe_market_regime_pause_reason,
     probe_grind_live_ok,
     probe_should_handoff,
     PROBE_ALGO_CANDLE,
@@ -961,22 +963,9 @@ class CryptoDeskMixin:
         if common.telegram_configured() and probe_places_buys():
             common.send_telegram_notification("Крипта: щуп снова обычный фильтр", background=True)
 
-    def _probe_loss_guard_reason(self, tape: list[dict[str, Any]] | None = None) -> str | None:
-        raw = crypto_journal.probe_loss_guard_reason()
-        rows = tape
-        if rows is None:
-            try:
-                rows = self._tape()
-            except Exception:
-                rows = []
-        applied = probe_strict_reason(raw, rows)
-        if raw and not applied:
-            self._note_probe_rising_skip()
-            return None
-        return applied
-
-    def _note_probe_rising_skip(self) -> None:
-        kind = "рост"
+    def _note_probe_halt(self, reason: str) -> None:
+        """Полный стоп новых входов: падающий рынок или дневной лимит. Скан не идёт."""
+        kind = _probe_pause_kind(reason)
         prev = str(getattr(self, "_probe_pause_kind", "") or "")
         now = time.time()
         last_log = float(getattr(self, "_probe_pause_log_ts", 0.0) or 0.0)
@@ -984,7 +973,50 @@ class CryptoDeskMixin:
             return
         self._probe_pause_kind = kind
         self._probe_pause_log_ts = now
-        logger.info("[Крипта] щуп обычный фильтр: рынок растёт, жёсткий режим не включаю")
+        logger.info("[Крипта] щуп стоп: %s", reason)
+        if kind != prev and common.telegram_configured() and probe_places_buys():
+            common.send_telegram_notification(f"Крипта: щуп стоп — {reason}", background=True)
+
+    def _probe_entry_halt_reason(self, tape: list[dict[str, Any]] | None) -> str | None:
+        """Падающий рынок или дневной −$6: новых покупок нет. Выходы открытых ног не трогает."""
+        rows = list(tape or [])
+        flash: float | None = None
+        try:
+            bars = self._probe_bars("BTC", "5", 8, cache_sec=30.0)
+            flash = probe_btc_flash_pct(bars)
+        except Exception as exc:
+            logger.info("[Крипта] щуп BTC 15м: %s", exc)
+        reason, until = probe_market_regime_pause_reason(
+            rows,
+            now=time.time(),
+            pause_until=float(getattr(self, "_probe_market_pause_until", 0.0) or 0.0),
+            btc_flash_pct=flash,
+        )
+        self._probe_market_pause_until = float(until or 0.0)
+        if reason:
+            return reason
+        raw = crypto_journal.probe_loss_guard_reason()
+        if raw and str(raw).startswith("дневной"):
+            return str(raw)
+        return None
+
+    def _probe_loss_guard_reason(self, tape: list[dict[str, Any]] | None = None) -> str | None:
+        raw = crypto_journal.probe_loss_guard_reason()
+        if raw and str(raw).startswith("дневной"):
+            return None
+        rows = tape
+        if rows is None:
+            try:
+                rows = self._tape()
+            except Exception:
+                rows = []
+        flash: float | None = None
+        try:
+            bars = self._probe_bars("BTC", "5", 8, cache_sec=30.0)
+            flash = probe_btc_flash_pct(bars)
+        except Exception:
+            flash = None
+        return probe_strict_reason(raw, rows, btc_flash_pct=flash)
 
     def _probe_locked(self) -> None:
         state = read_probe()
@@ -994,7 +1026,18 @@ class CryptoDeskMixin:
             self._probe_paper_tick()
         if not cfg().probe_on:
             return
-        pause = self._probe_loss_guard_reason()
+        try:
+            tape = self._tape()
+        except Exception as exc:
+            logger.info("[Крипта] щуп лента: %s", exc)
+            tape = []
+        halt = self._probe_entry_halt_reason(tape)
+        if halt:
+            self._note_probe_halt(halt)
+            return
+        if str(getattr(self, "_probe_pause_kind", "") or "") in {"рынок", "день"}:
+            self._note_probe_resume()
+        pause = self._probe_loss_guard_reason(tape)
         paper = probe_is_paper()
         if pause:
             self._note_probe_pause(pause)
@@ -1921,6 +1964,10 @@ class CryptoDeskMixin:
             tape = self._tape()
         except Exception as exc:
             logger.info("[Крипта] щуп лента: %s", exc)
+            return
+        halt = self._probe_entry_halt_reason(tape)
+        if halt:
+            self._note_probe_halt(halt)
             return
         pause = self._probe_loss_guard_reason(tape)
         strict = bool(pause)
