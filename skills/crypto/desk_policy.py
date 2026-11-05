@@ -194,11 +194,10 @@ PROBE_CANDLE_LOOKBACK = 12
 # 0,25% ловил шум (CSPR/BICO +0,5%). INIT был +0,67…1,3% от open.
 PROBE_CANDLE_MIN_BODY_PCT = 0.6
 PROBE_CANDLE_MAX_BODY_PCT = 2.0
-# Начало/середина восходящей свечи (pos 0.35..0.65):
-# продавленные сверху фитили (PARTI 18:20 pos=0.32, BLEND 13:25 pos=0.20, DOOD pos=0.21)
-# и покупка на самом пике бара (pos > 0.65) отсекаются.
+# Середина и верх восходящей свечи (pos 0.35..0.85):
+# продавленные снизу фитили отсекаются, сильный зелёный бар у верха — нет.
 PROBE_CANDLE_MIN_BAR_POS = 0.35
-PROBE_CANDLE_MAX_BAR_POS = 0.65
+PROBE_CANDLE_MAX_BAR_POS = 0.85
 # Верхний фитиль ≤ 0.90% от open, отступ от кончика high ≥ 0.25%; нижний пролив под open ≤ 0.80%.
 PROBE_CANDLE_MAX_WICK_PCT = 0.90
 PROBE_CANDLE_MAX_DIP_PCT = 0.80
@@ -215,6 +214,8 @@ PROBE_CANDLE_CHASE_PCT = 1.2
 # Запас хода до хая суток ≥ 1% (режет BR/PORTAL под самым пиком, пускает BLUR/BEAM/BIRB/EDGE), без перегрева ≥45%.
 PROBE_CANDLE_MAX_DAY_PCT = 45.0
 PROBE_CANDLE_MIN_DAY_ROOM_PCT = 1.0
+# Перехай суток для spark/pop: запас может быть нулевым и чуть отрицательным.
+PROBE_BREAKOUT_MIN_ROOM_PCT = -0.5
 PROBE_CANDLE_MAX_DAY_DROP_PCT = 28.0
 # Отсечение перегрева за 30м (>2.2%), кульминации объёма на пред. баре (>6.5x) и верхних фитилей слива (>0.85%).
 PROBE_CANDLE_MAX_30M_CHG_PCT = 2.20
@@ -275,10 +276,10 @@ PROBE_SPARK_MAX_ELAPSED_SEC = 120.0
 PROBE_SPARK_MAX_BAR_POS = 1.0
 PROBE_SPARK_HOLD_SEC = 0.0
 PROBE_SPARK_CHASE_PCT = 1.2
-# Pop: та же 5м, когда тело уже выше потолка spark и ещё не пробой impulse +3%.
+# Pop: подскок между потолком spark (2%) и пробоем impulse. Дыры 2–4% больше нет.
 # ICNT 07:15 +2.77% и 11:45 +2.72% проходят; кульминация 12:00 (+6.5% за 30м) нет.
-PROBE_POP_MIN_BODY_PCT = 2.0
-PROBE_POP_MAX_BODY_PCT = 3.2
+PROBE_POP_MIN_BODY_PCT = 1.5
+PROBE_POP_MAX_BODY_PCT = 4.2
 PROBE_POP_MAX_ELAPSED_SEC = 300.0
 PROBE_POP_VOL_MULT = 2.0
 PROBE_POP_MAX_WICK_PCT = 0.50
@@ -393,13 +394,19 @@ def probe_candle_prior_max_body_pct() -> float:
 
 
 def probe_candle_min_body_pct() -> float:
-    """Нижняя граница тела candle/spark: настройка «пробой от», не константа 0.6%."""
-    return float(cfg().probe_break_min_pct)
+    """Нижняя граница тела candle/spark. Пробой полки — отдельно, probe_break_min_pct."""
+    raw = getattr(cfg(), "probe_candle_min_pct", None)
+    if raw is None:
+        return float(PROBE_CANDLE_MIN_BODY_PCT)
+    return float(raw)
 
 
 def probe_candle_max_body_pct() -> float:
-    """Верхняя граница того же пробоя: настройка «пробой до»."""
-    return float(cfg().probe_break_max_pct)
+    """Верхняя граница тела candle/spark. Пробой полки — probe_break_max_pct."""
+    raw = getattr(cfg(), "probe_candle_max_pct", None)
+    if raw is None:
+        return float(PROBE_CANDLE_MAX_BODY_PCT)
+    return float(raw)
 
 
 def update_exclusions(
@@ -1315,7 +1322,7 @@ def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
 
 
 def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
-    """Начало восходящей свечи: тело 0.6..2.0% от open, цена в верхней части бара без слива."""
+    """Начало восходящей свечи: тело 0.6..2.0% от open, цена до верхней части бара без слива."""
     px = float(price or 0)
     hi = float(live_high or 0)
     lo = float(live_low or 0)
@@ -1428,7 +1435,7 @@ def probe_spark_setup(
 
 
 def probe_pop_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
-    """Подскок: тело 2.0..3.2% от open, фитиль ≤ 0.5%, без слива под open."""
+    """Подскок: тело 1.5..4.2% от open, фитиль ≤ 0.5%, без слива под open."""
     px = float(price or 0)
     hi = float(live_high or 0)
     lo = float(live_low or 0)
@@ -1480,7 +1487,7 @@ def probe_pop_setup(
     *,
     now: float | None = None,
 ) -> dict[str, float] | None:
-    """Живая 5м с телом 2–3.2% в любом месте бара. Полка — open. Покупка сразу."""
+    """Живая 5м с телом 1.5–4.2% в любом месте бара. Полка — open. Покупка сразу."""
     if now is None or len(bars) < PROBE_CANDLE_LOOKBACK + 2:
         return None
     forming = bars[-1]
@@ -1911,8 +1918,13 @@ def probe_candle_day_ok(
     day_high: float,
     day_chg: float | None,
     stair: bool = False,
+    allow_breakout: bool = False,
 ) -> bool:
-    """Топ по росту идут у хая суток; отсекаем перегрев ≥45% и глубокий слив с пика (>28%)."""
+    """Топ по росту идут у хая суток; отсекаем перегрев ≥45% и глубокий слив с пика (>28%).
+
+    allow_breakout: spark и pop могут обновлять хай суток (запас до −0.5%).
+    Impulse эту проверку не проходит — хай ему и так не запрещён.
+    """
     if day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
         return False
     hi = float(day_high or 0)
@@ -1922,7 +1934,10 @@ def probe_candle_day_ok(
     room = (hi - px) / hi * 100.0
     if room > PROBE_CANDLE_MAX_DAY_DROP_PCT + 1e-12:
         return False
-    min_room = PROBE_STAIR_MIN_DAY_ROOM_PCT if stair else PROBE_CANDLE_MIN_DAY_ROOM_PCT
+    if allow_breakout:
+        min_room = PROBE_BREAKOUT_MIN_ROOM_PCT
+    else:
+        min_room = PROBE_STAIR_MIN_DAY_ROOM_PCT if stair else PROBE_CANDLE_MIN_DAY_ROOM_PCT
     return room >= min_room - 1e-12
 
 
@@ -2142,6 +2157,7 @@ def probe_pick_setup(
                 day_high=float(day_high or 0),
                 day_chg=day_chg,
                 stair=False,
+                allow_breakout=True,
             ):
                 continue
         elif name == PROBE_ALGO_POP:
@@ -2151,6 +2167,7 @@ def probe_pick_setup(
                 day_high=float(day_high or 0),
                 day_chg=day_chg,
                 stair=False,
+                allow_breakout=True,
             ):
                 continue
         elif name == PROBE_ALGO_GRIND:
@@ -2176,13 +2193,18 @@ def probe_trends_ok(
     *,
     algo: str = "",
 ) -> bool:
-    """15м бычий, час не медвежий, неделя не слабее −5%.
+    """15м бычий для candle и impulse. Spark и pop: достаточно, чтобы 15м не был bear.
 
-    Grind требует бычий час: нейтральный 1h часто = уже выдохшийся подъём.
-    Candle: 15м может быть ещё neutral в начале свечи — лишь бы не bear.
+    Час для spark/pop не блокирует: подскок со дна бывает раньше пересечения EMA.
+    Grind требует бычий час. Неделя не слабее −5%.
+    Candle: 15м может быть ещё neutral — лишь бы не bear, и хотя бы один таймфрейм bull.
     """
     name = str(algo or "").strip().lower()
-    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+    if name in {PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+        # Подскок со дна бывает раньше пересечения EMA. Час не блокирует.
+        if trend15 == "bear":
+            return False
+    elif name == PROBE_ALGO_CANDLE:
         if trend15 == "bear" or trend1h == "bear":
             return False
         if trend15 != "bull" and trend1h != "bull":

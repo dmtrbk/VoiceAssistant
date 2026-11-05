@@ -907,7 +907,7 @@ class TestDeskPolicy(unittest.TestCase):
             )
         )
 
-        # Candle: старт восходящей 5м свечи от open (pos 0.35..0.65), без верхнего фитиля и не на пике.
+        # Candle: старт восходящей 5м свечи от open (pos 0.35..0.85), без верхнего фитиля.
         base5 = [
             {"open": 1.0, "high": 1.002, "low": 0.998, "close": 1.0, "volume": 10.0}
             for _ in range(14)
@@ -916,21 +916,21 @@ class TestDeskPolicy(unittest.TestCase):
             "open": 1.0,
             "high": 1.014,
             "low": 0.999,
-            "close": 1.008,  # ~0.8% тело, pos=0.60 в рабочей зоне 0.35..0.65
+            "close": 1.008,  # ~0.8% тело, pos=0.60 в зоне 0.35..0.85
             "volume": 25.0,
         }
-        self.assertFalse(
+        self.assertTrue(
             policy.probe_candle_live_ok(
                 rising["close"], rising["high"], rising["low"], rising["open"]
             )
         )
-        # Тело 0.8% ниже probe_break_min_pct. Пробой 4.5% — candle и spark.
-        self.assertIsNone(policy.probe_candle_setup(base5 + [rising]))
+        # Тело 0.8% — candle. Пробой полки (4%) к телу свечи больше не привязан.
+        self.assertIsNotNone(policy.probe_candle_setup(base5 + [rising]))
         spark_early = {
             **rising,
             "ts": 1000.0,
-            "close": 1.045,
-            "high": 1.048,
+            "close": 1.012,
+            "high": 1.015,
             "low": 0.998,
             "volume": 25.0,
         }
@@ -977,7 +977,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(picked_pop["algo"], policy.PROBE_ALGO_POP)
         self.assertEqual(picked_pop.get("hold_sec"), 0.0)
         self.assertIsNone(policy.probe_pop_setup(base5 + [spark_early], now=1180.0))
-        fat = {**pop_bar, "close": 1.035, "high": 1.036}
+        fat = {**pop_bar, "close": 1.045, "high": 1.046}
         self.assertIsNone(policy.probe_pop_setup(base5 + [fat], now=1180.0))
         wide_wick = {**pop_bar, "high": 1.034}
         self.assertIsNone(policy.probe_pop_setup(base5 + [wide_wick], now=1180.0))
@@ -986,15 +986,16 @@ class TestDeskPolicy(unittest.TestCase):
         climax_base = list(base5)
         climax_base[-6] = {**climax_base[-6], "open": 0.96, "close": 0.96}
         self.assertIsNone(policy.probe_pop_setup(climax_base + [pop_bar], now=1180.0))
-        self.assertIsNone(
-            policy.probe_pick_setup(
-                [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
-                base5 + [pop_bar],
-                day_chg=8.0,
-                day_high=1.028,
-                now=1180.0,
-            )
+        picked_at_high = policy.probe_pick_setup(
+            [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
+            base5 + [pop_bar],
+            day_chg=8.0,
+            day_high=1.028,
+            now=1180.0,
         )
+        self.assertIsNotNone(picked_at_high)
+        assert picked_at_high is not None
+        self.assertEqual(picked_at_high["algo"], policy.PROBE_ALGO_POP)
         self.assertIsNone(
             policy.probe_exit_reason(
                 price=1.02,
@@ -1027,13 +1028,13 @@ class TestDeskPolicy(unittest.TestCase):
                 {"pop": 1.0}, now=1_700_000_000.0, turnover=1_600_000, strict=True
             )
         )
-        at_high = {**spark_early, "close": 1.045, "high": 1.048, "low": 1.000}
+        at_high = {**spark_early, "close": 1.016, "high": 1.017, "low": 1.000}
         self.assertTrue(
             policy.probe_spark_live_ok(
                 at_high["close"], at_high["high"], at_high["low"], at_high["open"]
             )
         )
-        # Перегрев 30м режет candle/stair, spark — нет.
+        # Перегрев 30м не режет тело внутри 0.6–2%. Выше 2% — уже не candle и не spark.
         heat = [
             {"open": 1.0, "high": 1.002, "low": 0.998, "close": 1.0, "volume": 10.0}
             for _ in range(8)
@@ -1049,26 +1050,26 @@ class TestDeskPolicy(unittest.TestCase):
             "volume": 25.0,
             "ts": 1000.0,
         }
-        self.assertIsNone(policy.probe_candle_setup(heat + [heat_bar], now=1060.0))
-        self.assertIsNone(policy.probe_spark_setup(heat + [heat_bar], now=1060.0))
+        self.assertIsNotNone(policy.probe_candle_setup(heat + [heat_bar], now=1060.0))
+        self.assertIsNotNone(policy.probe_spark_setup(heat + [heat_bar], now=1060.0))
         heat_break = {**heat_bar, "close": 1.045, "high": 1.050}
-        self.assertIsNotNone(policy.probe_candle_setup(heat + [heat_break], now=1060.0))
-        self.assertIsNotNone(policy.probe_spark_setup(heat + [heat_break], now=1060.0))
+        self.assertIsNone(policy.probe_candle_setup(heat + [heat_break], now=1060.0))
+        self.assertIsNone(policy.probe_spark_setup(heat + [heat_break], now=1060.0))
         collapsed_wick = {**rising, "close": 1.006, "high": 1.020}
         self.assertIsNone(policy.probe_candle_setup(base5 + [collapsed_wick]))
         tip_candle = {**rising, "close": 1.011, "high": 1.012}
-        self.assertIsNone(policy.probe_candle_setup(base5 + [tip_candle]))
+        self.assertIsNotNone(policy.probe_candle_setup(base5 + [tip_candle]))
         late_body = {**rising, "close": 1.022, "high": 1.023}
         self.assertIsNone(policy.probe_candle_setup(base5 + [late_body]))
-        early_bar = {**rising, "ts": 1000.0, "volume": 6.0}
+        early_bar = {**rising, "ts": 1000.0, "volume": 4.0}
         self.assertIsNone(policy.probe_candle_setup(base5 + [early_bar]))
         self.assertIsNone(policy.probe_candle_setup(base5 + [early_bar], now=1045.0))
-        # buy_ok: терпит уехавший хай, но режет кончик и обвалившийся под 0.35 фитиль.
+        # buy_ok: тело 0.6–2% идёт через spark (фитиль и пролив), выше потолка — нет.
         self.assertTrue(
-            policy.probe_candle_buy_ok(1.008, 1.02, 0.999, 1.0)
+            policy.probe_candle_buy_ok(1.008, 1.010, 0.999, 1.0)
         )
         self.assertFalse(
-            policy.probe_candle_buy_ok(1.019, 1.02, 0.999, 1.0)
+            policy.probe_candle_buy_ok(1.025, 1.026, 0.999, 1.0)
         )
         self.assertFalse(
             policy.probe_candle_buy_ok(1.003, 1.02, 0.999, 1.0)
@@ -1134,8 +1135,11 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertNotIn(policy.PROBE_ALGO_GRIND, policy.PROBE_ALGO_ORDER)
         self.assertGreaterEqual(policy.PROBE_CANDLE_MIN_BODY_PCT, 0.6)
-        self.assertEqual(policy.probe_candle_min_body_pct(), policy.cfg().probe_break_min_pct)
-        self.assertEqual(policy.probe_candle_max_body_pct(), policy.cfg().probe_break_max_pct)
+        self.assertEqual(policy.probe_candle_min_body_pct(), policy.PROBE_CANDLE_MIN_BODY_PCT)
+        self.assertEqual(policy.probe_candle_max_body_pct(), policy.PROBE_CANDLE_MAX_BODY_PCT)
+        self.assertEqual(policy.PROBE_POP_MIN_BODY_PCT, 1.5)
+        self.assertEqual(policy.PROBE_POP_MAX_BODY_PCT, 4.2)
+        self.assertEqual(policy.PROBE_CANDLE_MAX_BAR_POS, 0.85)
         weak = {**rising, "close": 1.004, "high": 1.012}
         self.assertIsNone(policy.probe_candle_setup(base5 + [weak]))
         # Ступенька мельче пробоя — не вход. +48% и пик суток — тоже нет.
@@ -1180,6 +1184,36 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertFalse(
             policy.probe_trends_ok("bear", "neutral", 8.0, algo=policy.PROBE_ALGO_CANDLE)
+        )
+        self.assertTrue(
+            policy.probe_trends_ok("neutral", "bear", 8.0, algo=policy.PROBE_ALGO_SPARK)
+        )
+        self.assertTrue(
+            policy.probe_trends_ok("neutral", "neutral", 8.0, algo=policy.PROBE_ALGO_POP)
+        )
+        self.assertTrue(
+            policy.probe_trends_ok("bull", "bear", 8.0, algo=policy.PROBE_ALGO_POP)
+        )
+        self.assertFalse(
+            policy.probe_trends_ok("bear", "bull", 8.0, algo=policy.PROBE_ALGO_SPARK)
+        )
+        self.assertTrue(
+            policy.probe_candle_day_ok(
+                price=1.0, day_high=1.0, day_chg=3.0, allow_breakout=True
+            )
+        )
+        self.assertTrue(
+            policy.probe_candle_day_ok(
+                price=1.004, day_high=1.0, day_chg=3.0, allow_breakout=True
+            )
+        )
+        self.assertFalse(
+            policy.probe_candle_day_ok(
+                price=1.008, day_high=1.0, day_chg=3.0, allow_breakout=True
+            )
+        )
+        self.assertFalse(
+            policy.probe_candle_day_ok(price=1.0, day_high=1.0, day_chg=3.0)
         )
         # Arm не должен снимать candle на neutral 15м (иначе INIT вечный wait→drop).
         self.assertEqual(

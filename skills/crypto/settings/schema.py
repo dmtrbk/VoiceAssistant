@@ -40,6 +40,8 @@ class DeskSettings:
     probe_shelf_range_pct: float = 12.0
     probe_break_min_pct: float = 4.0
     probe_break_max_pct: float = 12.0
+    probe_candle_min_pct: float = 0.6
+    probe_candle_max_pct: float = 2.0
     rebalance_pct: float = 8.0
     cooldown_hours: float = 12.0
 
@@ -73,6 +75,8 @@ _LIMITS: dict[str, tuple[float, float]] = {
     "probe_shelf_range_pct": (4.0, 25.0),
     "probe_break_min_pct": (1.0, 10.0),
     "probe_break_max_pct": (6.0, 25.0),
+    "probe_candle_min_pct": (0.3, 3.0),
+    "probe_candle_max_pct": (0.8, 6.0),
     "rebalance_pct": (2.0, 15.0),
     "cooldown_hours": (1.0, 48.0),
 }
@@ -110,6 +114,10 @@ def clamp_settings(data: DeskSettings) -> DeskSettings:
     high = float(values["probe_break_max_pct"])
     if low >= high:
         values["probe_break_max_pct"] = clamp_field("probe_break_max_pct", low + 0.5)
+    candle_low = float(values["probe_candle_min_pct"])
+    candle_high = float(values["probe_candle_max_pct"])
+    if candle_low >= candle_high:
+        values["probe_candle_max_pct"] = clamp_field("probe_candle_max_pct", candle_low + 0.4)
     bounce = float(values["sleeve_bounce_pct"])
     chase = float(values["sleeve_chase_pct"])
     if bounce >= chase:
@@ -170,6 +178,8 @@ def to_payload(data: DeskSettings) -> dict[str, object]:
             "shelf_range_pct": data.probe_shelf_range_pct,
             "break_min_pct": data.probe_break_min_pct,
             "break_max_pct": data.probe_break_max_pct,
+            "candle_min_pct": data.probe_candle_min_pct,
+            "candle_max_pct": data.probe_candle_max_pct,
         },
         "risk": {
             "rebalance_pct": data.rebalance_pct,
@@ -222,6 +232,8 @@ def from_payload(raw: object) -> DeskSettings:
         "probe_shelf_range_pct": probe.get("shelf_range_pct"),
         "probe_break_min_pct": probe.get("break_min_pct"),
         "probe_break_max_pct": probe.get("break_max_pct"),
+        "probe_candle_min_pct": probe.get("candle_min_pct"),
+        "probe_candle_max_pct": probe.get("candle_max_pct"),
         "rebalance_pct": risk.get("rebalance_pct"),
         "cooldown_hours": risk.get("cooldown_hours"),
     }
