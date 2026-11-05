@@ -90,6 +90,7 @@ from .desk_policy import (
     probe_scan_rank,
     probe_scan_ranked_rows,
     probe_choose_pin,
+    probe_setup_hold_sec,
     PROBE_PIN_ON,
     probe_trends_ok,
     pocket_dip_held,
@@ -124,6 +125,7 @@ logger = logging.getLogger(__name__)
 
 _RECONCILE_MIN_GAP_SEC = 45.0
 _PROBE_PAUSE_LOG_SEC = 300.0
+_PROBE_PIN_IDLE_LOG_SEC = 300.0
 
 
 def _probe_pause_kind(reason: str) -> str:
@@ -1699,7 +1701,7 @@ class CryptoDeskMixin:
             algo=algo,
         ):
             return False
-        hold = int(float(setup.get("hold_sec") or PROBE_ENTRY_HOLD_SEC))
+        hold = int(probe_setup_hold_sec(setup))
         arm_ts = time.time()
         write_probe(
             arm_ticker=ticker,
@@ -1740,7 +1742,7 @@ class CryptoDeskMixin:
             return None
 
     def _probe_cap(self, tape: list[dict[str, Any]] | None = None) -> int:
-        return probe_max_legs(btc_day_chg=self._btc_day_chg(tape))
+        return probe_max_legs(btc_day_chg=self._btc_day_chg(tape), now=time.time())
 
     def _refresh_probe_pin(self, tape: list[dict[str, Any]]) -> str:
         """Обновить мягкий пин. Пустая строка — пина нет."""
@@ -1785,6 +1787,19 @@ class CryptoDeskMixin:
                 note = " вручную" if forced else ""
                 common.send_telegram_notification(f"Крипта: щуп пин {name}{note}", background=True)
         return name
+
+    def _note_pin_idle(self, ticker: str) -> None:
+        name = str(ticker or "").upper()
+        if not name:
+            return
+        now = time.time()
+        last = float(getattr(self, "_probe_pin_idle_log_ts", 0.0) or 0.0)
+        prev = str(getattr(self, "_probe_pin_idle_name", "") or "")
+        if name == prev and now - last < _PROBE_PIN_IDLE_LOG_SEC:
+            return
+        self._probe_pin_idle_log_ts = now
+        self._probe_pin_idle_name = name
+        logger.info("[Крипта] щуп пин %s: сетапа нет", name)
 
     def _probe_scan_one(
         self,
@@ -1897,8 +1912,13 @@ class CryptoDeskMixin:
 
         if pin and _arm_slots_left() > 0:
             pin_row = tape_by.get(pin)
+            pin_hit = False
             if pin_row:
-                self._probe_scan_one(pin_row, blocked, order, cache_sec=8.0)
+                pin_hit = self._probe_scan_one(pin_row, blocked, order, cache_sec=8.0)
+            if not pin_hit and pin not in probe_tickers() and pin not in {
+                arm["ticker"] for arm in probe_arms()
+            }:
+                self._note_pin_idle(pin)
 
         # 1) Широкий обзор: только 5м candle — 15м/1h только если свеча уже живая.
         for scan_idx, (_rank, row) in enumerate(ranked[:PROBE_SCAN_LIMIT]):

@@ -157,10 +157,13 @@ PROBE_PIN_MIN_ROOM_PCT = 1.5
 PROBE_PIN_MAX_ROOM_PCT = 10.0
 PROBE_PIN_DROP_ROOM_PCT = 0.5
 PROBE_PIN_HOLD_SEC = 45 * 60
-PROBE_PIN_MAX_HOLD_SEC = 90 * 60
+PROBE_PIN_MAX_HOLD_SEC = 3 * 3600
 PROBE_PIN_TOP_N = 30
-PROBE_PIN_LOSS_LOOKBACK_SEC = 6 * 3600
+PROBE_PIN_KEEP_TOP_N = 5
+PROBE_PIN_MIN_SCORE = 55.0
+PROBE_PIN_LOSS_LOOKBACK_SEC = 24 * 3600
 PROBE_PIN_SWITCH_SCORE_MULT = 1.15
+PROBE_NIGHT_PIN_MAX_LEGS = 2
 PROBE_EMA_FAST = 20
 PROBE_EMA_SLOW = 50
 PROBE_SHELF_BARS = 96
@@ -668,10 +671,19 @@ def tape_btc_day_chg(rows: list[dict[str, Any]] | None) -> float | None:
     return None
 
 
-def probe_max_legs(*, btc_day_chg: float | None = None) -> int:
-    """Слоты не режем по BTC: до 4 ног. Место под новый вход — парковка в карман2."""
+def probe_max_legs(*, btc_day_chg: float | None = None, now: float | None = None) -> int:
+    """Днём до 4 ног. Ночью с пином: 1 пин + 1 бродячий."""
     del btc_day_chg
+    if PROBE_PIN_ON and probe_night_halted(now):
+        return int(PROBE_NIGHT_PIN_MAX_LEGS)
     return int(PROBE_MAX_LEGS)
+
+
+def probe_setup_hold_sec(setup: dict[str, Any] | None) -> float:
+    """0 — валидный hold (spark сразу). Не подменять через `or` на 90 с."""
+    if not isinstance(setup, dict) or "hold_sec" not in setup or setup.get("hold_sec") is None:
+        return float(PROBE_ENTRY_HOLD_SEC)
+    return float(setup.get("hold_sec") or 0)
 
 
 def probe_setup_ok_now(
@@ -987,7 +999,10 @@ def probe_choose_pin(
             continue
         if not probe_pin_row_ok(row):
             continue
-        scored.append((probe_pin_score(row, rank=rank), ticker, row))
+        score = probe_pin_score(row, rank=rank)
+        if score < PROBE_PIN_MIN_SCORE - 1e-12:
+            continue
+        scored.append((score, ticker, row))
     scored.sort(key=lambda item: item[0], reverse=True)
 
     cur = current if isinstance(current, dict) else {}
@@ -1020,23 +1035,31 @@ def probe_choose_pin(
         else "пусто"
     )
     if cur_ticker and cur_ticker not in skip_names and drop is None:
+        live_score = (
+            probe_pin_score(cur_row, rank=int(cur_rank))
+            if cur_row and cur_rank
+            else cur_score
+        )
+        strong = (
+            int(cur_rank or 999) <= PROBE_PIN_KEEP_TOP_N
+            and live_score >= PROBE_PIN_MIN_SCORE - 1e-12
+        )
+        if strong:
+            return {"ticker": cur_ticker, "ts": cur_ts, "score": live_score}
         if age < PROBE_PIN_HOLD_SEC:
             return {
                 "ticker": cur_ticker,
                 "ts": cur_ts,
-                "score": cur_score or probe_pin_score(cur_row or {}, rank=int(cur_rank or PROBE_PIN_TOP_N)),
+                "score": live_score or cur_score,
             }
         if age < PROBE_PIN_MAX_HOLD_SEC:
             best = scored[0] if scored else None
-            keep_score = cur_score or probe_pin_score(
-                cur_row or {}, rank=int(cur_rank or PROBE_PIN_TOP_N)
-            )
             if (
                 best is None
                 or best[1] == cur_ticker
-                or best[0] <= keep_score * PROBE_PIN_SWITCH_SCORE_MULT
+                or best[0] <= live_score * PROBE_PIN_SWITCH_SCORE_MULT
             ):
-                return {"ticker": cur_ticker, "ts": cur_ts, "score": keep_score}
+                return {"ticker": cur_ticker, "ts": cur_ts, "score": live_score}
 
     if not scored:
         return None

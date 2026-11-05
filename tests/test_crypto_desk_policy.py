@@ -657,10 +657,11 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.probe_night_halt_reason(night_ts))
         self.assertIsNone(policy.probe_night_halt_reason(day_ts))
         self.assertEqual(policy.PROBE_MAX_LEGS_BTC_DOWN, 2)
-        self.assertEqual(policy.probe_max_legs(), 4)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4), 4)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0), 4)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01), 4)
+        self.assertEqual(policy.probe_max_legs(now=day_ts), 4)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 4)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 4)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 4)
+        self.assertEqual(policy.probe_max_legs(now=night_ts), 2)
         self.assertEqual(policy.tape_btc_day_chg([{"ticker": "ETH", "chg": 1.0}]), None)
         self.assertEqual(
             policy.tape_btc_day_chg([{"ticker": "BTC", "chg": -1.2}, {"ticker": "ETH", "chg": 2.0}]),
@@ -941,6 +942,8 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(spark_pick["algo"], policy.PROBE_ALGO_SPARK)
         self.assertEqual(spark_pick.get("spark"), 1.0)
         self.assertEqual(spark_pick.get("hold_sec"), 0.0)
+        self.assertEqual(policy.probe_setup_hold_sec(spark_pick), 0.0)
+        self.assertEqual(policy.probe_setup_hold_sec({"algo": "spark"}), 90.0)
         at_high = {**spark_early, "close": 1.012, "high": 1.012, "low": 1.000}
         self.assertTrue(
             policy.probe_spark_live_ok(
@@ -1923,6 +1926,20 @@ class TestJournalChurnAndDaily(unittest.TestCase):
             lost=set(),
         )
         self.assertEqual(after["ticker"] if after else "", "ARX")
+        stuck = policy.probe_choose_pin(
+            rows,
+            {"ticker": "ARX", "ts": now, "score": 72.0},
+            now=now + 2 * 3600,
+            lost=set(),
+        )
+        self.assertEqual(stuck["ticker"] if stuck else "", "ARX")
+        weak = [
+            {"ticker": "MET", "chg": 8.2, "turnover": 1_600_000, "price": 0.31, "high": 0.315},
+        ]
+        self.assertIsNone(policy.probe_choose_pin(weak, None, now=now, lost=set()))
+        self.assertEqual(policy.PROBE_PIN_LOSS_LOOKBACK_SEC, 24 * 3600)
+        self.assertEqual(policy.PROBE_PIN_MIN_SCORE, 55.0)
+        self.assertEqual(policy.PROBE_NIGHT_PIN_MAX_LEGS, 2)
 
     def test_probe_recent_loss_tickers_for_pin(self):
         now = 1_800_000_000.0
