@@ -1764,6 +1764,8 @@ class CryptoDeskMixin:
             if prev_name:
                 write_probe_pin("")
                 logger.info("[Крипта] щуп пин снят")
+            else:
+                self._note_pin_idle("")
             return ""
         forced = bool(chosen.get("forced"))
         if (
@@ -1790,15 +1792,17 @@ class CryptoDeskMixin:
 
     def _note_pin_idle(self, ticker: str) -> None:
         name = str(ticker or "").upper()
-        if not name:
-            return
+        key = name or "-"
         now = time.time()
         last = float(getattr(self, "_probe_pin_idle_log_ts", 0.0) or 0.0)
         prev = str(getattr(self, "_probe_pin_idle_name", "") or "")
-        if name == prev and now - last < _PROBE_PIN_IDLE_LOG_SEC:
+        if key == prev and now - last < _PROBE_PIN_IDLE_LOG_SEC:
             return
         self._probe_pin_idle_log_ts = now
-        self._probe_pin_idle_name = name
+        self._probe_pin_idle_name = key
+        if not name:
+            logger.info("[Крипта] щуп пин: нет кандидата")
+            return
         logger.info("[Крипта] щуп пин %s: сетапа нет", name)
 
     def _probe_scan_one(

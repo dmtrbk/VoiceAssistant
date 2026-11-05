@@ -1940,6 +1940,16 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertEqual(policy.PROBE_PIN_LOSS_LOOKBACK_SEC, 24 * 3600)
         self.assertEqual(policy.PROBE_PIN_MIN_SCORE, 55.0)
         self.assertEqual(policy.PROBE_NIGHT_PIN_MAX_LEGS, 2)
+        falling = rows + [
+            {"ticker": "MET", "chg": 9.0, "turnover": 1_600_000, "price": 0.25, "high": 0.32},
+        ]
+        dumped = policy.probe_choose_pin(
+            falling,
+            {"ticker": "MET", "ts": now, "score": 32.8},
+            now=now + 20 * 60,
+            lost=set(),
+        )
+        self.assertNotEqual(dumped["ticker"] if dumped else "", "MET")
 
     def test_probe_recent_loss_tickers_for_pin(self):
         now = 1_800_000_000.0

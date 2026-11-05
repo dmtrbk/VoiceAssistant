@@ -962,8 +962,13 @@ def probe_pin_hard_drop_reason(
         return "оборот"
     if chg >= PROBE_CANDLE_MAX_DAY_PCT - 1e-12:
         return "перегрев"
-    if probe_pin_room_pct(row) < PROBE_PIN_DROP_ROOM_PCT - 1e-12:
+    room = probe_pin_room_pct(row)
+    if room < PROBE_PIN_DROP_ROOM_PCT - 1e-12:
         return "нет воздуха"
+    if room > PROBE_PIN_MAX_ROOM_PCT + 1e-12:
+        return "слив с хая"
+    if chg < PROBE_PIN_MIN_DAY_PCT - 1e-12:
+        return "сутки ослабли"
     if rank is None or int(rank) > PROBE_PIN_TOP_N:
         return "вне топа"
     return None
@@ -1046,13 +1051,13 @@ def probe_choose_pin(
         )
         if strong:
             return {"ticker": cur_ticker, "ts": cur_ts, "score": live_score}
-        if age < PROBE_PIN_HOLD_SEC:
+        if age < PROBE_PIN_HOLD_SEC and live_score >= PROBE_PIN_MIN_SCORE - 1e-12:
             return {
                 "ticker": cur_ticker,
                 "ts": cur_ts,
                 "score": live_score or cur_score,
             }
-        if age < PROBE_PIN_MAX_HOLD_SEC:
+        if age < PROBE_PIN_MAX_HOLD_SEC and live_score >= PROBE_PIN_MIN_SCORE - 1e-12:
             best = scored[0] if scored else None
             if (
                 best is None
