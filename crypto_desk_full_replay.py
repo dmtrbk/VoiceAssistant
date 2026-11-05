@@ -35,6 +35,8 @@ from skills.crypto.desk_policy import (
     pocket_swing,
     probe_arm_action,
     probe_candle_buy_ok,
+    probe_pop_buy_ok,
+    probe_spark_buy_ok,
     probe_exit_reason,
     probe_should_handoff,
     pocket_from_probe_max,
@@ -536,6 +538,8 @@ def main() -> int:
                 entry_low=leg.low,
                 algo=leg.algo,
                 qty=leg.qty,
+                opened_ts=leg.opened_ts,
+                now=ts,
             )
             if not reason:
                 continue
@@ -827,7 +831,26 @@ def main() -> int:
                 price = prices.get(ticker) or 0
                 day = day_chg_at(series[ticker]["15"], ts, price)
                 week = week_chg_at(series[ticker]["60"], ts, price)
-                setup = probe_pick_setup(as_ohlc(bars15), as_ohlc(bars5), day_chg=day)
+                # Сетка 5м. now внутри бара: spark (≤120с) и pop (≤300с) видят close.
+                seen_at = ts + 90.0
+                bars5_setup = [
+                    {
+                        "open": float(b.get("open") or b["close"]),
+                        "high": float(b["high"]),
+                        "low": float(b["low"]),
+                        "close": float(b["close"]),
+                        "volume": float(b["volume"]),
+                        "ts": float(b.get("ts") or 0),
+                    }
+                    for b in bars5
+                ]
+                setup = probe_pick_setup(
+                    as_ohlc(bars15),
+                    bars5_setup,
+                    day_chg=day,
+                    day_high=float(prow.get("high") or 0),
+                    now=seen_at,
+                )
                 if not setup:
                     continue
                 algo = str(setup.get("algo") or "shelf")
@@ -840,6 +863,51 @@ def main() -> int:
                 )
                 if not probe_trends_ok(trend, t1h, day, week_chg=week, algo=algo):
                     continue
+                hold = float(setup["hold_sec"]) if setup.get("hold_sec") is not None else 90.0
+                live5 = bars5[-1]
+                elapsed = seen_at - float(live5.get("ts") or ts)
+                if algo == P.PROBE_ALGO_POP and not probe_pop_buy_ok(
+                    price,
+                    float(live5.get("high") or 0),
+                    float(live5.get("low") or 0),
+                    float(live5.get("open") or 0),
+                    elapsed_sec=elapsed,
+                ):
+                    continue
+                if algo == P.PROBE_ALGO_SPARK and not probe_spark_buy_ok(
+                    price,
+                    float(live5.get("high") or 0),
+                    float(live5.get("low") or 0),
+                    float(live5.get("open") or 0),
+                    elapsed_sec=elapsed,
+                ):
+                    continue
+                if algo == P.PROBE_ALGO_CANDLE and not probe_candle_buy_ok(
+                    price,
+                    float(live5.get("high") or 0),
+                    float(live5.get("low") or 0),
+                    float(live5.get("open") or 0),
+                ):
+                    continue
+                # hold 0..30с в бою покупается в том же цикле. На сетке 5м — в этом баре.
+                if hold <= 30.0:
+                    if book.cash < probe_usd * 0.5:
+                        continue
+                    if len(book.open_kinds("probe")) >= PROBE_MAX_LEGS:
+                        break
+                    buy(
+                        book,
+                        ts=ts,
+                        kind="probe",
+                        ticker=ticker,
+                        price=price,
+                        quote=min(probe_usd, book.cash * 0.998),
+                        algo=algo,
+                        shelf=float(setup["shelf"]),
+                        arm_px=float(setup["price"]),
+                        low=float(live5.get("low") or price),
+                    )
+                    continue
                 book.probe_arms.append(
                     Arm(
                         kind="probe",
@@ -848,7 +916,7 @@ def main() -> int:
                         shelf=float(setup["shelf"]),
                         px=float(setup["price"]),
                         algo=algo,
-                        hold_sec=float(setup.get("hold_sec") or 0),
+                        hold_sec=hold,
                         chase_pct=float(setup.get("chase_pct") or 0),
                     )
                 )
@@ -861,7 +929,7 @@ def main() -> int:
                     quote=0.0,
                     algo=str(setup["algo"]),
                 )
-                break  # как live: один новый взвод за цикл
+                break
 
         if step and step % 40 == 0:
             print(
