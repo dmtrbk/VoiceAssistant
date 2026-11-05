@@ -76,11 +76,18 @@ ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
 MIN_TURNOVER_USD = 5_000_000.0
 # Суточный потолок +25% остался только у impulse: уже разогнанную свечу не догоняем.
 # Ловушка кармана/рукава: круг комиссий (taker 0,18% × 2) + $0.12 сверх (на $40 ~+0.66%).
-# Щуп: взвод позже (~+1.56% на $40) и откат 1.50% — первый выдох тренда не продаём.
+# Щуп impulse/grind: взвод ~+1.56% на $40 и откат 1.50% — первый выдох тренда не продаём.
+# Candle/spark/pop: взвод ~+0.91% ($0.22) и откат 0.45%, иначе пик +1.7% после 1.5%
+# отката остаётся ниже круга комиссии 0.36% и «вершина» не продаёт.
+# Пик от +4% — откат 1.0%, ходу есть чем дышать.
 EXIT_FEE_SIDE = 0.0018
 EXIT_TRAP_EXTRA_USD = 0.12
 PROBE_TRAP_EXTRA_USD = 0.48
 PROBE_TRAP_PULLBACK_PCT = 1.50
+PROBE_FAST_TRAP_EXTRA_USD = 0.22
+PROBE_FAST_TRAP_PULLBACK_PCT = 0.45
+PROBE_FAST_TRAP_RUN_PCT = 4.0
+PROBE_FAST_TRAP_RUN_PULLBACK_PCT = 1.0
 EXIT_TRAP_DEFAULT_COST_USD = 100.0
 
 # Стейблы не рукав, даже если оборот большой. Базовый список остаётся всегда.
@@ -463,6 +470,25 @@ def exit_trap_arm_pct(
     extra = EXIT_TRAP_EXTRA_USD if extra_usd is None else float(extra_usd)
     need = cost * (2.0 * EXIT_FEE_SIDE) + extra
     return need / cost * 100.0
+
+
+_PROBE_FAST_TRAP = frozenset({PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP})
+
+
+def probe_trap_extra_usd(algo: str) -> float:
+    """Ранний взвод у подскока. Impulse и лестница держат прежние $0.48."""
+    if str(algo or "").strip().lower() in _PROBE_FAST_TRAP:
+        return float(PROBE_FAST_TRAP_EXTRA_USD)
+    return float(PROBE_TRAP_EXTRA_USD)
+
+
+def probe_trap_pullback_pct(algo: str, peak_gain: float) -> float:
+    """Короткий откат на небольшом пике подскока, шире — когда ход уже выше +4%."""
+    if str(algo or "").strip().lower() in _PROBE_FAST_TRAP:
+        if float(peak_gain or 0) >= PROBE_FAST_TRAP_RUN_PCT - 1e-9:
+            return float(PROBE_FAST_TRAP_RUN_PULLBACK_PCT)
+        return float(PROBE_FAST_TRAP_PULLBACK_PCT)
+    return float(PROBE_TRAP_PULLBACK_PCT)
 
 
 def pick_probe_leg_for_room(
@@ -2280,7 +2306,10 @@ def probe_exit_reason(
     bid: float = 0.0,
     obi: float | None = None,
 ) -> str | None:
-    """Стоп и полка. Плюс — ловушка: пик ≥ комиссия×2+$0.12, продажа на откате −0,35% (или −0,2% при плите ask).
+    """Стоп и полка. Плюс — ловушка: пик покрыл круг комиссии и запас, продажа на откате.
+
+    Подскок (candle/spark/pop): запас $0.22 и откат 0.45% (1.0% после пика +4%).
+    Impulse: запас $0.48 и откат 1.50%. Медвежий стакан сжимает откат до 0.20%.
 
     Пока ловушка не взведена: shelf режется «ожиданием»/«дном»; подножка
     impulse/sprint/grind эти срезы не берёт. Большой ход (+PROBE_RUN) ещё и медвежьим 15м.
@@ -2305,14 +2334,14 @@ def probe_exit_reason(
         else:
             return "полка"
     high = max(float(peak or 0), px)
-    arm_pct = exit_trap_arm_pct(entry=ent, qty=qty, extra_usd=PROBE_TRAP_EXTRA_USD)
+    arm_pct = exit_trap_arm_pct(entry=ent, qty=qty, extra_usd=probe_trap_extra_usd(name))
     peak_gain = (high / ent - 1.0) * 100.0 if ent > 0 else 0.0
     exit_px = min(px, float(bid)) if float(bid or 0) > 0 else px
     exit_gain = (exit_px / ent - 1.0) * 100.0 if ent > 0 else 0.0
     pullback_pct = (
         POCKET_EXIT_WALL_PULLBACK_PCT
         if (obi is not None and float(obi) <= EXIT_TRAP_BEAR_OBI + 1e-12)
-        else PROBE_TRAP_PULLBACK_PCT
+        else probe_trap_pullback_pct(name, peak_gain)
     )
     if (
         peak_gain >= arm_pct - 1e-6

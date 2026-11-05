@@ -1595,10 +1595,10 @@ class TestDeskPolicy(unittest.TestCase):
                 now=now,
             )
         )
-        # BASED: пик +2% взводит ловушку (~+1.56%). Откат 0.67% держим, 1.5% продаём.
+        # Candle +2%: откат 0.2% держим, 0.5% продаём. Широкий 1.5% остался у impulse.
         self.assertIsNone(
             policy.probe_exit_reason(
-                price=0.05440,
+                price=0.05477 * (1.0 - 0.002),
                 entry=0.053678,
                 shelf=0.05279,
                 trend15="bull",
@@ -1609,7 +1609,7 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertEqual(
             policy.probe_exit_reason(
-                price=0.05394,
+                price=0.05477 * (1.0 - 0.005),
                 entry=0.053678,
                 shelf=0.05279,
                 trend15="bull",
@@ -1623,6 +1623,59 @@ class TestDeskPolicy(unittest.TestCase):
             policy.exit_trap_arm_pct(cost_usd=40.0, extra_usd=policy.PROBE_TRAP_EXTRA_USD),
             1.56,
             places=2,
+        )
+        self.assertAlmostEqual(
+            policy.exit_trap_arm_pct(cost_usd=40.0, extra_usd=policy.PROBE_FAST_TRAP_EXTRA_USD),
+            0.91,
+            places=2,
+        )
+        # Пик +1.7% и откат 0.5% ещё выше круга комиссии. Откат 1.5% уже ниже — не продаём.
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=1.017 * (1.0 - 0.005),
+                entry=1.0,
+                shelf=0.99,
+                trend15="neutral",
+                peak=1.017,
+                algo=policy.PROBE_ALGO_POP,
+                qty=40.0,
+            ),
+            "вершина",
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.017 * (1.0 - 0.015),
+                entry=1.0,
+                shelf=0.99,
+                trend15="neutral",
+                peak=1.017,
+                algo=policy.PROBE_ALGO_POP,
+                qty=40.0,
+            )
+        )
+        # Пик +5% дышит до отката 1%.
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.05 * (1.0 - 0.006),
+                entry=1.0,
+                shelf=0.99,
+                trend15="bull",
+                peak=1.05,
+                algo=policy.PROBE_ALGO_SPARK,
+                qty=40.0,
+            )
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=1.05 * (1.0 - 0.011),
+                entry=1.0,
+                shelf=0.99,
+                trend15="bull",
+                peak=1.05,
+                algo=policy.PROBE_ALGO_SPARK,
+                qty=40.0,
+            ),
+            "вершина",
         )
         # Шум +0.8% больше не взводит ловушку щупа.
         self.assertIsNone(
