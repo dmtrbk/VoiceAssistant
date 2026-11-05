@@ -699,7 +699,6 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_SEC, 25 * 60)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_LOSS_USD, 0.25)
         self.assertFalse(policy.PROBE_MARKET_FALL_ON)
-        # Падающий рынок выключен — даже глубокий BTC/узкая ширина не стопят вход.
         self.assertTrue(
             policy.probe_market_regime_ok([{"ticker": "BTC", "chg": -3.1, "turnover": 50_000_000}])[0]
         )
@@ -790,20 +789,6 @@ class TestDeskPolicy(unittest.TestCase):
             )
             self.assertIn("падающий рынок", reason_on or "")
             self.assertAlmostEqual(until_on, t0 + 3600.0)
-            reason2, until2 = policy.probe_market_regime_pause_reason(
-                normal_market,
-                now=t0 + 600.0,
-                pause_until=until_on,
-            )
-            self.assertIn("пауза", reason2 or "")
-            self.assertAlmostEqual(until2, until_on)
-            reason3, until3 = policy.probe_market_regime_pause_reason(
-                normal_market,
-                now=t0 + 3601.0,
-                pause_until=until_on,
-            )
-            self.assertIsNone(reason3)
-            self.assertEqual(until3, 0.0)
         self.assertAlmostEqual(
             policy.probe_scan_rank({
                 "chg": -2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,

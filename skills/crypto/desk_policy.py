@@ -115,7 +115,6 @@ PROBE_STRICT_MIN_TURNOVER_USD = 1_500_000.0
 PROBE_NIGHT_START_HOUR_YEKT = 23
 PROBE_NIGHT_END_HOUR_YEKT = 6
 # Защита от падающего рынка (выкл.): сутки BTC / flash 15м / ширина рынка.
-# Пороги оставлены на случай включения; сейчас полный стоп по рынку не режет входы.
 PROBE_MARKET_FALL_ON = False
 PROBE_BTC_MAX_DROP_DAY_PCT = -2.5
 PROBE_BTC_FLASH_DROP_PCT = -1.0
