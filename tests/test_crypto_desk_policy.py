@@ -2109,7 +2109,18 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertTrue(policy.probe_pin_row_ok(rows[2]))
         self.assertTrue(policy.probe_pin_row_ok(rows[1]))
         self.assertFalse(policy.probe_pin_row_ok(rows[0]))
-        self.assertFalse(policy.probe_pin_row_ok(rows[3]))
+        # ELSA у самого хая суток: перехай больше не брак.
+        self.assertTrue(policy.probe_pin_row_ok(rows[3]))
+        self.assertTrue(
+            policy.probe_pin_row_ok(
+                {"ticker": "TOP", "chg": 10.0, "turnover": 2_000_000, "price": 1.004, "high": 1.0}
+            )
+        )
+        self.assertFalse(
+            policy.probe_pin_row_ok(
+                {"ticker": "TOP", "chg": 10.0, "turnover": 2_000_000, "price": 1.012, "high": 1.0}
+            )
+        )
         picked = policy.probe_choose_pin(
             rows, None, now=now, lost=set(), moves={"CAP": 2.4, "ARX": 1.6}
         )

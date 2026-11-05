@@ -155,21 +155,23 @@ PROBE_ARMED_PERIOD_SEC = 6
 PROBE_REENTRY_HOURS = 0.75
 # Если цена уже выше продажи на этот % — блок снимаем (продолжение хода).
 PROBE_REENTRY_BREAKOUT_PCT = 2.5
-# Мягкий автопин: 1 слот сначала смотрит лидера суток, не занимает его вхолостую.
+# Мягкий автопин: смотрит имя первым, слот не занимает.
 PROBE_PIN_ON = True
 PROBE_PIN_MIN_TURNOVER_USD = 1_200_000.0
 PROBE_PIN_MIN_DAY_PCT = 7.0
 PROBE_PIN_MAX_DAY_PCT = 35.0
-PROBE_PIN_MIN_ROOM_PCT = 1.0
+# Перехай суток — нормальный сетап. Глубже −0.5% от записанного хая уже догон.
+PROBE_PIN_MIN_ROOM_PCT = -0.5
 PROBE_PIN_MAX_ROOM_PCT = 12.0
-PROBE_PIN_DROP_ROOM_PCT = 0.4
+PROBE_PIN_DROP_ROOM_PCT = -0.5
 PROBE_PIN_HOLD_SEC = 45 * 60
 PROBE_PIN_MAX_HOLD_SEC = 3 * 3600
 PROBE_PIN_TOP_N = 30
 PROBE_PIN_KEEP_TOP_N = 8
 PROBE_PIN_MIN_SCORE = 45.0
 PROBE_PIN_MOVE_PCT = 1.5
-PROBE_PIN_MOVE_BARS = 3
+# 2 живых 5м ≈ 10 минут: зарождение хода, не середина пятнадцатиминутного тренда.
+PROBE_PIN_MOVE_BARS = 2
 PROBE_PIN_MOVE_VOL_MULT = 1.5
 PROBE_PIN_SWITCH_PCT = 0.3
 PROBE_PIN_LOSS_LOOKBACK_SEC = 12 * 3600
@@ -980,7 +982,7 @@ def probe_day_ranks(rows: list[dict[str, Any]] | None) -> dict[str, int]:
 
 
 def probe_pin_row_ok(row: dict[str, Any] | None) -> bool:
-    """Фильтр пина: оборот, не парабола, есть воздух до хая. Сутки сами по себе не выбирают."""
+    """Фильтр пина: оборот и не парабола. Перехай суток пускаем, слив глубже 12% — нет."""
     if not isinstance(row, dict):
         return False
     ticker = str(row.get("ticker") or "").upper()
@@ -1001,7 +1003,7 @@ def probe_pin_row_ok(row: dict[str, Any] | None) -> bool:
 
 
 def probe_pin_move(bars: list[dict[str, Any]] | None) -> float | None:
-    """Ход за 15м в процентах. None — тихо или объём не выше обычного.
+    """Ход за ~10м в процентах. None — тихо или объём не выше обычного.
 
     bars — 5м от старых к новым, последняя может быть живой.
     """
@@ -1036,7 +1038,7 @@ def probe_pin_hard_drop_reason(
     rank: int | None,
     lost: set[str] | None = None,
 ) -> str | None:
-    """Снять пин сразу: срез, нет воздуха, выпал из топа, тонкий стакан, перегрев."""
+    """Снять пин сразу: срез, ушёл далеко сквозь хай, тонкий стакан, перегрев."""
     name = str(ticker or "").upper()
     if not name:
         return "пусто"
@@ -1072,9 +1074,9 @@ def probe_choose_pin(
     skip: set[str] | None = None,
     moves: dict[str, float] | None = None,
 ) -> dict[str, Any] | None:
-    """Пин — кто идёт последние 15 минут. Ход сдулся — слот снова бродячий.
+    """Пин — кто идёт последние ~10 минут. Ход сдулся — имя снова бродячее.
 
-    moves: тикер → ход за 15м в %. Сильнее текущего на PROBE_PIN_SWITCH_PCT — переключаемся сразу.
+    moves: тикер → ход за окно пина в %. Сильнее текущего на PROBE_PIN_SWITCH_PCT — переключаемся сразу.
     """
     if not PROBE_PIN_ON:
         return None

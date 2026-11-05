@@ -1814,7 +1814,7 @@ class CryptoDeskMixin:
         return name
 
     def _probe_pin_moves(self, tape: list[dict[str, Any]]) -> dict[str, float]:
-        """Ход за 15м у ликвидных имён. Кэш минуту, чтобы не долбить 5м."""
+        """Ход за ~10м у ликвидных имён. Кэш минуту, чтобы не долбить 5м."""
         now = time.time()
         cached = getattr(self, "_probe_pin_move_cache", None)
         cached_at = float(getattr(self, "_probe_pin_move_ts", 0.0) or 0.0)
@@ -1841,7 +1841,7 @@ class CryptoDeskMixin:
             try:
                 bars = self._probe_bars(ticker, "5", 20, cache_sec=55.0)
             except Exception as exc:
-                logger.info("[Крипта] щуп пин %s 15м: %s", ticker, exc)
+                logger.info("[Крипта] щуп пин %s ход: %s", ticker, exc)
                 continue
             move = probe_pin_move(bars)
             if move is not None:
@@ -2036,7 +2036,7 @@ class CryptoDeskMixin:
         self._note_probe_beat(cap=cap, pin=pin)
 
     def _note_probe_beat(self, *, cap: int, pin: str) -> None:
-        """Раз в минуту: слоты, пин и кто идёт за 15м. Иначе консоль молчит."""
+        """Раз в минуту: слоты, пин и кто идёт за ~10м. Иначе консоль молчит."""
         now = time.time()
         last = float(getattr(self, "_probe_beat_ts", 0.0) or 0.0)
         if now - last < 60.0:
