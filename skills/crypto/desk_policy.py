@@ -94,6 +94,8 @@ PROBE_FAST_TRAP_RUN_PULLBACK_PCT = 1.0
 PROBE_FAST_LOSS_CAP_PCT = 1.4
 PROBE_FAST_BE_PEAK_PCT = 1.2
 PROBE_FAST_BE_BUFFER_PCT = 0.2
+# Выход «полка» (пробой open / −1.4% / BE после пика). Пока выкл. — только стоп/вершина/срез.
+PROBE_SHELF_EXIT_ON = False
 # После «полки» не входить в ту же монету сразу (серия лосей на сползающем тренде).
 PROBE_SHELF_REENTRY_SEC = 90 * 60
 EXIT_TRAP_DEFAULT_COST_USD = 100.0
@@ -129,7 +131,7 @@ PROBE_SHELF_COOLDOWN_SEC = 25 * 60
 PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
 # Жёсткий режим (оборот $1.5M, OBI 0.70) только на свои локальные убытки.
 # Дневной −$6 — полный стоп входов. Падающий рынок выключен (PROBE_MARKET_FALL_ON).
-PROBE_STRICT_MODE = True
+PROBE_STRICT_MODE = False
 PROBE_RISING_BTC_MIN_PCT = 0.0
 PROBE_RISING_BREADTH_PCT = 50.0
 # Ниже 0.5% сутки 29.10 резали INIT-контекст и оставляли PARTI 18:25 (−$3.28).
@@ -2420,9 +2422,9 @@ def probe_exit_reason(
     fast = name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
     if gain <= -cfg().probe_max_loss_pct:
         return "стоп"
-    if fast and gain <= -PROBE_FAST_LOSS_CAP_PCT + 1e-9:
+    if PROBE_SHELF_EXIT_ON and fast and gain <= -PROBE_FAST_LOSS_CAP_PCT + 1e-9:
         return "полка"
-    if level > 0 and px <= level:
+    if PROBE_SHELF_EXIT_ON and level > 0 and px <= level:
         # Candle: INIT держался над open. Фитиль к open не продаём — только пробой.
         if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
             floor = level * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0)
@@ -2447,7 +2449,8 @@ def probe_exit_reason(
     ):
         return "вершина"
     if (
-        fast
+        PROBE_SHELF_EXIT_ON
+        and fast
         and peak_gain >= PROBE_FAST_BE_PEAK_PCT - 1e-9
         and px <= ent * (1.0 - PROBE_FAST_BE_BUFFER_PCT / 100.0) + 1e-12
     ):

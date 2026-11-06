@@ -1058,6 +1058,8 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNotNone(picked_at_high)
         assert picked_at_high is not None
         self.assertEqual(picked_at_high["algo"], policy.PROBE_ALGO_POP)
+        self.assertFalse(policy.PROBE_SHELF_EXIT_ON)
+        self.assertFalse(policy.PROBE_STRICT_MODE)
         self.assertIsNone(
             policy.probe_exit_reason(
                 price=1.02,
@@ -1071,20 +1073,21 @@ class TestDeskPolicy(unittest.TestCase):
                 now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
             )
         )
-        self.assertEqual(
-            policy.probe_exit_reason(
-                price=0.995,
-                entry=1.0277,
-                shelf=1.0,
-                trend15="bull",
-                peak=1.0277,
-                algo=policy.PROBE_ALGO_POP,
-                qty=40.0 / 1.0277,
-                opened_ts=1000.0,
-                now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
-            ),
-            "полка",
-        )
+        with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
+            self.assertEqual(
+                policy.probe_exit_reason(
+                    price=0.995,
+                    entry=1.0277,
+                    shelf=1.0,
+                    trend15="bull",
+                    peak=1.0277,
+                    algo=policy.PROBE_ALGO_POP,
+                    qty=40.0 / 1.0277,
+                    opened_ts=1000.0,
+                    now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
+                ),
+                "полка",
+            )
         self.assertTrue(
             policy.probe_setup_ok_now(
                 {"pop": 1.0}, now=1_700_000_000.0, turnover=1_600_000, strict=True
@@ -1445,17 +1448,18 @@ class TestDeskPolicy(unittest.TestCase):
                 algo=policy.PROBE_ALGO_CANDLE,
             )
         )
-        self.assertEqual(
-            policy.probe_exit_reason(
-                price=0.2195,
-                entry=0.22309,
-                shelf=0.2205,
-                trend15="bull",
-                peak=0.2234,
-                algo=policy.PROBE_ALGO_CANDLE,
-            ),
-            "полка",
-        )
+        with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
+            self.assertEqual(
+                policy.probe_exit_reason(
+                    price=0.2195,
+                    entry=0.22309,
+                    shelf=0.2205,
+                    trend15="bull",
+                    peak=0.2234,
+                    algo=policy.PROBE_ALGO_CANDLE,
+                ),
+                "полка",
+            )
         self.assertIsNone(
             policy.probe_exit_reason(
                 price=1.02,
@@ -1475,10 +1479,11 @@ class TestDeskPolicy(unittest.TestCase):
             policy.probe_exit_reason(price=1.02, entry=1.05, shelf=1.0, trend15="neutral"),
             "ожидание",
         )
-        self.assertEqual(
-            policy.probe_exit_reason(price=1.0, entry=1.05, shelf=1.0, trend15="bull"),
-            "полка",
-        )
+        with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
+            self.assertEqual(
+                policy.probe_exit_reason(price=1.0, entry=1.05, shelf=1.0, trend15="bull"),
+                "полка",
+            )
         self.assertEqual(
             policy.probe_exit_reason(
                 price=1.04, entry=1.05, shelf=1.0, trend15="bull", entry_low=1.04
@@ -1582,20 +1587,21 @@ class TestDeskPolicy(unittest.TestCase):
                 now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
             )
         )
-        self.assertEqual(
-            policy.probe_exit_reason(
-                price=0.99,
-                entry=1.05,
-                shelf=1.0,
-                trend15="bull",
-                peak=1.05,
-                algo=policy.PROBE_ALGO_IMPULSE,
-                qty=40.0 / 1.05,
-                opened_ts=1000.0,
-                now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
-            ),
-            "полка",
-        )
+        with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
+            self.assertEqual(
+                policy.probe_exit_reason(
+                    price=0.99,
+                    entry=1.05,
+                    shelf=1.0,
+                    trend15="bull",
+                    peak=1.05,
+                    algo=policy.PROBE_ALGO_IMPULSE,
+                    qty=40.0 / 1.05,
+                    opened_ts=1000.0,
+                    now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
+                ),
+                "полка",
+            )
         self.assertFalse(policy.probe_should_handoff("срез"))
         self.assertIsNone(
             policy.probe_exit_reason(
@@ -1610,16 +1616,17 @@ class TestDeskPolicy(unittest.TestCase):
                 now=1000.0 + 30.0,
             )
         )
-        self.assertEqual(
-            policy.probe_exit_reason(
-                price=1.0,
-                entry=1.05,
-                shelf=1.0,
-                trend15="bull",
-                algo=policy.PROBE_ALGO_SPRINT,
-            ),
-            "полка",
-        )
+        with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
+            self.assertEqual(
+                policy.probe_exit_reason(
+                    price=1.0,
+                    entry=1.05,
+                    shelf=1.0,
+                    trend15="bull",
+                    algo=policy.PROBE_ALGO_SPRINT,
+                ),
+                "полка",
+            )
         self.assertEqual(policy.probe_quote(), 40.0)
         self.assertTrue(policy.probe_should_handoff("ожидание"))
         self.assertTrue(policy.probe_should_handoff("тренд"))
@@ -1694,18 +1701,19 @@ class TestDeskPolicy(unittest.TestCase):
             1.26,
             places=2,
         )
-        self.assertEqual(
-            policy.probe_exit_reason(
-                price=0.985,
-                entry=1.0,
-                shelf=0.94,
-                trend15="bull",
-                peak=1.0,
-                algo=policy.PROBE_ALGO_SPARK,
-                qty=30.0,
-            ),
-            "полка",
-        )
+        with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
+            self.assertEqual(
+                policy.probe_exit_reason(
+                    price=0.985,
+                    entry=1.0,
+                    shelf=0.94,
+                    trend15="bull",
+                    peak=1.0,
+                    algo=policy.PROBE_ALGO_SPARK,
+                    qty=30.0,
+                ),
+                "полка",
+            )
         self.assertIsNone(
             policy.probe_exit_reason(
                 price=0.990,
@@ -1717,18 +1725,19 @@ class TestDeskPolicy(unittest.TestCase):
                 qty=30.0,
             )
         )
-        self.assertEqual(
-            policy.probe_exit_reason(
-                price=0.997,
-                entry=1.0,
-                shelf=0.97,
-                trend15="bull",
-                peak=1.013,
-                algo=policy.PROBE_ALGO_POP,
-                qty=30.0,
-            ),
-            "полка",
-        )
+        with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
+            self.assertEqual(
+                policy.probe_exit_reason(
+                    price=0.997,
+                    entry=1.0,
+                    shelf=0.97,
+                    trend15="bull",
+                    peak=1.013,
+                    algo=policy.PROBE_ALGO_POP,
+                    qty=30.0,
+                ),
+                "полка",
+            )
         self.assertIsNone(
             policy.probe_exit_reason(
                 price=0.999,
@@ -2419,10 +2428,14 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertIsNone(
             crypto_journal.probe_loss_guard_reason(now=day, trades=scratch, enabled=True)
         )
-        self.assertTrue(policy.PROBE_STRICT_MODE)
-        self.assertIsNotNone(
+        self.assertFalse(policy.PROBE_STRICT_MODE)
+        self.assertIsNone(
             crypto_journal.probe_loss_guard_reason(now=day, trades=shelf_trades)
         )
+        with patch.object(policy, "PROBE_STRICT_MODE", True):
+            self.assertIsNotNone(
+                crypto_journal.probe_loss_guard_reason(now=day, trades=shelf_trades)
+            )
 
     def test_probe_daily_loss_reset_ignores_old_sells(self):
         now = datetime(2026, 11, 2, 18, 0, tzinfo=_MSK).timestamp()
