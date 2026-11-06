@@ -216,6 +216,11 @@ class TestCryptoLifetime(unittest.TestCase):
         self.assertEqual(notes, [])
         self.assertEqual(len(updated), 1)
 
+    def test_journal_price_keeps_pepe_digits(self):
+        self.assertEqual(crypto_journal._journal_price(5.166e-06), 5.166e-06)
+        self.assertNotEqual(round(5.166e-06, 6), 5.166e-06)
+        self.assertAlmostEqual(crypto_journal._journal_price(0.03121), 0.03121, places=8)
+
     def test_spot_fill_history_chunks_by_7_days(self):
         """Bybit не принимает окно >7 дней — режем на чанки."""
         span_ms = 7 * 24 * 60 * 60 * 1000

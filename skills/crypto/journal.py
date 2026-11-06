@@ -105,6 +105,14 @@ def _entry_fee_usd(entry: dict[str, Any]) -> float:
         return 0.0
 
 
+def _journal_price(price: float) -> float:
+    """Цена в дневник: round(..., 6) убивает PEPE (~5e-6). Держим значащие цифры."""
+    px = float(price or 0)
+    if px <= 0:
+        return 0.0
+    return float(f"{px:.10g}")
+
+
 def execution_fee_usdt(row: dict[str, Any]) -> float:
     """Комиссия fill Bybit в USDT: sell обычно USDT, buy — в монете."""
     try:
@@ -510,7 +518,7 @@ class CryptoJournalMixin:
         now = datetime.now(_MSK)
         side_norm = "buy" if side == "Buy" else "sell"
         quote_usd = round(float(quote or 0), 2)
-        px = round(float(price or 0), 6)
+        px = _journal_price(price)
         fee = round(max(0.0, float(fee_usd or 0)), 6)
         pending = str(getattr(self, "_pending_exit_reason", "") or "")
         self._pending_exit_reason = ""
