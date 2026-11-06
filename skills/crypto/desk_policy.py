@@ -274,7 +274,7 @@ PROBE_STAIR2_MIN_1H_POS = 0.88
 PROBE_MAX_SPREAD_PCT = 0.35
 PROBE_MAX_ASK_SLIP_PCT = 0.45
 # OBI на каждом входе. Нет котировки стакана — не блокируем.
-PROBE_MIN_ENTRY_OBI = 0.55
+PROBE_MIN_ENTRY_OBI = 0.51
 # Жёсткий режим (бывшие паузы: полка, час, серия, день): щуп не молчит, фильтры туже.
 PROBE_STRICT_MIN_ENTRY_OBI = 0.70
 PROBE_STRICT_MAX_SPREAD_PCT = 0.20
@@ -1698,7 +1698,7 @@ def probe_book_buy_ok(
 
 
 def probe_entry_obi_floor(*, strict: bool = False) -> float:
-    """Порог OBI: обычный вход 0.55, жёсткий режим 0.70."""
+    """Порог OBI: обычный вход 0.51, жёсткий режим 0.70."""
     if strict:
         return float(PROBE_STRICT_MIN_ENTRY_OBI)
     return float(PROBE_MIN_ENTRY_OBI)

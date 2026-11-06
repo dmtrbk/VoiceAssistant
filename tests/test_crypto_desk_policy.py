@@ -1150,10 +1150,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_book_buy_ok(bid=0.00739, ask=0.007409, arm_px=0.007281)
         )
-        self.assertEqual(policy.PROBE_MIN_ENTRY_OBI, 0.55)
+        self.assertEqual(policy.PROBE_MIN_ENTRY_OBI, 0.51)
         self.assertTrue(policy.probe_entry_obi_ok(None))
-        self.assertFalse(policy.probe_entry_obi_ok(0.40))
-        self.assertFalse(policy.probe_entry_obi_ok(0.549))
+        self.assertFalse(policy.probe_entry_obi_ok(0.50))
+        self.assertTrue(policy.probe_entry_obi_ok(0.51))
         self.assertTrue(policy.probe_entry_obi_ok(0.55))
         self.assertTrue(policy.probe_entry_obi_ok(0.80))
         self.assertTrue(policy.probe_entry_obi_ok(0.70, strict=True))
