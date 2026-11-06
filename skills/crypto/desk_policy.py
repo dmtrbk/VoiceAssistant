@@ -34,6 +34,8 @@ PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "д�
 PROBE_CANDLE_STALE_SEC = 2 * 3600
 # Срез только если сломана полка. Минус к входу за 90 с при живой полке — не режем (ICNT).
 PROBE_FAIL_SCRATCH_SEC = 90.0
+# Нет взвода ловушки и цена ≤ входа ≥ 20м — продаём «срез» (ARX/HAEDAL висели часами).
+PROBE_NO_TRAP_TIMEOUT_SEC = 20 * 60
 # Парковка в карман2 ради свободного слота: свежую ногу не трогаем.
 PROBE_ROOM_MIN_AGE_SEC = 15 * 60
 POCKET_SCRATCH_PCT = -0.20
@@ -2411,6 +2413,7 @@ def probe_exit_reason(
     impulse/sprint/grind эти срезы не берёт. Большой ход (+PROBE_RUN) ещё и медвежьим 15м.
     Если нога в минусе висит ≥ PROBE_CANDLE_STALE_SEC — «застой» (handoff в карман2).
     Срез impulse/spark — только потеря полки, не минус к входу за 90 с.
+    Нет трапа и цена ≤ входа ≥ PROBE_NO_TRAP_TIMEOUT_SEC — тоже «срез».
     """
     px = float(price or 0)
     ent = float(entry or 0)
@@ -2469,6 +2472,15 @@ def probe_exit_reason(
             shelf_lost = level > 0 and px <= level + 1e-12
         if shelf_lost:
             return "срез"
+    # Трап не взвёлся, сидим в нуле/минусе — не ждём 2ч «застой».
+    if (
+        float(opened_ts or 0) > 0
+        and now is not None
+        and float(now) - float(opened_ts) >= PROBE_NO_TRAP_TIMEOUT_SEC
+        and peak_gain < arm_pct - 1e-6
+        and gain <= 1e-12
+    ):
+        return "срез"
     if (
         float(opened_ts or 0) > 0
         and now is not None

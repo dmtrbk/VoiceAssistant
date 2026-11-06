@@ -640,11 +640,13 @@ class CryptoDeskMixin:
             use_maker = (not unwind) and not (
                 obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12
             )
+            self._pending_exit_reason = str(reason or "")
             try:
                 phrase = self._place_order(
                     ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker
                 )
             except Exception as exc:
+                self._pending_exit_reason = ""
                 logger.info("[Крипта] карман2 %s продажа не прошла: %s", ticker, exc)
                 continue
             fill = getattr(self, "_last_fill", None)
@@ -753,9 +755,11 @@ class CryptoDeskMixin:
                 self._drop_anchor(ticker)
                 return None
             seen = getattr(self, "_last_fill", None)
+            self._pending_exit_reason = str(reason or "")
             try:
                 phrase = self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
             except Exception as exc:
+                self._pending_exit_reason = ""
                 logger.info("[Крипта] карман %s продажа не прошла: %s", ticker, exc)
                 return None
             fill = getattr(self, "_last_fill", None)
@@ -1187,10 +1191,11 @@ class CryptoDeskMixin:
             return
         seen = getattr(self, "_last_fill", None)
         use_maker = not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
-        self._pending_exit_reason = reason if reason == "полка" else ""
+        self._pending_exit_reason = str(reason or "")
         try:
             self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker)
         except Exception as exc:
+            self._pending_exit_reason = ""
             logger.info("[Крипта] щуп %s продажа не прошла: %s", ticker, exc)
             return
         fill = getattr(self, "_last_fill", None)

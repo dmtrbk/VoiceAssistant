@@ -555,27 +555,35 @@ class CryptoJournalMixin:
         start_ms: int,
         symbol: str | None = None,
     ) -> list[dict[str, Any]]:
+        # Bybit: endTime − startTime ≤ 7 дней — иначе retMsg про exceed 7 days.
+        span_ms = 7 * 24 * 60 * 60 * 1000
         rows: list[dict[str, Any]] = []
-        cursor = ""
         end_ms = int(time.time() * 1000)
-        for _ in range(80):
-            params: dict[str, Any] = {
-                "category": "spot",
-                "limit": "100",
-                "startTime": str(int(start_ms)),
-                "endTime": str(end_ms),
-            }
-            if symbol:
-                params["symbol"] = symbol
-            if cursor:
-                params["cursor"] = cursor
-            data = self._signed("GET", "/v5/execution/list", params)
-            result = data.get("result") or {}
-            chunk = result.get("list") or []
-            rows.extend(row for row in chunk if isinstance(row, dict))
-            cursor = str(result.get("nextPageCursor") or "")
-            if not chunk or not cursor:
+        window_start = max(0, int(start_ms))
+        while window_start <= end_ms:
+            window_end = min(window_start + span_ms, end_ms)
+            cursor = ""
+            for _ in range(80):
+                params: dict[str, Any] = {
+                    "category": "spot",
+                    "limit": "100",
+                    "startTime": str(window_start),
+                    "endTime": str(window_end),
+                }
+                if symbol:
+                    params["symbol"] = symbol
+                if cursor:
+                    params["cursor"] = cursor
+                data = self._signed("GET", "/v5/execution/list", params)
+                result = data.get("result") or {}
+                chunk = result.get("list") or []
+                rows.extend(row for row in chunk if isinstance(row, dict))
+                cursor = str(result.get("nextPageCursor") or "")
+                if not chunk or not cursor:
+                    break
+            if window_end >= end_ms:
                 break
+            window_start = window_end + 1
         return rows
 
     def _journal_sync_exchange(

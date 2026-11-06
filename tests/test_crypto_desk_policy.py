@@ -1809,7 +1809,7 @@ class TestDeskPolicy(unittest.TestCase):
                 qty=40.0,
             )
         )
-        # Спящая нога щупа ≥ 2ч в минусе → «застой» (handoff в карман2).
+        # Нет трапа и цена ≤ входа ≥ 20м → «срез» (не ждём 2ч).
         self.assertEqual(
             policy.probe_exit_reason(
                 price=0.3143,
@@ -1817,6 +1817,35 @@ class TestDeskPolicy(unittest.TestCase):
                 shelf=0.314,
                 trend15="neutral",
                 peak=0.3199,
+                algo=policy.PROBE_ALGO_CANDLE,
+                qty=94.5,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_NO_TRAP_TIMEOUT_SEC + 1.0,
+            ),
+            "срез",
+        )
+        # До таймаута при живой полке candle не режем.
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.3143,
+                entry=0.3174,
+                shelf=0.314,
+                trend15="neutral",
+                peak=0.3199,
+                algo=policy.PROBE_ALGO_CANDLE,
+                qty=94.5,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_NO_TRAP_TIMEOUT_SEC - 1.0,
+            )
+        )
+        # Трап уже взвёлся, но откат не до вершины и минус ≥ 2ч → «застой».
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.3143,
+                entry=0.3174,
+                shelf=0.314,
+                trend15="neutral",
+                peak=0.3230,
                 algo=policy.PROBE_ALGO_CANDLE,
                 qty=94.5,
                 opened_ts=1000.0,

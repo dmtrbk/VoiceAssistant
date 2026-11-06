@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from skills.crypto import journal as crypto_journal
 
@@ -214,6 +215,32 @@ class TestCryptoLifetime(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(notes, [])
         self.assertEqual(len(updated), 1)
+
+    def test_spot_fill_history_chunks_by_7_days(self):
+        """Bybit не принимает окно >7 дней — режем на чанки."""
+        span_ms = 7 * 24 * 60 * 60 * 1000
+        now_ms = 1_800_000_000_000
+        start_ms = now_ms - (span_ms * 2) - 60_000
+        calls: list[tuple[int, int]] = []
+
+        class _Fake(crypto_journal.CryptoJournalMixin):
+            def _signed(self, method, path, params=None):
+                start = int(params["startTime"])
+                end = int(params["endTime"])
+                calls.append((start, end))
+                return {"result": {"list": [], "nextPageCursor": ""}}
+
+        with mock.patch("skills.crypto.journal.time.time", return_value=now_ms / 1000.0):
+            rows = _Fake()._spot_fill_history(start_ms)
+
+        self.assertEqual(rows, [])
+        self.assertGreaterEqual(len(calls), 3)
+        self.assertEqual(calls[0][0], start_ms)
+        self.assertEqual(calls[-1][1], now_ms)
+        for start, end in calls:
+            self.assertLessEqual(end - start, span_ms)
+        for i in range(1, len(calls)):
+            self.assertEqual(calls[i][0], calls[i - 1][1] + 1)
 
 
 if __name__ == "__main__":
