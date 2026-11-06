@@ -22,8 +22,8 @@ DESK_ALT_SLEEVE = frozenset({
 })
 ALT_SLEEVE_MAX_PCT = 50.0
 ALT_MAX_NAMES = 2
-PROBE_MAX_LEGS = 2
-# BTC за сутки в минусе — не четыре коррелированные полки, а 1–2 слота.
+PROBE_MAX_LEGS = 3
+# BTC за сутки в минусе — не раздувать слоты (сейчас probe_max_legs сутки BTC не режет).
 PROBE_MAX_LEGS_BTC_DOWN = 2
 # Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
 POCKET_FROM_PROBE_MAX = 6
@@ -771,7 +771,7 @@ def tape_btc_day_chg(rows: list[dict[str, Any]] | None) -> float | None:
 
 
 def probe_max_legs(*, btc_day_chg: float | None = None, now: float | None = None) -> int:
-    """Днём и ночью 2 ноги. Сутки BTC на число слотов не влияют."""
+    """До PROBE_MAX_LEGS ног; ночью с пином — PROBE_NIGHT_PIN_MAX_LEGS. Сутки BTC не режут."""
     del btc_day_chg
     if PROBE_PIN_ON and probe_night_halted(now):
         return int(PROBE_NIGHT_PIN_MAX_LEGS)

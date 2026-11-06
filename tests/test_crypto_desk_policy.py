@@ -657,10 +657,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.probe_night_halt_reason(night_ts))
         self.assertIsNone(policy.probe_night_halt_reason(day_ts))
         self.assertEqual(policy.PROBE_MAX_LEGS_BTC_DOWN, 2)
-        self.assertEqual(policy.probe_max_legs(now=day_ts), 2)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 2)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 2)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 2)
+        self.assertEqual(policy.probe_max_legs(now=day_ts), 3)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 3)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 3)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 3)
         self.assertEqual(policy.probe_max_legs(now=night_ts), 2)
         self.assertEqual(policy.tape_btc_day_chg([{"ticker": "ETH", "chg": 1.0}]), None)
         self.assertEqual(
@@ -1636,7 +1636,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.probe_should_handoff("стоп"))
         self.assertFalse(policy.probe_should_handoff("вершина"))
         self.assertEqual(policy.pocket_from_probe_max(), 3)
-        self.assertEqual(policy.PROBE_MAX_LEGS, 2)
+        self.assertEqual(policy.PROBE_MAX_LEGS, 3)
         best_leg = policy.pick_second_pocket_leg_for_funding(
             [
                 {"ticker": "AGLD", "qty": 160.0, "entry": 0.1872},
