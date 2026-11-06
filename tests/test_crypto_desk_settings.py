@@ -108,7 +108,7 @@ class TestDeskSettings(unittest.TestCase):
         self.assertTrue(policy.probe_is_paper())
         self.assertFalse(policy.probe_places_buys())
         self.assertEqual(policy.probe_reserve_quote(open_legs=0), 0.0)
-        # Имитация снимает боевой потолок скана; бой возвращает Топ-6.
+        # Имитация снимает боевой потолок скана; бой возвращает Топ-10.
         self.assertEqual(
             policy.probe_scan_limits(),
             (
@@ -123,7 +123,7 @@ class TestDeskSettings(unittest.TestCase):
         settings_store.update(probe_paper=False)
         self.assertTrue(policy.probe_places_buys())
         self.assertGreater(policy.probe_reserve_quote(open_legs=0), 0.0)
-        self.assertEqual(policy.probe_scan_limits(), (6, 6, 6))
+        self.assertEqual(policy.probe_scan_limits(), (10, 10, 10))
         self.assertIn("Щуп боевой", settings_status.status_line())
 
     def test_probe_paper_journal(self):

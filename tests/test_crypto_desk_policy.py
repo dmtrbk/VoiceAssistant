@@ -801,12 +801,12 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             policy.PROBE_DAY_MIN_PCT,
         )
-        self.assertEqual(policy.PROBE_SCAN_LIMIT_LIVE, 6)
-        self.assertEqual(policy.PROBE_SCAN_CLASSIC_LIMIT_LIVE, 6)
-        self.assertEqual(policy.PROBE_SCAN_LIMIT, 6)
+        self.assertEqual(policy.PROBE_SCAN_LIMIT_LIVE, 10)
+        self.assertEqual(policy.PROBE_SCAN_CLASSIC_LIMIT_LIVE, 10)
+        self.assertEqual(policy.PROBE_SCAN_LIMIT, 10)
         self.assertEqual(
             policy.probe_scan_limits(paper=False),
-            (6, 6, 6),
+            (10, 10, 10),
         )
         self.assertEqual(
             policy.probe_scan_limits(paper=True),
@@ -842,8 +842,8 @@ class TestDeskPolicy(unittest.TestCase):
             [str(r[1]["ticker"]) for r in ranked[:5]],
             ["D", "F", "B", "C", "A"],
         )
-        self.assertEqual(policy.PROBE_SCAN_MANDATORY_TOP_LIVE, 6)
-        # Боевой скан — только топ-6; ликвидный середняк в хвост не лезет.
+        self.assertEqual(policy.PROBE_SCAN_MANDATORY_TOP_LIVE, 10)
+        # Боевой скан — только топ-10; ликвидный середняк в хвост не лезет.
         crowd = [
             {"ticker": f"G{i}", "chg": 40.0 - i * 0.4, "price": 1.0, "turnover": 200_000}
             for i in range(50)
@@ -853,7 +853,7 @@ class TestDeskPolicy(unittest.TestCase):
         crowd_ranked = policy.probe_scan_ranked_rows(crowd, paper=False)
         self.assertEqual(
             [str(r[1]["ticker"]) for r in crowd_ranked],
-            ["G0", "G1", "G2", "G3", "G4", "G5"],
+            [f"G{i}" for i in range(10)],
         )
         # Имитация: широкий скан; после mandatory-top высоколиквидный разгон раньше хвоста.
         paper_ranked = policy.probe_scan_ranked_rows(crowd, paper=True)

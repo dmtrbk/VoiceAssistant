@@ -151,10 +151,10 @@ PROBE_SHELF_DRIFT_PCT = 1.5
 PROBE_SHELF_DRIFT_BARS = 8
 PROBE_RUN_PCT = 6.0
 PROBE_MAX_LOSS_PCT = 8.0
-# Бой: узкий топ лидеров суток (Топ-6). Имитация — широкий скан без потолка.
-PROBE_SCAN_LIMIT_LIVE = 6
-PROBE_SCAN_CLASSIC_LIMIT_LIVE = 6
-PROBE_SCAN_MANDATORY_TOP_LIVE = 6
+# Бой: узкий топ лидеров суток (Топ-10). Имитация — широкий скан без потолка.
+PROBE_SCAN_LIMIT_LIVE = 10
+PROBE_SCAN_CLASSIC_LIMIT_LIVE = 10
+PROBE_SCAN_MANDATORY_TOP_LIVE = 10
 PROBE_SCAN_LIMIT_PAPER = 128
 PROBE_SCAN_CLASSIC_LIMIT_PAPER = 50
 PROBE_SCAN_MANDATORY_TOP_PAPER = 50
@@ -977,7 +977,7 @@ def probe_scan_rank(
 def probe_scan_limits(*, paper: bool | None = None) -> tuple[int, int, int]:
     """Лимиты скана: (scan, classic, mandatory_top).
 
-    Имитация (`probe_paper`) — широкий скан. Бой — узкий Топ-6.
+    Имитация (`probe_paper`) — широкий скан. Бой — узкий Топ-10.
     """
     use_paper = bool(cfg().probe_paper) if paper is None else bool(paper)
     if use_paper:

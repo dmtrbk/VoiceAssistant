@@ -2028,7 +2028,7 @@ class CryptoDeskMixin:
         )
         self._probe_scan_top = [
             (str(row.get("ticker") or ""), float(score))
-            for score, row in ranked[:6]
+            for score, row in ranked[:10]
             if str(row.get("ticker") or "")
         ]
         if (
@@ -2070,7 +2070,7 @@ class CryptoDeskMixin:
             }:
                 self._note_pin_idle(pin)
 
-        # 1) Скан candle: бой — Топ-6, имитация — широкий список.
+        # 1) Скан candle: бой — Топ-10, имитация — широкий список.
         for scan_idx, (_rank, row) in enumerate(ranked[:scan_lim]):
             if _arm_slots_left() <= 0:
                 break
@@ -2120,7 +2120,7 @@ class CryptoDeskMixin:
         self._note_probe_beat(cap=cap, pin=pin)
 
     def _note_probe_beat(self, *, cap: int, pin: str) -> None:
-        """Раз в минуту: топ-6 суток, слоты, пин и кто идёт за ~10м."""
+        """Раз в минуту: топ-10 суток, слоты, пин и кто идёт за ~10м."""
         now = time.time()
         last = float(getattr(self, "_probe_beat_ts", 0.0) or 0.0)
         if now - last < 60.0:
