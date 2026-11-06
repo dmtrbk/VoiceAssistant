@@ -96,7 +96,7 @@ PROBE_FAST_TRAP_RUN_PULLBACK_PCT = 1.0
 PROBE_FAST_LOSS_CAP_PCT = 1.4
 PROBE_FAST_BE_PEAK_PCT = 1.2
 PROBE_FAST_BE_BUFFER_PCT = 0.2
-# Выход «полка» (пробой open / −1.4% / BE после пика). Пока выкл. — только стоп/вершина/срез.
+# Пробой open/полки. −1.4% и BE после пика работают всегда (не зависят от флага).
 PROBE_SHELF_EXIT_ON = False
 # После «полки» не входить в ту же монету сразу (серия лосей на сползающем тренде).
 PROBE_SHELF_REENTRY_SEC = 90 * 60
@@ -2403,17 +2403,16 @@ def probe_exit_reason(
     bid: float = 0.0,
     obi: float | None = None,
 ) -> str | None:
-    """Стоп и полка. Плюс — ловушка: пик покрыл круг комиссии и запас, продажа на откате.
+    """Стоп и защита быстрого щупа. Плюс — ловушка вершины.
 
     Подскок (candle/spark/pop): запас $0.36 и откат 0.45% (1.0% после пика +4%).
-    Убыток глубже −1.4% закрываем сразу. После пика +1.2% возврат к entry−0.2% тоже закрываем.
+    Убыток глубже −1.4% и BE после пика +1.2% — всегда (не зависят от PROBE_SHELF_EXIT_ON).
+    Пробой open/полки — только если PROBE_SHELF_EXIT_ON.
     Impulse: запас $0.48 и откат 1.50%. Медвежий стакан сжимает откат до 0.20%.
 
-    Пока ловушка не взведена: shelf режется «ожиданием»/«дном»; подножка
-    impulse/sprint/grind эти срезы не берёт. Большой ход (+PROBE_RUN) ещё и медвежьим 15м.
-    Если нога в минусе висит ≥ PROBE_CANDLE_STALE_SEC — «застой» (handoff в карман2).
-    Срез impulse/spark — только потеря полки, не минус к входу за 90 с.
-    Нет трапа и цена ≤ входа ≥ PROBE_NO_TRAP_TIMEOUT_SEC — тоже «срез».
+    Пока ловушка не взведена: soft-выходы; подножка impulse/sprint/grind их не берёт.
+    Нет трапа и цена ≤ входа ≥ PROBE_NO_TRAP_TIMEOUT_SEC — «срез».
+    Минус ≥ PROBE_CANDLE_STALE_SEC при уже взведённом пике — «застой» (карман2).
     """
     px = float(price or 0)
     ent = float(entry or 0)
@@ -2425,7 +2424,8 @@ def probe_exit_reason(
     fast = name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
     if gain <= -cfg().probe_max_loss_pct:
         return "стоп"
-    if PROBE_SHELF_EXIT_ON and fast and gain <= -PROBE_FAST_LOSS_CAP_PCT + 1e-9:
+    # Быстрый щуп: −1.4% режем всегда — иначе без полки нога уезжает в −3…−7%.
+    if fast and gain <= -PROBE_FAST_LOSS_CAP_PCT + 1e-9:
         return "полка"
     if PROBE_SHELF_EXIT_ON and level > 0 and px <= level:
         # Candle: INIT держался над open. Фитиль к open не продаём — только пробой.
@@ -2451,9 +2451,9 @@ def probe_exit_reason(
         and exit_gain >= 2.0 * EXIT_FEE_SIDE * 100.0 - 1e-6
     ):
         return "вершина"
+    # После пика +1.2% возврат к entry−0.2% — тоже всегда (не пробой open).
     if (
-        PROBE_SHELF_EXIT_ON
-        and fast
+        fast
         and peak_gain >= PROBE_FAST_BE_PEAK_PCT - 1e-9
         and px <= ent * (1.0 - PROBE_FAST_BE_BUFFER_PCT / 100.0) + 1e-12
     ):

@@ -1073,21 +1073,21 @@ class TestDeskPolicy(unittest.TestCase):
                 now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
             )
         )
-        with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
-            self.assertEqual(
-                policy.probe_exit_reason(
-                    price=0.995,
-                    entry=1.0277,
-                    shelf=1.0,
-                    trend15="bull",
-                    peak=1.0277,
-                    algo=policy.PROBE_ALGO_POP,
-                    qty=40.0 / 1.0277,
-                    opened_ts=1000.0,
-                    now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
-                ),
-                "полка",
-            )
+        # −1.4% на soft-полке (не пробой open) — работает при PROBE_SHELF_EXIT_ON=False.
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.995,
+                entry=1.0277,
+                shelf=1.0,
+                trend15="bull",
+                peak=1.0277,
+                algo=policy.PROBE_ALGO_POP,
+                qty=40.0 / 1.0277,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
+            ),
+            "полка",
+        )
         self.assertTrue(
             policy.probe_setup_ok_now(
                 {"pop": 1.0}, now=1_700_000_000.0, turnover=1_600_000, strict=True
@@ -1701,19 +1701,18 @@ class TestDeskPolicy(unittest.TestCase):
             1.26,
             places=2,
         )
-        with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
-            self.assertEqual(
-                policy.probe_exit_reason(
-                    price=0.985,
-                    entry=1.0,
-                    shelf=0.94,
-                    trend15="bull",
-                    peak=1.0,
-                    algo=policy.PROBE_ALGO_SPARK,
-                    qty=30.0,
-                ),
-                "полка",
-            )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.985,
+                entry=1.0,
+                shelf=0.94,
+                trend15="bull",
+                peak=1.0,
+                algo=policy.PROBE_ALGO_SPARK,
+                qty=30.0,
+            ),
+            "полка",
+        )
         self.assertIsNone(
             policy.probe_exit_reason(
                 price=0.990,
@@ -1725,19 +1724,18 @@ class TestDeskPolicy(unittest.TestCase):
                 qty=30.0,
             )
         )
-        with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
-            self.assertEqual(
-                policy.probe_exit_reason(
-                    price=0.997,
-                    entry=1.0,
-                    shelf=0.97,
-                    trend15="bull",
-                    peak=1.013,
-                    algo=policy.PROBE_ALGO_POP,
-                    qty=30.0,
-                ),
-                "полка",
-            )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.997,
+                entry=1.0,
+                shelf=0.97,
+                trend15="bull",
+                peak=1.013,
+                algo=policy.PROBE_ALGO_POP,
+                qty=30.0,
+            ),
+            "полка",
+        )
         self.assertIsNone(
             policy.probe_exit_reason(
                 price=0.999,
@@ -1838,10 +1836,10 @@ class TestDeskPolicy(unittest.TestCase):
                 now=1000.0 + policy.PROBE_NO_TRAP_TIMEOUT_SEC - 1.0,
             )
         )
-        # Трап уже взвёлся, но откат не до вершины и минус ≥ 2ч → «застой».
+        # Трап взвёлся, лёгкий минус (выше BE−0.2%), ≥2ч → «застой», не полка-BE.
         self.assertEqual(
             policy.probe_exit_reason(
-                price=0.3143,
+                price=0.3170,
                 entry=0.3174,
                 shelf=0.314,
                 trend15="neutral",

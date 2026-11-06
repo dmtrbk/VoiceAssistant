@@ -51,8 +51,15 @@ _RETRYABLE = (
 )
 
 
+def _is_rate_limit_msg(msg: str) -> bool:
+    low = str(msg or "").lower()
+    return "rate limit" in low or "too many visits" in low
+
+
 def _is_transient_http(exc: BaseException) -> bool:
     msg = str(exc)
+    if _is_rate_limit_msg(msg):
+        return True
     return any(mark in msg for mark in ("bybit 429", "bybit 502", "bybit 503", "bybit 504", "bybit bad json"))
 
 
@@ -210,15 +217,34 @@ class CryptoQuotesMixin:
         hit = self._cache.get(cache_key)
         if ttl > 0 and hit and time.time() - hit[0] < ttl:
             return hit[1]
-        data = _with_retry(
-            lambda: self._session.get(
-                f"{self._host()}{path}",
-                params=params,
-                timeout=6,
-            )
-        )
-        if _retcode(data) != 0:
-            raise RuntimeError(str(data.get("retMsg") or "bybit error"))
+        last: BaseException | None = None
+        data: dict[str, Any] | None = None
+        for index in range(3):
+            try:
+                raw = _with_retry(
+                    lambda: self._session.get(
+                        f"{self._host()}{path}",
+                        params=params,
+                        timeout=6,
+                    )
+                )
+                if _retcode(raw) != 0:
+                    msg = str(raw.get("retMsg") or "bybit error")
+                    if _is_rate_limit_msg(msg):
+                        raise RuntimeError(f"bybit 429: {msg}")
+                    raise RuntimeError(msg)
+                data = raw
+                break
+            except RuntimeError as exc:
+                last = exc
+                if not _is_rate_limit_msg(str(exc)):
+                    raise
+                if index + 1 < 3:
+                    time.sleep(0.5 * (2 ** index))
+                    continue
+                raise
+        if data is None:
+            raise RuntimeError(f"bybit transient: {last}") from last
         if ttl > 0:
             self._cache[cache_key] = (time.time(), data)
         return data

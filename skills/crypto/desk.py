@@ -1887,11 +1887,11 @@ class CryptoDeskMixin:
         return name
 
     def _probe_pin_moves(self, tape: list[dict[str, Any]]) -> dict[str, float]:
-        """Ход за ~10м у ликвидных имён. Кэш минуту, чтобы не долбить 5м."""
+        """Ход за ~10м у ликвидных имён. Кэш ~1.5м; не больше 8 kline за раз."""
         now = time.time()
         cached = getattr(self, "_probe_pin_move_cache", None)
         cached_at = float(getattr(self, "_probe_pin_move_ts", 0.0) or 0.0)
-        if isinstance(cached, dict) and now - cached_at < 60.0:
+        if isinstance(cached, dict) and now - cached_at < 90.0:
             return cached
         ranked: list[tuple[float, str]] = []
         for row in tape:
@@ -1905,15 +1905,23 @@ class CryptoDeskMixin:
             if ticker:
                 ranked.append((turn, ticker))
         ranked.sort(reverse=True)
-        names = [ticker for _turn, ticker in ranked[:16]]
+        names = [ticker for _turn, ticker in ranked[:8]]
         current = str(read_probe_pin().get("ticker") or "").upper()
         if current and current not in names:
             names.append(current)
         moves: dict[str, float] = {}
         for ticker in names:
             try:
-                bars = self._probe_bars(ticker, "5", 20, cache_sec=55.0)
+                bars = self._probe_bars(ticker, "5", 20, cache_sec=85.0)
             except Exception as exc:
+                msg = str(exc)
+                low = msg.lower()
+                if "rate limit" in low or "too many visits" in low or "bybit 429" in low:
+                    logger.info("[Крипта] щуп пин ход: лимит API — оставляю кэш")
+                    if isinstance(cached, dict) and cached:
+                        self._probe_pin_move_ts = now
+                        return cached
+                    break
                 logger.info("[Крипта] щуп пин %s ход: %s", ticker, exc)
                 continue
             move = probe_pin_move(bars)
