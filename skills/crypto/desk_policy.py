@@ -22,7 +22,7 @@ DESK_ALT_SLEEVE = frozenset({
 })
 ALT_SLEEVE_MAX_PCT = 50.0
 ALT_MAX_NAMES = 2
-PROBE_MAX_LEGS = 3
+PROBE_MAX_LEGS = 2
 # BTC за сутки в минусе — не раздувать слоты (сейчас probe_max_legs сутки BTC не режет).
 PROBE_MAX_LEGS_BTC_DOWN = 2
 # Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
@@ -88,16 +88,17 @@ EXIT_FEE_SIDE = 0.0018
 EXIT_TRAP_EXTRA_USD = 0.12
 PROBE_TRAP_EXTRA_USD = 0.48
 PROBE_TRAP_PULLBACK_PCT = 1.50
-PROBE_FAST_TRAP_EXTRA_USD = 0.36
+# Раньше $0.36 → взвод ~+1.56% на $40; $0.25 ловит быстрые +1.0…+1.2% до разворота.
+PROBE_FAST_TRAP_EXTRA_USD = 0.25
 PROBE_FAST_TRAP_PULLBACK_PCT = 0.45
 PROBE_FAST_TRAP_RUN_PCT = 4.0
 PROBE_FAST_TRAP_RUN_PULLBACK_PCT = 1.0
-# Быстрый щуп: не отдавать серию плюсов одним сливом до open свечи.
+# Жёсткий короткий стоп и BE: не зависят от PROBE_SHELF_EXIT_ON (пробой open выкл.).
 PROBE_FAST_LOSS_CAP_PCT = 1.4
-PROBE_FAST_BE_PEAK_PCT = 1.2
-PROBE_FAST_BE_BUFFER_PCT = 0.2
-# Пробой open/полки. −1.4% и BE после пика работают всегда (не зависят от флага).
-PROBE_SHELF_EXIT_ON = True
+PROBE_FAST_BE_PEAK_PCT = 1.0
+PROBE_FAST_BE_BUFFER_PCT = 0.1
+# Пробой open/полки выкл. (дефолт). −1.4% и BE после пика — всегда.
+PROBE_SHELF_EXIT_ON = False
 # После «полки» не входить в ту же монету сразу (серия лосей на сползающем тренде).
 PROBE_SHELF_REENTRY_SEC = 90 * 60
 EXIT_TRAP_DEFAULT_COST_USD = 100.0
@@ -110,11 +111,10 @@ SLEEVE_SKIP = frozenset({
 _live_extra: set[str] = set()
 # Щуп: 40$ на пробой тихой полки / свечи. Не слот рукава и не карман.
 PROBE_USD = 40.0
-# Днём берём монеты с оборотом ≥ $150k (тонкий стакан <$150k на живых сделках дал 1W/11L и -$5.62).
-# Ночь 23:00–06:00 YEKT: только stair/flag/impulse/spark, оборот ≥ $250k.
-# Вечер 21–23 — как день. Жёсткий режим после убытков — по-прежнему ≥ $1.5M.
-PROBE_MIN_TURNOVER_USD = 150_000.0
-PROBE_NIGHT_MIN_TURNOVER_USD = 250_000.0
+# Днём ≥ $500k: хвост $150k — пустой стакан и фитили. Ночь — тот же пол.
+# Жёсткий режим после убытков — по-прежнему ≥ $1.5M.
+PROBE_MIN_TURNOVER_USD = 500_000.0
+PROBE_NIGHT_MIN_TURNOVER_USD = 500_000.0
 PROBE_STRICT_MIN_TURNOVER_USD = 1_500_000.0
 PROBE_NIGHT_START_HOUR_YEKT = 23
 PROBE_NIGHT_END_HOUR_YEKT = 6
@@ -155,10 +155,10 @@ PROBE_SHELF_DRIFT_PCT = 1.5
 PROBE_SHELF_DRIFT_BARS = 8
 PROBE_RUN_PCT = 6.0
 PROBE_MAX_LOSS_PCT = 8.0
-# Бой: узкий топ лидеров суток (Топ-10). Имитация — широкий скан без потолка.
-PROBE_SCAN_LIMIT_LIVE = 10
-PROBE_SCAN_CLASSIC_LIMIT_LIVE = 10
-PROBE_SCAN_MANDATORY_TOP_LIVE = 10
+# Бой: Топ-5 лидеров суток (неликвидный хвост Топ-10 резали). Имитация — широкий скан.
+PROBE_SCAN_LIMIT_LIVE = 5
+PROBE_SCAN_CLASSIC_LIMIT_LIVE = 5
+PROBE_SCAN_MANDATORY_TOP_LIVE = 5
 PROBE_SCAN_LIMIT_PAPER = 128
 PROBE_SCAN_CLASSIC_LIMIT_PAPER = 50
 PROBE_SCAN_MANDATORY_TOP_PAPER = 50
@@ -498,7 +498,7 @@ _PROBE_FAST_TRAP = frozenset({PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_PO
 
 
 def probe_trap_extra_usd(algo: str) -> float:
-    """Ранний взвод у подскока. Impulse и лестница держат прежние $0.48."""
+    """Ранний взвод у подскока ($0.25). Impulse и лестница — $0.48."""
     if str(algo or "").strip().lower() in _PROBE_FAST_TRAP:
         return float(PROBE_FAST_TRAP_EXTRA_USD)
     return float(PROBE_TRAP_EXTRA_USD)
@@ -2406,7 +2406,7 @@ def probe_exit_reason(
     """Стоп и защита быстрого щупа. Плюс — ловушка вершины.
 
     Подскок (candle/spark/pop): запас $0.36 и откат 0.45% (1.0% после пика +4%).
-    Убыток глубже −1.4% и BE после пика +1.2% — всегда (не зависят от PROBE_SHELF_EXIT_ON).
+    Убыток глубже −1.4% и BE после пика +1.0% — всегда (не зависят от PROBE_SHELF_EXIT_ON).
     Пробой open/полки — только если PROBE_SHELF_EXIT_ON.
     Impulse: запас $0.48 и откат 1.50%. Медвежий стакан сжимает откат до 0.20%.
 
@@ -2424,8 +2424,8 @@ def probe_exit_reason(
     fast = name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
     if gain <= -cfg().probe_max_loss_pct:
         return "стоп"
-    # Быстрый щуп: −1.4% режем всегда — иначе без полки нога уезжает в −3…−7%.
-    if fast and gain <= -PROBE_FAST_LOSS_CAP_PCT + 1e-9:
+    # Короткий стоп −1.4% на любой ноге щупа (не ждём 20м / −8%).
+    if gain <= -PROBE_FAST_LOSS_CAP_PCT + 1e-9:
         return "полка"
     if PROBE_SHELF_EXIT_ON and level > 0 and px <= level:
         # Candle: INIT держался над open. Фитиль к open не продаём — только пробой.
@@ -2451,10 +2451,9 @@ def probe_exit_reason(
         and exit_gain >= 2.0 * EXIT_FEE_SIDE * 100.0 - 1e-6
     ):
         return "вершина"
-    # После пика +1.2% возврат к entry−0.2% — тоже всегда (не пробой open).
+    # После пика +1.0% возврат к entry−0.1% — BE, не отдаём плюс в минус.
     if (
-        fast
-        and peak_gain >= PROBE_FAST_BE_PEAK_PCT - 1e-9
+        peak_gain >= PROBE_FAST_BE_PEAK_PCT - 1e-9
         and px <= ent * (1.0 - PROBE_FAST_BE_BUFFER_PCT / 100.0) + 1e-12
     ):
         return "полка"

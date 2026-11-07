@@ -608,8 +608,14 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             0,
         )
-        # Днём пропускаем оборот ≥ $150k, тонкий стакан < $150k отсекаем; ночью — ≥ $250k.
+        # День/ночь ≥ $500k; тоньше — отсекаем.
         self.assertGreater(
+            policy.probe_scan_rank({
+                "chg": 2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 600_000,
+            }),
+            0,
+        )
+        self.assertLess(
             policy.probe_scan_rank({
                 "chg": 2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 300_000,
             }),
@@ -632,8 +638,8 @@ class TestDeskPolicy(unittest.TestCase):
         yekt = timezone(timedelta(hours=5))
         day_ts = datetime(2026, 10, 31, 14, 0, tzinfo=yekt).timestamp()
         night_ts = datetime(2026, 10, 31, 23, 0, tzinfo=yekt).timestamp()
-        self.assertEqual(policy.probe_min_turnover_usd(day_ts), 150_000.0)
-        self.assertEqual(policy.probe_min_turnover_usd(night_ts), 250_000.0)
+        self.assertEqual(policy.probe_min_turnover_usd(day_ts), 500_000.0)
+        self.assertEqual(policy.probe_min_turnover_usd(night_ts), 500_000.0)
         self.assertFalse(policy.probe_night_halted(day_ts))
         self.assertTrue(policy.probe_night_halted(night_ts))
         self.assertFalse(
@@ -657,10 +663,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.probe_night_halt_reason(night_ts))
         self.assertIsNone(policy.probe_night_halt_reason(day_ts))
         self.assertEqual(policy.PROBE_MAX_LEGS_BTC_DOWN, 2)
-        self.assertEqual(policy.probe_max_legs(now=day_ts), 3)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 3)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 3)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 3)
+        self.assertEqual(policy.probe_max_legs(now=day_ts), 2)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 2)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 2)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 2)
         self.assertEqual(policy.probe_max_legs(now=night_ts), 2)
         self.assertEqual(policy.tape_btc_day_chg([{"ticker": "ETH", "chg": 1.0}]), None)
         self.assertEqual(
@@ -669,9 +675,9 @@ class TestDeskPolicy(unittest.TestCase):
         )
         night_stair = {"shelf": 1.0, "price": 1.01, "stair": 1.0, "algo": "candle"}
         night_candle = {"shelf": 1.0, "price": 1.01, "algo": "candle"}
-        self.assertTrue(policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=200_000))
+        self.assertTrue(policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=600_000))
         self.assertTrue(
-            policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=250_000)
+            policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=600_000)
         )
         self.assertFalse(
             policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=200_000)
@@ -681,7 +687,7 @@ class TestDeskPolicy(unittest.TestCase):
         )
         night_spark = {"shelf": 1.0, "price": 1.01, "spark": 1.0, "algo": "spark"}
         self.assertTrue(
-            policy.probe_setup_ok_now(night_spark, now=night_ts, turnover=250_000)
+            policy.probe_setup_ok_now(night_spark, now=night_ts, turnover=600_000)
         )
         self.assertFalse(
             policy.probe_setup_ok_now(night_spark, now=night_ts, turnover=200_000)
@@ -778,12 +784,12 @@ class TestDeskPolicy(unittest.TestCase):
             }),
             policy.PROBE_DAY_MIN_PCT,
         )
-        self.assertEqual(policy.PROBE_SCAN_LIMIT_LIVE, 10)
-        self.assertEqual(policy.PROBE_SCAN_CLASSIC_LIMIT_LIVE, 10)
-        self.assertEqual(policy.PROBE_SCAN_LIMIT, 10)
+        self.assertEqual(policy.PROBE_SCAN_LIMIT_LIVE, 5)
+        self.assertEqual(policy.PROBE_SCAN_CLASSIC_LIMIT_LIVE, 5)
+        self.assertEqual(policy.PROBE_SCAN_LIMIT, 5)
         self.assertEqual(
             policy.probe_scan_limits(paper=False),
-            (10, 10, 10),
+            (5, 5, 5),
         )
         self.assertEqual(
             policy.probe_scan_limits(paper=True),
@@ -819,10 +825,10 @@ class TestDeskPolicy(unittest.TestCase):
             [str(r[1]["ticker"]) for r in ranked[:5]],
             ["D", "F", "B", "C", "A"],
         )
-        self.assertEqual(policy.PROBE_SCAN_MANDATORY_TOP_LIVE, 10)
-        # Боевой скан — только топ-10; ликвидный середняк в хвост не лезет.
+        self.assertEqual(policy.PROBE_SCAN_MANDATORY_TOP_LIVE, 5)
+        # Боевой скан — только Топ-5; ликвидный середняк в хвост не лезет.
         crowd = [
-            {"ticker": f"G{i}", "chg": 40.0 - i * 0.4, "price": 1.0, "turnover": 200_000}
+            {"ticker": f"G{i}", "chg": 40.0 - i * 0.4, "price": 1.0, "turnover": 600_000}
             for i in range(50)
         ] + [
             {"ticker": "LIQ", "chg": 4.0, "price": 1.0, "turnover": 8_000_000},
@@ -830,7 +836,7 @@ class TestDeskPolicy(unittest.TestCase):
         crowd_ranked = policy.probe_scan_ranked_rows(crowd, paper=False)
         self.assertEqual(
             [str(r[1]["ticker"]) for r in crowd_ranked],
-            [f"G{i}" for i in range(10)],
+            [f"G{i}" for i in range(5)],
         )
         # Имитация: широкий скан; после mandatory-top высоколиквидный разгон раньше хвоста.
         paper_ranked = policy.probe_scan_ranked_rows(crowd, paper=True)
@@ -1035,7 +1041,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNotNone(picked_at_high)
         assert picked_at_high is not None
         self.assertEqual(picked_at_high["algo"], policy.PROBE_ALGO_POP)
-        self.assertTrue(policy.PROBE_SHELF_EXIT_ON)
+        self.assertFalse(policy.PROBE_SHELF_EXIT_ON)
         self.assertTrue(policy.PROBE_STRICT_MODE)
         self.assertIsNone(
             policy.probe_exit_reason(
@@ -1437,7 +1443,8 @@ class TestDeskPolicy(unittest.TestCase):
                 ),
                 "полка",
             )
-        self.assertIsNone(
+        # −2.86% уже короткий стоп (−1.4%), даже у grind.
+        self.assertEqual(
             policy.probe_exit_reason(
                 price=1.02,
                 entry=1.05,
@@ -1446,14 +1453,16 @@ class TestDeskPolicy(unittest.TestCase):
                 arm_px=1.07,
                 peak=1.06,
                 algo=policy.PROBE_ALGO_GRIND,
-            )
+            ),
+            "полка",
         )
+        # Мягкий минус < −1.4% — ещё «ожидание».
         self.assertEqual(
-            policy.probe_exit_reason(price=1.02, entry=1.05, shelf=1.0, trend15="bull"),
+            policy.probe_exit_reason(price=1.04, entry=1.05, shelf=1.0, trend15="bull"),
             "ожидание",
         )
         self.assertEqual(
-            policy.probe_exit_reason(price=1.02, entry=1.05, shelf=1.0, trend15="neutral"),
+            policy.probe_exit_reason(price=1.04, entry=1.05, shelf=1.0, trend15="neutral"),
             "ожидание",
         )
         with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
@@ -1515,10 +1524,22 @@ class TestDeskPolicy(unittest.TestCase):
                 algo=policy.PROBE_ALGO_GRIND,
             )
         )
-        # Подножка: до +6% пика не режем ожидание/дно — только стоп и полка.
-        self.assertIsNone(
+        # Подножка: −2.86% уже короткий стоп; лёгкий минус без soft-среза.
+        self.assertEqual(
             policy.probe_exit_reason(
                 price=1.02,
+                entry=1.05,
+                shelf=1.0,
+                trend15="bull",
+                arm_px=1.07,
+                peak=1.06,
+                algo=policy.PROBE_ALGO_SPRINT,
+            ),
+            "полка",
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.04,
                 entry=1.05,
                 shelf=1.0,
                 trend15="bull",
@@ -1613,7 +1634,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.probe_should_handoff("стоп"))
         self.assertFalse(policy.probe_should_handoff("вершина"))
         self.assertEqual(policy.pocket_from_probe_max(), 3)
-        self.assertEqual(policy.PROBE_MAX_LEGS, 3)
+        self.assertEqual(policy.PROBE_MAX_LEGS, 2)
         best_leg = policy.pick_second_pocket_leg_for_funding(
             [
                 {"ticker": "AGLD", "qty": 160.0, "entry": 0.1872},
@@ -1675,7 +1696,7 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertAlmostEqual(
             policy.exit_trap_arm_pct(cost_usd=40.0, extra_usd=policy.PROBE_FAST_TRAP_EXTRA_USD),
-            1.26,
+            0.99,
             places=2,
         )
         self.assertEqual(
@@ -1715,7 +1736,7 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertIsNone(
             policy.probe_exit_reason(
-                price=0.999,
+                price=0.9995,
                 entry=1.0,
                 shelf=0.97,
                 trend15="bull",
@@ -1813,10 +1834,10 @@ class TestDeskPolicy(unittest.TestCase):
                 now=1000.0 + policy.PROBE_NO_TRAP_TIMEOUT_SEC - 1.0,
             )
         )
-        # Трап взвёлся, лёгкий минус (выше BE−0.2%), ≥2ч → «застой», не полка-BE.
+        # Трап взвёлся, лёгкий минус (выше BE−0.1%), ≥2ч → «застой», не полка-BE.
         self.assertEqual(
             policy.probe_exit_reason(
-                price=0.3170,
+                price=0.3172,
                 entry=0.3174,
                 shelf=0.314,
                 trend15="neutral",
