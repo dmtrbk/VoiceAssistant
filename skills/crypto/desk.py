@@ -1162,10 +1162,8 @@ class CryptoDeskMixin:
         )
         if not reason:
             return
-        # Висящий тейк сам забирает «вершину». Снимаем его только перед стопом, срезом или передачей.
+        # Любой выход, включая разворот «вершина» до лимитки: сначала подтверждённо снимаем тейк.
         tp_order = str(state.get("tp_order") or "")
-        if reason == "вершина" and tp_order:
-            return
         if tp_order:
             ok, done_qty, done_quote, done_fee = self._cancel_limit_confirmed(ticker, tp_order)
             if not ok:
