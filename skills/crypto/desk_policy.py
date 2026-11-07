@@ -97,7 +97,7 @@ PROBE_FAST_LOSS_CAP_PCT = 1.4
 PROBE_FAST_BE_PEAK_PCT = 1.2
 PROBE_FAST_BE_BUFFER_PCT = 0.2
 # Пробой open/полки. −1.4% и BE после пика работают всегда (не зависят от флага).
-PROBE_SHELF_EXIT_ON = False
+PROBE_SHELF_EXIT_ON = True
 # После «полки» не входить в ту же монету сразу (серия лосей на сползающем тренде).
 PROBE_SHELF_REENTRY_SEC = 90 * 60
 EXIT_TRAP_DEFAULT_COST_USD = 100.0
@@ -118,8 +118,8 @@ PROBE_NIGHT_MIN_TURNOVER_USD = 250_000.0
 PROBE_STRICT_MIN_TURNOVER_USD = 1_500_000.0
 PROBE_NIGHT_START_HOUR_YEKT = 23
 PROBE_NIGHT_END_HOUR_YEKT = 6
-# Защита от падающего рынка (выкл.): сутки BTC / flash 15м / ширина рынка.
-PROBE_MARKET_FALL_ON = False
+# Защита от падающего рынка: сутки BTC / flash 15м / ширина рынка.
+PROBE_MARKET_FALL_ON = True
 PROBE_BTC_MAX_DROP_DAY_PCT = -2.5
 PROBE_BTC_FLASH_DROP_PCT = -1.0
 PROBE_BTC_FLASH_BARS = 3
@@ -132,8 +132,8 @@ PROBE_STREAK_PAUSE_SEC = 3600.0
 PROBE_SHELF_COOLDOWN_SEC = 25 * 60
 PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
 # Жёсткий режим (оборот $1.5M, OBI 0.70) только на свои локальные убытки.
-# Дневной −$6 — полный стоп входов. Падающий рынок выключен (PROBE_MARKET_FALL_ON).
-PROBE_STRICT_MODE = False
+# Дневной −$6 — полный стоп входов. Падающий рынок — PROBE_MARKET_FALL_ON.
+PROBE_STRICT_MODE = True
 PROBE_RISING_BTC_MIN_PCT = 0.0
 PROBE_RISING_BREADTH_PCT = 50.0
 # Ниже 0.5% сутки 29.10 резали INIT-контекст и оставляли PARTI 18:25 (−$3.28).
@@ -278,7 +278,7 @@ PROBE_STAIR2_MIN_1H_POS = 0.88
 PROBE_MAX_SPREAD_PCT = 0.35
 PROBE_MAX_ASK_SLIP_PCT = 0.45
 # OBI на каждом входе. Нет котировки стакана — не блокируем.
-PROBE_MIN_ENTRY_OBI = 0.51
+PROBE_MIN_ENTRY_OBI = 0.55
 # Жёсткий режим (бывшие паузы: полка, час, серия, день): щуп не молчит, фильтры туже.
 PROBE_STRICT_MIN_ENTRY_OBI = 0.70
 PROBE_STRICT_MAX_SPREAD_PCT = 0.20
@@ -1702,7 +1702,7 @@ def probe_book_buy_ok(
 
 
 def probe_entry_obi_floor(*, strict: bool = False) -> float:
-    """Порог OBI: обычный вход 0.51, жёсткий режим 0.70."""
+    """Порог OBI: обычный вход 0.55, жёсткий режим 0.70."""
     if strict:
         return float(PROBE_STRICT_MIN_ENTRY_OBI)
     return float(PROBE_MIN_ENTRY_OBI)
