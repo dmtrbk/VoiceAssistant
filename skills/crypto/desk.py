@@ -897,6 +897,7 @@ class CryptoDeskMixin:
         if probe_places_buys():
             blocked |= set(crypto_journal.cooldown_tickers(cfg().cooldown_hours))
             blocked |= set(crypto_journal.shelf_reentry_tickers())
+            blocked |= set(crypto_journal.scratch_reentry_tickers())
             recent = set(crypto_journal.recently_sold(PROBE_REENTRY_HOURS))
             if recent:
                 try:

@@ -797,6 +797,33 @@ def recently_sold(
     return out
 
 
+def scratch_reentry_tickers(
+    trades: list[dict[str, Any]] | None = None,
+    *,
+    now: float | None = None,
+    block_sec: float | None = None,
+) -> set[str]:
+    """После выхода «срез» ту же монету не берём PROBE_SCRATCH_COOLDOWN_SEC."""
+    from .desk_policy import PROBE_SCRATCH_COOLDOWN_SEC
+
+    rows = trades if trades is not None else _read_trades()
+    window = float(PROBE_SCRATCH_COOLDOWN_SEC if block_sec is None else block_sec)
+    cutoff = (now if now is not None else time.time()) - max(0.0, window)
+    out: set[str] = set()
+    for entry in rows:
+        if str(entry.get("side") or "").lower() != "sell":
+            continue
+        if str(entry.get("reason") or "") != "срез":
+            continue
+        epoch = _entry_epoch(entry)
+        if epoch is None or epoch < cutoff:
+            continue
+        ticker = str(entry.get("ticker") or "").upper()
+        if ticker:
+            out.add(ticker)
+    return out
+
+
 def shelf_reentry_tickers(
     trades: list[dict[str, Any]] | None = None,
     *,

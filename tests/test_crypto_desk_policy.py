@@ -707,7 +707,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.PROBE_MARKET_FALL_ON)
         red_market = [{"ticker": f"C{i}", "chg": -2.0, "turnover": 500_000} for i in range(25)]
         thin_green = [
-            {"ticker": f"C{i}", "chg": 2.0 if i < 8 else -1.0, "turnover": 500_000}
+            {"ticker": f"C{i}", "chg": 2.0 if i < 5 else -1.0, "turnover": 500_000}
             for i in range(25)
         ]
         normal_market = [
@@ -734,11 +734,11 @@ class TestDeskPolicy(unittest.TestCase):
         )
         flash_bars = [{"close": 100.0}] * 3 + [{"close": 98.5}]
         self.assertAlmostEqual(policy.probe_btc_flash_pct(flash_bars), -1.5)
-        self.assertEqual(policy.PROBE_MIN_MARKET_BREADTH_PCT, 35.0)
+        self.assertEqual(policy.PROBE_MIN_MARKET_BREADTH_PCT, 25.0)
         rising_btc = [{"ticker": "BTC", "chg": 1.2, "turnover": 50_000_000}]
         self.assertTrue(policy.probe_market_rising(rising_btc))
         falling = [{"ticker": "BTC", "chg": -1.0, "turnover": 50_000_000}] + [
-            {"ticker": f"C{i}", "chg": -1.0 if i >= 8 else 0.5, "turnover": 500_000}
+            {"ticker": f"C{i}", "chg": -1.0 if i >= 5 else 0.5, "turnover": 500_000}
             for i in range(25)
         ]
         self.assertFalse(policy.probe_market_rising(falling))
@@ -772,24 +772,36 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertIn("падающий рынок", reason_on or "")
         self.assertAlmostEqual(until_on, t0 + 3600.0)
+        reason_w, until_w = policy.probe_market_regime_pause_reason(
+            thin_green, now=t0, pause_until=0.0,
+        )
+        self.assertIn("ширина", reason_w or "")
+        self.assertEqual(until_w, 0.0)
         self.assertAlmostEqual(
             policy.probe_scan_rank({
                 "chg": -2.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
             }),
             -2.0,
         )
-        self.assertLess(
+        # −4% суток видно; отсечка ниже −15%.
+        self.assertAlmostEqual(
             policy.probe_scan_rank({
                 "chg": -4.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
             }),
+            -4.0,
+        )
+        self.assertLess(
+            policy.probe_scan_rank({
+                "chg": -16.0, "price": 0.050, "low": 0.046, "high": 0.057, "turnover": 4_000_000,
+            }),
             policy.PROBE_DAY_MIN_PCT,
         )
-        self.assertEqual(policy.PROBE_SCAN_LIMIT_LIVE, 5)
-        self.assertEqual(policy.PROBE_SCAN_CLASSIC_LIMIT_LIVE, 5)
-        self.assertEqual(policy.PROBE_SCAN_LIMIT, 5)
+        self.assertEqual(policy.PROBE_SCAN_LIMIT_LIVE, 25)
+        self.assertEqual(policy.PROBE_SCAN_CLASSIC_LIMIT_LIVE, 25)
+        self.assertEqual(policy.PROBE_SCAN_LIMIT, 25)
         self.assertEqual(
             policy.probe_scan_limits(paper=False),
-            (5, 5, 5),
+            (25, 25, 25),
         )
         self.assertEqual(
             policy.probe_scan_limits(paper=True),
@@ -825,8 +837,8 @@ class TestDeskPolicy(unittest.TestCase):
             [str(r[1]["ticker"]) for r in ranked[:5]],
             ["D", "F", "B", "C", "A"],
         )
-        self.assertEqual(policy.PROBE_SCAN_MANDATORY_TOP_LIVE, 5)
-        # Боевой скан — только Топ-5; ликвидный середняк в хвост не лезет.
+        self.assertEqual(policy.PROBE_SCAN_MANDATORY_TOP_LIVE, 25)
+        # Боевой скан — Топ-25 суток; ракеты со дна подмешиваются по bounce от low.
         crowd = [
             {"ticker": f"G{i}", "chg": 40.0 - i * 0.4, "price": 1.0, "turnover": 600_000}
             for i in range(50)
@@ -834,10 +846,26 @@ class TestDeskPolicy(unittest.TestCase):
             {"ticker": "LIQ", "chg": 4.0, "price": 1.0, "turnover": 8_000_000},
         ]
         crowd_ranked = policy.probe_scan_ranked_rows(crowd, paper=False)
+        # 15 слотов лидерам (cap 25 − 10 ракетных); LIQ +4% в «дно» (≤+2%) не входит.
         self.assertEqual(
             [str(r[1]["ticker"]) for r in crowd_ranked],
-            [f"G{i}" for i in range(5)],
+            [f"G{i}" for i in range(15)],
         )
+        # Спящий −4% суток, но уже +5% от low — попадает в скан как ракета.
+        rocket_rows = [
+            {"ticker": f"L{i}", "chg": 10.0 - i, "price": 1.0, "low": 0.99, "turnover": 600_000}
+            for i in range(12)
+        ] + [
+            {
+                "ticker": "ICNT",
+                "chg": -4.0,
+                "price": 0.305,
+                "low": 0.2844,
+                "turnover": 800_000,
+            },
+        ]
+        rocket_ranked = policy.probe_scan_ranked_rows(rocket_rows, paper=False)
+        self.assertIn("ICNT", [str(r[1]["ticker"]) for r in rocket_ranked])
         # Имитация: широкий скан; после mandatory-top высоколиквидный разгон раньше хвоста.
         paper_ranked = policy.probe_scan_ranked_rows(crowd, paper=True)
         self.assertGreaterEqual(len(paper_ranked), 50)
@@ -845,15 +873,17 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(str(paper_ranked[49][1]["ticker"]), "G49")
         self.assertEqual(str(paper_ranked[50][1]["ticker"]), "LIQ")
         wide = policy.probe_scan_ranked_rows(crowd, limit=60, paper=True)
+        # limit 60 = 50 лидеров + 10 слотов дна; LIQ +4% ни туда, ни в ≤+2%.
         self.assertEqual(str(wide[0][1]["ticker"]), "G0")
         self.assertEqual(str(wide[49][1]["ticker"]), "G49")
-        self.assertEqual(str(wide[50][1]["ticker"]), "LIQ")
+        self.assertEqual(len(wide), 50)
+        self.assertNotIn("LIQ", [str(r[1]["ticker"]) for r in wide])
         mild_red = policy.probe_scan_ranked_rows([
             {"ticker": "RED", "chg": -2.0, "price": 1.0, "turnover": 500_000},
             {"ticker": "DEAD", "chg": -4.0, "price": 1.0, "turnover": 500_000},
             {"ticker": "UP", "chg": 1.0, "price": 1.0, "turnover": 500_000},
         ])
-        self.assertEqual([str(r[1]["ticker"]) for r in mild_red], ["UP", "RED"])
+        self.assertEqual([str(r[1]["ticker"]) for r in mild_red], ["UP", "RED", "DEAD"])
 
         base = dict(armed_ts=100.0, price=1.06, shelf=1.01, trend15="bull", day_chg=8.0, arm_px=1.05)
         self.assertEqual(policy.probe_arm_action(now=160.0, **base), "wait")
@@ -991,7 +1021,8 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertIsNotNone(spark_pick)
         assert spark_pick is not None
-        self.assertEqual(spark_pick["algo"], policy.PROBE_ALGO_CANDLE)
+        # Порядок: impulse/pop/spark/candle — ранняя свеча берётся как spark.
+        self.assertEqual(spark_pick["algo"], policy.PROBE_ALGO_SPARK)
         self.assertEqual(policy.probe_algo_params(policy.PROBE_ALGO_SPARK)["hold_sec"], 0.0)
         self.assertEqual(policy.probe_setup_hold_sec({"algo": "spark", "hold_sec": 0.0}), 0.0)
         self.assertEqual(policy.probe_setup_hold_sec({"algo": "spark"}), 90.0)
@@ -1007,6 +1038,23 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.probe_spark_setup(base5 + [pop_bar], now=1180.0))
         pop = policy.probe_pop_setup(base5 + [pop_bar], now=1180.0)
         self.assertIsNotNone(pop)
+        # Дно: тело 2.77% и 4× объёма проходит; 2× и тело 1.6% — нет.
+        self.assertIsNotNone(
+            policy.probe_pop_setup(base5 + [pop_bar], now=1180.0, day_chg=0.5)
+        )
+        self.assertIsNone(
+            policy.probe_pop_setup(
+                base5 + [{**pop_bar, "volume": 16.0}], now=1180.0, day_chg=0.5
+            )
+        )
+        self.assertIsNone(
+            policy.probe_pop_setup(
+                base5 + [{**pop_bar, "close": 1.016, "high": 1.017}],
+                now=1180.0,
+                day_chg=-1.0,
+            )
+        )
+        self.assertEqual(policy.PROBE_NO_TRAP_TIMEOUT_SEC, 10 * 60)
         assert pop is not None
         self.assertAlmostEqual(pop["shelf"], 1.0)
         self.assertEqual(pop.get("pop"), 1.0)
@@ -1022,14 +1070,14 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(picked_pop["algo"], policy.PROBE_ALGO_POP)
         self.assertEqual(picked_pop.get("hold_sec"), 0.0)
         self.assertIsNone(policy.probe_pop_setup(base5 + [spark_early], now=1180.0))
-        fat = {**pop_bar, "close": 1.045, "high": 1.046}
+        fat = {**pop_bar, "close": 1.095, "high": 1.096}
         self.assertIsNone(policy.probe_pop_setup(base5 + [fat], now=1180.0))
-        wide_wick = {**pop_bar, "high": 1.034}
+        wide_wick = {**pop_bar, "high": 1.055}
         self.assertIsNone(policy.probe_pop_setup(base5 + [wide_wick], now=1180.0))
         thin = {**pop_bar, "volume": 11.0}
         self.assertIsNone(policy.probe_pop_setup(base5 + [thin], now=1180.0))
         climax_base = list(base5)
-        climax_base[-6] = {**climax_base[-6], "open": 0.96, "close": 0.96}
+        climax_base[-6] = {**climax_base[-6], "open": 0.85, "close": 0.85}
         self.assertIsNone(policy.probe_pop_setup(climax_base + [pop_bar], now=1180.0))
         picked_at_high = policy.probe_pick_setup(
             [{"high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0} for _ in range(80)],
@@ -1056,7 +1104,7 @@ class TestDeskPolicy(unittest.TestCase):
                 now=1000.0 + policy.PROBE_FAIL_SCRATCH_SEC + 1.0,
             )
         )
-        # −1.4% на soft-полке (не пробой open) — работает при PROBE_SHELF_EXIT_ON=False.
+        # −1.8% на soft-полке (не пробой open) — работает при PROBE_SHELF_EXIT_ON=False.
         self.assertEqual(
             policy.probe_exit_reason(
                 price=0.995,
@@ -1178,10 +1226,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(
             policy.PROBE_ALGO_ORDER,
             (
-                policy.PROBE_ALGO_CANDLE,
                 policy.PROBE_ALGO_IMPULSE,
-                policy.PROBE_ALGO_SPARK,
                 policy.PROBE_ALGO_POP,
+                policy.PROBE_ALGO_SPARK,
+                policy.PROBE_ALGO_CANDLE,
             ),
         )
         self.assertNotIn(policy.PROBE_ALGO_GRIND, policy.PROBE_ALGO_ORDER)
@@ -1189,8 +1237,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.probe_candle_min_body_pct(), policy.PROBE_CANDLE_MIN_BODY_PCT)
         self.assertEqual(policy.probe_candle_max_body_pct(), policy.PROBE_CANDLE_MAX_BODY_PCT)
         self.assertEqual(policy.PROBE_POP_MIN_BODY_PCT, 1.5)
-        self.assertEqual(policy.PROBE_POP_MAX_BODY_PCT, 4.2)
-        self.assertEqual(policy.PROBE_CANDLE_MAX_BAR_POS, 0.85)
+        self.assertEqual(policy.PROBE_POP_MAX_BODY_PCT, 8.5)
+        self.assertEqual(policy.PROBE_POP_MAX_WICK_PCT, 1.80)
+        self.assertEqual(policy.PROBE_POP_MAX_30M_CHG_PCT, 16.0)
+        self.assertEqual(policy.PROBE_CANDLE_MAX_BAR_POS, 0.98)
         weak = {**rising, "close": 1.004, "high": 1.012}
         self.assertIsNone(policy.probe_candle_setup(base5 + [weak]))
         # Ступенька мельче пробоя — не вход. +48% и пик суток — тоже нет.
@@ -1245,8 +1295,15 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(
             policy.probe_trends_ok("bull", "bear", 8.0, algo=policy.PROBE_ALGO_POP)
         )
-        self.assertFalse(
+        self.assertTrue(
             policy.probe_trends_ok("bear", "bull", 8.0, algo=policy.PROBE_ALGO_SPARK)
+        )
+        self.assertTrue(
+            policy.probe_trends_ok("bear", "bear", 8.0, algo=policy.PROBE_ALGO_POP)
+        )
+        # Impulse: ракета со дна при bear 15м/1ч.
+        self.assertTrue(
+            policy.probe_trends_ok("bear", "bear", 8.0, algo=policy.PROBE_ALGO_IMPULSE)
         )
         self.assertTrue(
             policy.probe_candle_day_ok(
@@ -1443,7 +1500,7 @@ class TestDeskPolicy(unittest.TestCase):
                 ),
                 "полка",
             )
-        # −2.86% уже короткий стоп (−1.4%), даже у grind.
+        # −2.86% уже короткий стоп (−1.8%), даже у grind.
         self.assertEqual(
             policy.probe_exit_reason(
                 price=1.02,
@@ -1456,7 +1513,7 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             "полка",
         )
-        # Мягкий минус < −1.4% — ещё «ожидание».
+        # Мягкий минус < −1.8% — ещё «ожидание».
         self.assertEqual(
             policy.probe_exit_reason(price=1.04, entry=1.05, shelf=1.0, trend15="bull"),
             "ожидание",
@@ -1701,7 +1758,7 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertEqual(
             policy.probe_exit_reason(
-                price=0.985,
+                price=0.982,
                 entry=1.0,
                 shelf=0.94,
                 trend15="bull",
@@ -2197,10 +2254,10 @@ class TestDeskPolicy(unittest.TestCase):
 
     def test_probe_reserve_and_boost_quote(self):
         q = policy.probe_quote()
-        self.assertEqual(
-            policy.probe_reserve_quote(open_legs=policy.PROBE_MAX_LEGS - 1),
-            max(q, policy.PROBE_BOOST_USD),
-        )
+        # При 2 слотах: 0 ног → резерв 1×quote; 1 нога → ещё 1×quote; 2 ноги → 0.
+        self.assertEqual(policy.probe_reserve_quote(open_legs=0), q)
+        self.assertEqual(policy.probe_reserve_quote(open_legs=1), q)
+        self.assertEqual(policy.probe_reserve_quote(open_legs=2), 0.0)
         legs = [
             {"ticker": "AAA", "entry": 100.0, "qty": 1.0},
             {"ticker": "BBB", "entry": 50.0, "qty": 1.0},
@@ -2416,6 +2473,19 @@ class TestJournalChurnAndDaily(unittest.TestCase):
             {"ticker": "FOGO", "side": "sell", "reason": "полка", "ts_epoch": now - 60 * 60},
             {"ticker": "CAP", "side": "sell", "reason": "вершина", "ts_epoch": now - 60 * 60},
         ]
+        scratch = [
+            {"ticker": "TA", "side": "sell", "reason": "срез", "ts_epoch": now - 5 * 60},
+            {"ticker": "BLEND", "side": "sell", "reason": "вершина", "ts_epoch": now - 5 * 60},
+        ]
+        self.assertIn("TA", crypto_journal.scratch_reentry_tickers(scratch, now=now))
+        self.assertNotIn("BLEND", crypto_journal.scratch_reentry_tickers(scratch, now=now))
+        self.assertNotIn(
+            "TA",
+            crypto_journal.scratch_reentry_tickers(scratch, now=now + 21 * 60),
+        )
+        self.assertEqual(policy.PROBE_SPARK_VOL_MULT, 3.0)
+        self.assertEqual(policy.PROBE_POP_VOL_MULT, 3.0)
+        self.assertEqual(policy.PROBE_SCRATCH_COOLDOWN_SEC, 20 * 60)
         self.assertIn("FOGO", crypto_journal.shelf_reentry_tickers(shelf, now=now))
         self.assertNotIn("CAP", crypto_journal.shelf_reentry_tickers(shelf, now=now))
         self.assertNotIn(

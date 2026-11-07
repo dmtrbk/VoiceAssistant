@@ -490,6 +490,7 @@ def main() -> int:
         return 1
 
     book = Book(cash=float(args.equity), start_equity=float(args.equity))
+    scratch_until: dict[str, float] = {}
     blacklist = {"GRAM"}
     excluded: set[str] = set()
 
@@ -561,6 +562,8 @@ def main() -> int:
                 )
                 continue
             sell(book, leg, ts=ts, price=price, reason=reason)
+            if reason == "срез":
+                scratch_until[leg.ticker] = ts + float(P.PROBE_SCRATCH_COOLDOWN_SEC)
 
         # --- выходы карманов ---
         for kind, arm_attr in (("pocket", "pocket_arm"), ("second", "second_arm")):
@@ -795,6 +798,7 @@ def main() -> int:
             blocked = {
                 leg.ticker for leg in book.legs
             } | {arm.ticker for arm in book.probe_arms} | blacklist | set(P.SLEEVE_SKIP)
+            blocked |= {name for name, until in scratch_until.items() if until > ts}
 
             probe_rows: list[dict[str, Any]] = []
             for row in scan:

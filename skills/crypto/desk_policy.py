@@ -34,8 +34,10 @@ PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "д�
 PROBE_CANDLE_STALE_SEC = 2 * 3600
 # Срез только если сломана полка. Минус к входу за 90 с при живой полке — не режем (ICNT).
 PROBE_FAIL_SCRATCH_SEC = 90.0
-# Нет взвода ловушки и цена ≤ входа ≥ 20м — продаём «срез» (ARX/HAEDAL висели часами).
-PROBE_NO_TRAP_TIMEOUT_SEC = 20 * 60
+# Нет взвода ловушки и цена ≤ входа ≥ 10м — «срез». Ракета либо идёт сразу, либо слот свободен.
+PROBE_NO_TRAP_TIMEOUT_SEC = 10 * 60
+# После «среза» не входить в ту же пилу сразу (TA/CARV/GROVE по 4–5 раз).
+PROBE_SCRATCH_COOLDOWN_SEC = 20 * 60
 # Парковка в карман2 ради свободного слота: свежую ногу не трогаем.
 PROBE_ROOM_MIN_AGE_SEC = 15 * 60
 POCKET_SCRATCH_PCT = -0.20
@@ -94,8 +96,9 @@ PROBE_FAST_TRAP_PULLBACK_PCT = 0.45
 PROBE_FAST_TRAP_RUN_PCT = 4.0
 PROBE_FAST_TRAP_RUN_PULLBACK_PCT = 1.0
 # Жёсткий короткий стоп и BE: не зависят от PROBE_SHELF_EXIT_ON (пробой open выкл.).
-PROBE_FAST_LOSS_CAP_PCT = 1.4
-PROBE_FAST_BE_PEAK_PCT = 1.0
+# Ракеты: −1.4% ловит шум; глубже −1.8% режем всегда (не зависит от PROBE_SHELF_EXIT_ON).
+PROBE_FAST_LOSS_CAP_PCT = 1.8
+PROBE_FAST_BE_PEAK_PCT = 1.2
 PROBE_FAST_BE_BUFFER_PCT = 0.1
 # Пробой open/полки выкл. (дефолт). −1.4% и BE после пика — всегда.
 PROBE_SHELF_EXIT_ON = False
@@ -123,7 +126,9 @@ PROBE_MARKET_FALL_ON = True
 PROBE_BTC_MAX_DROP_DAY_PCT = -2.5
 PROBE_BTC_FLASH_DROP_PCT = -1.0
 PROBE_BTC_FLASH_BARS = 3
-PROBE_MIN_MARKET_BREADTH_PCT = 35.0
+# Ширина — live-стоп без часового залипания (иначе при 33–35% пропускаем ракеты лидеров).
+PROBE_MIN_MARKET_BREADTH_PCT = 25.0
+# Часовая пауза только после пролива BTC (сутки / flash), не из-за ширины.
 PROBE_MARKET_FALL_PAUSE_SEC = 3600.0
 PROBE_HOURLY_MAX_LOSS_USD = 1.50
 PROBE_MAX_CONSECUTIVE_LOSSES = 3
@@ -136,9 +141,8 @@ PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
 PROBE_STRICT_MODE = True
 PROBE_RISING_BTC_MIN_PCT = 0.0
 PROBE_RISING_BREADTH_PCT = 50.0
-# Ниже 0.5% сутки 29.10 резали INIT-контекст и оставляли PARTI 18:25 (−$3.28).
-# Пол −3% на полном scan: щуп +$1.04, этой сделки нет.
-PROBE_DAY_MIN_PCT = -3.0
+# Ракеты со дна: утренний слив −4..−12% не должен давать -inf в сканере.
+PROBE_DAY_MIN_PCT = -15.0
 PROBE_NEAR_HIGH = 0.99
 PROBE_BOUNCE_MIN_PCT = 8.0
 PROBE_BOUNCE_NEAR_HIGH = 0.92
@@ -155,10 +159,13 @@ PROBE_SHELF_DRIFT_PCT = 1.5
 PROBE_SHELF_DRIFT_BARS = 8
 PROBE_RUN_PCT = 6.0
 PROBE_MAX_LOSS_PCT = 8.0
-# Бой: Топ-5 лидеров суток (неликвидный хвост Топ-10 резали). Имитация — широкий скан.
-PROBE_SCAN_LIMIT_LIVE = 5
-PROBE_SCAN_CLASSIC_LIMIT_LIVE = 5
-PROBE_SCAN_MANDATORY_TOP_LIVE = 5
+# Бой: пул 25 — монеты со дна в поле зрения до пампа (Топ-5 опаздывал).
+PROBE_SCAN_LIMIT_LIVE = 25
+PROBE_SCAN_CLASSIC_LIMIT_LIVE = 25
+PROBE_SCAN_MANDATORY_TOP_LIVE = 25
+# Доп. слоты: отскок от дневного low (прокси RVOL без 5м на всей ленте).
+PROBE_ROCKET_MIN_BOUNCE_PCT = 2.0
+PROBE_ROCKET_SCAN_SLOTS = 10
 PROBE_SCAN_LIMIT_PAPER = 128
 PROBE_SCAN_CLASSIC_LIMIT_PAPER = 50
 PROBE_SCAN_MANDATORY_TOP_PAPER = 50
@@ -210,12 +217,12 @@ PROBE_ALGO_POP = "pop"
 PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
-# Candle: ступенька/флаг. Выстрел — impulse. Старт — spark. Подскок 2–3.2% — pop.
+# Сначала выстрел/подскок (ракеты), потом spark/ступенька.
 PROBE_ALGO_ORDER = (
-    PROBE_ALGO_CANDLE,
     PROBE_ALGO_IMPULSE,
-    PROBE_ALGO_SPARK,
     PROBE_ALGO_POP,
+    PROBE_ALGO_SPARK,
+    PROBE_ALGO_CANDLE,
 )
 # 5м зелёная свеча: ловим начало восходящей свечи от open, без верхнего фитиля (слива).
 PROBE_CANDLE_LOOKBACK = 12
@@ -225,7 +232,7 @@ PROBE_CANDLE_MAX_BODY_PCT = 2.0
 # Середина и верх восходящей свечи (pos 0.35..0.85):
 # продавленные снизу фитили отсекаются, сильный зелёный бар у верха — нет.
 PROBE_CANDLE_MIN_BAR_POS = 0.35
-PROBE_CANDLE_MAX_BAR_POS = 0.85
+PROBE_CANDLE_MAX_BAR_POS = 0.98
 # Верхний фитиль ≤ 0.90% от open, отступ от кончика high ≥ 0.25%; нижний пролив под open ≤ 0.80%.
 PROBE_CANDLE_MAX_WICK_PCT = 0.90
 PROBE_CANDLE_MAX_DIP_PCT = 0.80
@@ -246,7 +253,7 @@ PROBE_CANDLE_MIN_DAY_ROOM_PCT = 1.0
 PROBE_BREAKOUT_MIN_ROOM_PCT = -0.5
 PROBE_CANDLE_MAX_DAY_DROP_PCT = 28.0
 # Отсечение перегрева за 30м (>2.2%), кульминации объёма на пред. баре (>6.5x) и верхних фитилей слива (>0.85%).
-PROBE_CANDLE_MAX_30M_CHG_PCT = 2.20
+PROBE_CANDLE_MAX_30M_CHG_PCT = 8.0
 PROBE_CANDLE_MAX_PRIOR_VOL_MULT = 6.5
 PROBE_CANDLE_MAX_PREV3_WICK_PCT = 0.85
 # Ступенька (3 зелёных 5м бара подряд с растущими low и close, как TREE/BIRB/WET/MPLX):
@@ -296,23 +303,28 @@ PROBE_IMPULSE_BREAK_MIN_PCT = 3.0
 # Выстрел с базы (NAVX +22%): потолок шире 15%, иначе середина импульса уже «поздно».
 PROBE_IMPULSE_BREAK_MAX_PCT = 32.0
 PROBE_IMPULSE_MAX_DAY_PCT = 35.0
-# Живая свеча выстрела идёт у хая — не требовать середину бара, только не кончик.
-PROBE_IMPULSE_MAX_BAR_POS = 0.95
-PROBE_IMPULSE_TIP_GAP_PCT = 0.20
+# Вход у хая живой свечи: не снимать, пока цена летит у максимума бара.
+PROBE_IMPULSE_MAX_BAR_POS = 0.99
+PROBE_IMPULSE_TIP_GAP_PCT = 0.05
 # Spark: одиночная 5м в начале бара. Покупка сразу (hold 0): иначе 6–10с до buy и tip.
 # Pos до хая бара — ранняя свеча часто закрывается у high.
+# Spark на любой монете: 3× типичного. Иначе за 45 с хватает 0.45× и это шум боковика.
+PROBE_SPARK_VOL_MULT = 3.0
 PROBE_SPARK_MAX_ELAPSED_SEC = 120.0
 PROBE_SPARK_MAX_BAR_POS = 1.0
 PROBE_SPARK_HOLD_SEC = 0.0
 PROBE_SPARK_CHASE_PCT = 1.2
-# Pop: подскок между потолком spark (2%) и пробоем impulse. Дыры 2–4% больше нет.
-# ICNT 07:15 +2.77% и 11:45 +2.72% проходят; кульминация 12:00 (+6.5% за 30м) нет.
+# Pop: вертикальные свечи. 4.2%/0.5%/5.5% браковали ракеты +6..+15%.
 PROBE_POP_MIN_BODY_PCT = 1.5
-PROBE_POP_MAX_BODY_PCT = 4.2
+PROBE_POP_MAX_BODY_PCT = 8.5
 PROBE_POP_MAX_ELAPSED_SEC = 300.0
-PROBE_POP_VOL_MULT = 2.0
-PROBE_POP_MAX_WICK_PCT = 0.50
-PROBE_POP_MAX_30M_CHG_PCT = 5.5
+PROBE_POP_VOL_MULT = 3.0
+# Дно (сутки ≤ +2%): шум 1.5×/тело 1.5% кормит комиссию. Ракета даёт 3× и тело от 2.3%.
+PROBE_BOTTOM_MAX_DAY_PCT = 2.0
+PROBE_BOTTOM_VOL_MULT = 3.0
+PROBE_BOTTOM_POP_MIN_BODY_PCT = 2.3
+PROBE_POP_MAX_WICK_PCT = 1.80
+PROBE_POP_MAX_30M_CHG_PCT = 16.0
 PROBE_POP_HOLD_SEC = 0.0
 PROBE_POP_CHASE_PCT = 2.0
 # Grind: горячее candle нельзя; у хая дня (+25%) — уже догон.
@@ -947,13 +959,19 @@ def probe_market_regime_pause_reason(
     pause_until: float = 0.0,
     btc_flash_pct: float | None = None,
 ) -> tuple[str | None, float]:
-    """Падающий рынок: пауза новых входов на час. Жёсткий режим здесь не включается."""
+    """Падающий рынок: стоп новых входов.
+
+    Пролив BTC — залипающая пауза на час. Узкая ширина — только пока условие живо.
+    """
     if not PROBE_MARKET_FALL_ON:
         return None, 0.0
     ok, note = probe_market_regime_ok(rows, btc_flash_pct=btc_flash_pct)
     until = float(pause_until or 0.0)
     if not ok:
-        return f"падающий рынок: {note}", float(now) + float(PROBE_MARKET_FALL_PAUSE_SEC)
+        sticky = str(note or "").startswith("BTC")
+        if sticky:
+            until = max(until, float(now) + float(PROBE_MARKET_FALL_PAUSE_SEC))
+        return f"падающий рынок: {note}", until
     if until > float(now) + 1e-9:
         left_min = max(1, int((until - float(now) + 59) // 60))
         return f"падающий рынок: пауза {left_min}м после обвала", until
@@ -978,10 +996,32 @@ def probe_scan_rank(
     return chg
 
 
+def probe_scan_bounce_rank(
+    row: dict[str, Any],
+    *,
+    min_turnover: float | None = None,
+) -> float:
+    """Ранг ракеты со дна: % отскока от дневного low (лента без 5м RVOL)."""
+    floor_turn = float(PROBE_MIN_TURNOVER_USD if min_turnover is None else min_turnover)
+    try:
+        chg = float(row.get("chg") or 0)
+        price = float(row.get("price") or 0)
+        low = float(row.get("low") or 0)
+        turn = float(row.get("turnover") or 0)
+    except (TypeError, ValueError):
+        return float("-inf")
+    if turn < floor_turn or price <= 0 or low <= 0 or chg < PROBE_DAY_MIN_PCT:
+        return float("-inf")
+    bounce = (price / low - 1.0) * 100.0
+    if bounce < PROBE_ROCKET_MIN_BOUNCE_PCT - 1e-12:
+        return float("-inf")
+    return bounce
+
+
 def probe_scan_limits(*, paper: bool | None = None) -> tuple[int, int, int]:
     """Лимиты скана: (scan, classic, mandatory_top).
 
-    Имитация (`probe_paper`) — широкий скан. Бой — узкий Топ-10.
+    Имитация (`probe_paper`) — широкий скан. Бой — Топ-N суток + ракеты со дна.
     """
     use_paper = bool(cfg().probe_paper) if paper is None else bool(paper)
     if use_paper:
@@ -1005,37 +1045,40 @@ def probe_scan_ranked_rows(
     min_turnover: float | None = None,
     paper: bool | None = None,
 ) -> list[tuple[float, dict[str, Any]]]:
-    """Список для щупа: топ-N по 24h %, затем высоколиквидные ($1.5M+) в фазе разгона, затем остальные."""
-    scan_lim, _classic, mandatory = probe_scan_limits(paper=paper)
+    """15 слотов — лидерам суток, 10 слотов — активным монетам со дна (сутки ≤ +2%)."""
+    scan_lim, _classic, _mandatory = probe_scan_limits(paper=paper)
     cap = int(scan_lim if limit is None else limit)
     floor_turn = (
         float(min_turnover)
         if min_turnover is not None
         else probe_min_turnover_usd(now)
     )
-    scored: list[tuple[float, dict[str, Any]]] = []
+    valid_rows: list[tuple[float, dict[str, Any]]] = []
     for row in rows:
         score = probe_scan_rank(row, min_turnover=floor_turn)
         if score < PROBE_DAY_MIN_PCT:
             continue
-        scored.append((score, row))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    if len(scored) <= mandatory:
-        return scored[:cap]
-    head = scored[:mandatory]
-    rest = scored[mandatory:]
-    prime: list[tuple[float, dict[str, Any]]] = []
-    other: list[tuple[float, dict[str, Any]]] = []
-    for item in rest:
-        sc, r = item
-        turn = float(r.get("turnover") or 0)
-        if turn >= 1_500_000.0 and 1.5 <= sc <= 25.0:
-            prime.append(item)
-        else:
-            other.append(item)
-    prime.sort(key=lambda item: (float(item[1].get("turnover") or 0), item[0]), reverse=True)
-    combined = head + prime + other
-    return combined[:cap]
+        valid_rows.append((score, row))
+    leaders = sorted(valid_rows, key=lambda item: item[0], reverse=True)
+    bottom_movers = [
+        item
+        for item in valid_rows
+        if PROBE_DAY_MIN_PCT <= item[0] <= 2.0
+        and float(item[1].get("turnover") or 0) >= floor_turn
+    ]
+    bottom_movers.sort(key=lambda item: float(item[1].get("turnover") or 0), reverse=True)
+    rocket_slots = int(PROBE_ROCKET_SCAN_SLOTS)
+    if cap <= rocket_slots:
+        return leaders[:cap]
+    leader_slots = cap - rocket_slots
+    top_leaders = leaders[:leader_slots]
+    seen_tickers = {str(item[1].get("ticker") or "").upper() for item in top_leaders}
+    top_bottom = [
+        item
+        for item in bottom_movers
+        if str(item[1].get("ticker") or "").upper() not in seen_tickers
+    ][:rocket_slots]
+    return (top_leaders + top_bottom)[:cap]
 
 
 def probe_pin_room_pct(row: dict[str, Any] | None) -> float:
@@ -1525,8 +1568,9 @@ def probe_spark_setup(
     bars: list[dict[str, Any]],
     *,
     now: float | None = None,
+    day_chg: float | None = None,
 ) -> dict[str, float] | None:
-    """Одиночная 5м в первые 1–2 минуты бара. Без потолка 30м +2.2%."""
+    """Одиночная 5м в первые 1–2 минуты бара. Со дна — объём ≥ 3× типичного."""
     if now is None or len(bars) < PROBE_CANDLE_LOOKBACK + 2:
         return None
     forming = bars[-1]
@@ -1550,15 +1594,33 @@ def probe_spark_setup(
     if typical <= 0:
         return None
     elapsed_frac = max(PROBE_CANDLE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
-    if vol < typical * PROBE_CANDLE_VOL_MULT * elapsed_frac:
+    del day_chg
+    if vol < typical * PROBE_SPARK_VOL_MULT * elapsed_frac:
         return None
     if not probe_spark_live_ok(px, hi, lo, op):
         return None
     return {"shelf": op, "price": px, "spark": 1.0}
 
 
-def probe_pop_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
-    """Подскок: тело 1.5..4.2% от open, фитиль ≤ 0.5%, без слива под open."""
+def probe_bottom_entry(day_chg: float | None) -> bool:
+    """Сутки ≤ +2% — слот дна, не лидер дня."""
+    if day_chg is None:
+        return False
+    try:
+        return float(day_chg) <= PROBE_BOTTOM_MAX_DAY_PCT + 1e-12
+    except (TypeError, ValueError):
+        return False
+
+
+def probe_pop_live_ok(
+    price: float,
+    live_high: float,
+    live_low: float,
+    live_open: float,
+    *,
+    min_body: float | None = None,
+) -> bool:
+    """Подскок: тело 1.5..8.5% от open, фитиль ≤ 1.8%, без слива под open."""
     px = float(price or 0)
     hi = float(live_high or 0)
     lo = float(live_low or 0)
@@ -1566,7 +1628,8 @@ def probe_pop_live_ok(price: float, live_high: float, live_low: float, live_open
     if px <= 0 or hi <= 0 or lo <= 0 or op <= 0 or hi < lo:
         return False
     body = (px / op - 1.0) * 100.0
-    if body < PROBE_POP_MIN_BODY_PCT - 1e-12 or body > PROBE_POP_MAX_BODY_PCT + 1e-12:
+    floor = PROBE_POP_MIN_BODY_PCT if min_body is None else float(min_body)
+    if body < floor - 1e-12 or body > PROBE_POP_MAX_BODY_PCT + 1e-12:
         return False
     if (hi - px) / op * 100.0 > PROBE_POP_MAX_WICK_PCT + 1e-12:
         return False
@@ -1576,7 +1639,7 @@ def probe_pop_live_ok(price: float, live_high: float, live_low: float, live_open
 
 
 def probe_pop_30m_ok(bars: list[dict[str, Any]], price: float) -> bool:
-    """Ход за 30м вместе с живой свечой. Выше 5.5% — уже кульминация, не первый подскок."""
+    """Ход за 30м вместе с живой свечой. Выше 16% — кульминация, не первый подскок."""
     window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
     if len(window) < 6 or float(price or 0) <= 0:
         return True
@@ -1609,8 +1672,9 @@ def probe_pop_setup(
     bars: list[dict[str, Any]],
     *,
     now: float | None = None,
+    day_chg: float | None = None,
 ) -> dict[str, float] | None:
-    """Живая 5м с телом 1.5–4.2% в любом месте бара. Полка — open. Покупка сразу."""
+    """Живая 5м с телом 1.5–8.5%. Со дна — тело от 2.3% и объём ≥ 3×. Полка — open."""
     if now is None or len(bars) < PROBE_CANDLE_LOOKBACK + 2:
         return None
     forming = bars[-1]
@@ -1634,9 +1698,11 @@ def probe_pop_setup(
     if typical <= 0:
         return None
     elapsed_frac = max(PROBE_CANDLE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
+    bottom = probe_bottom_entry(day_chg)
+    min_body = PROBE_BOTTOM_POP_MIN_BODY_PCT if bottom else None
     if vol < typical * PROBE_POP_VOL_MULT * elapsed_frac:
         return None
-    if not probe_pop_live_ok(px, hi, lo, op):
+    if not probe_pop_live_ok(px, hi, lo, op, min_body=min_body):
         return None
     if not probe_pop_30m_ok(bars, px):
         return None
@@ -2274,7 +2340,7 @@ def probe_pick_setup(
         elif name == PROBE_ALGO_IMPULSE:
             setup = probe_impulse_setup(bars5 or [])
         elif name == PROBE_ALGO_SPARK:
-            setup = probe_spark_setup(bars5 or [], now=now)
+            setup = probe_spark_setup(bars5 or [], now=now, day_chg=day_chg)
             if setup and not probe_candle_day_ok(
                 price=float(setup.get("price") or 0),
                 day_high=float(day_high or 0),
@@ -2284,7 +2350,7 @@ def probe_pick_setup(
             ):
                 continue
         elif name == PROBE_ALGO_POP:
-            setup = probe_pop_setup(bars5 or [], now=now)
+            setup = probe_pop_setup(bars5 or [], now=now, day_chg=day_chg)
             if setup and not probe_candle_day_ok(
                 price=float(setup.get("price") or 0),
                 day_high=float(day_high or 0),
@@ -2316,25 +2382,24 @@ def probe_trends_ok(
     *,
     algo: str = "",
 ) -> bool:
-    """15м бычий для candle и impulse. Spark и pop: достаточно, чтобы 15м не был bear.
+    """Для ракет (impulse, pop, spark) старший тренд не блокирует вход со дна.
 
-    Час для spark/pop не блокирует: подскок со дна бывает раньше пересечения EMA.
-    Grind требует бычий час. Неделя не слабее −5%.
-    Candle: 15м может быть ещё neutral — лишь бы не bear, и хотя бы один таймфрейм bull.
+    Candle: оба ТФ bear — нет; нужен хотя бы один bull.
+    Grind: бычий час. Неделя не слабее −5% (ракеты этот фильтр не проходят — вход сразу).
     """
     name = str(algo or "").strip().lower()
-    if name in {PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
-        # Подскок со дна бывает раньше пересечения EMA. Час не блокирует.
-        if trend15 == "bear":
-            return False
-    elif name == PROBE_ALGO_CANDLE:
-        if trend15 == "bear" or trend1h == "bear":
+    if name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+        return True
+    if name == PROBE_ALGO_CANDLE:
+        if trend15 == "bear" and trend1h == "bear":
             return False
         if trend15 != "bull" and trend1h != "bull":
             return False
-    elif trend15 != "bull" or trend1h == "bear":
+    elif name == PROBE_ALGO_GRIND and trend1h != "bull":
         return False
-    if name == PROBE_ALGO_GRIND and trend1h != "bull":
+    elif name not in {PROBE_ALGO_CANDLE, PROBE_ALGO_GRIND} and (
+        trend15 != "bull" or trend1h == "bear"
+    ):
         return False
     if day_chg is None:
         return False
@@ -2406,7 +2471,7 @@ def probe_exit_reason(
     """Стоп и защита быстрого щупа. Плюс — ловушка вершины.
 
     Подскок (candle/spark/pop): запас $0.36 и откат 0.45% (1.0% после пика +4%).
-    Убыток глубже −1.4% и BE после пика +1.0% — всегда (не зависят от PROBE_SHELF_EXIT_ON).
+    Убыток глубже −1.8% и BE после пика +1.2% — всегда (не зависят от PROBE_SHELF_EXIT_ON).
     Пробой open/полки — только если PROBE_SHELF_EXIT_ON.
     Impulse: запас $0.48 и откат 1.50%. Медвежий стакан сжимает откат до 0.20%.
 
@@ -2424,7 +2489,7 @@ def probe_exit_reason(
     fast = name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
     if gain <= -cfg().probe_max_loss_pct:
         return "стоп"
-    # Короткий стоп −1.4% на любой ноге щупа (не ждём 20м / −8%).
+    # Короткий стоп −1.8% на любой ноге щупа (не ждём 20м / −8%).
     if gain <= -PROBE_FAST_LOSS_CAP_PCT + 1e-9:
         return "полка"
     if PROBE_SHELF_EXIT_ON and level > 0 and px <= level:
@@ -2451,7 +2516,7 @@ def probe_exit_reason(
         and exit_gain >= 2.0 * EXIT_FEE_SIDE * 100.0 - 1e-6
     ):
         return "вершина"
-    # После пика +1.0% возврат к entry−0.1% — BE, не отдаём плюс в минус.
+    # После пика +1.2% возврат к entry−0.1% — BE (независимо от PROBE_SHELF_EXIT_ON).
     if (
         peak_gain >= PROBE_FAST_BE_PEAK_PCT - 1e-9
         and px <= ent * (1.0 - PROBE_FAST_BE_BUFFER_PCT / 100.0) + 1e-12
