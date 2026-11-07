@@ -377,10 +377,10 @@ BTC_DIP_EXIT_PCT = 1.1
 # Второй карман: те же сутки и отскок, фиксированные 50$ вместо доли счёта.
 SUI_DIP_TICKER = "AVA"
 SUI_DIP_USD = 50.0
-# Плюс (комиссия×2 + $0.12) взводит вершину. Продажа — откат от неё, пауза короче входа.
-POCKET_EXIT_PULLBACK_PCT = 0.35
+# Карман дышит как снайпер: взвод от +1.5%, продажа на откате 1.2% от вершины.
+POCKET_EXIT_PULLBACK_PCT = 1.2
 POCKET_EXIT_WALL_PULLBACK_PCT = 0.20
-POCKET_EXIT_DEEP_PULLBACK_PCT = 1.0
+POCKET_EXIT_DEEP_PULLBACK_PCT = 1.2
 POCKET_EXIT_HOLD_SEC = 60
 # Срочный выход из кармана2: продаём, пока bid не хуже последней цены больше чем на 0.45%.
 POCKET_UNWIND_MAX_BID_GAP_PCT = 0.45
@@ -2928,7 +2928,7 @@ def update_pocket_exit_arm(
     now: float,
     qty: float = 0.0,
 ) -> dict[str, float] | None:
-    """Плюс ≥ комиссия×2+$0.12 запоминает вершину. Новая вершина сбрасывает таймер.
+    """Плюс ≥ +1.5% запоминает вершину. Новая вершина сбрасывает таймер.
 
     Ниже порога ловушка ещё не взведена. Уже взведенная не снимается:
     откат как раз и есть сигнал продажи.
@@ -2941,7 +2941,11 @@ def update_pocket_exit_arm(
         return {"high": float(state["high"]), "ts": float(state.get("ts") or now)}
     gain = (px / ent - 1.0) * 100.0
     if state is None:
-        if gain < exit_trap_arm_pct(entry=ent, qty=qty) - 1e-6:
+        need = max(
+            exit_trap_arm_pct(entry=ent, qty=qty),
+            float(PROBE_PIN_ARM_PCT),
+        )
+        if gain < need - 1e-6:
             return None
         return {"high": px, "ts": float(now)}
     high = float(state.get("high") or 0)
@@ -2959,12 +2963,12 @@ def pocket_exit_ready(
     bid: float = 0.0,
     obi: float | None = None,
 ) -> bool:
-    """Продажа кармана: −0,35% от вершины и пауза hold (60с), с учётом bid и дисбаланса стакана L2.
+    """Продажа кармана: откат 1.2% от вершины, с учётом bid и дисбаланса стакана.
 
     Без ожидания таймера режем сразу, если:
     - в стакане медвежья плита (obi ≤ 0.28) и откат ≥ 0.20% от вершины;
-    - цена/bid откатила ≥ 1.0% от вершины (POCKET_EXIT_DEEP_PULLBACK_PCT);
-    - или цена/bid вернулась ≤ точки входа (не течём под водой).
+    - цена/bid откатила ≥ 1.2% от вершины;
+    - или цена/bid вернулась ≤ точки входа.
     """
     limits = cfg()
     if not state:

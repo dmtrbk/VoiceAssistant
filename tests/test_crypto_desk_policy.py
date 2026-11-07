@@ -2078,8 +2078,8 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(
             policy.update_pocket_exit_arm(None, price=100.3, entry=100.0, now=1.0, qty=1.0)
         )
-        armed = policy.update_pocket_exit_arm(None, price=101.1, entry=100.0, now=10.0, qty=1.0)
-        self.assertAlmostEqual(armed["high"], 101.1)
+        armed = policy.update_pocket_exit_arm(None, price=101.6, entry=100.0, now=10.0, qty=1.0)
+        self.assertAlmostEqual(armed["high"], 101.6)
         self.assertFalse(policy.pocket_exit_ready(armed, price=100.9, now=10.0 + policy.POCKET_EXIT_HOLD_SEC))
         higher = policy.update_pocket_exit_arm(armed, price=104.0, entry=100.0, now=20.0, qty=1.0)
         self.assertEqual(higher["ts"], 20.0)
@@ -2095,13 +2095,13 @@ class TestDeskPolicy(unittest.TestCase):
             policy.btc_dip_exit_reason(price=need, entry=100.0, exit_arm=held, now=20.0 + policy.POCKET_EXIT_HOLD_SEC),
             "вершина",
         )
-        # Откат выше входа (<1% от пика) — hold обязателен; глубокий откат ≥1% или под водой — сразу.
-        still_green = 101.1 * (1.0 - policy.POCKET_EXIT_PULLBACK_PCT / 100.0)
-        self.assertGreater(still_green, 100.0)
+        # Откат меньше 1.2% от пика ещё держим; 1.2% и уход под вход — сразу.
+        shallow = armed["high"] * (1.0 - 0.4 / 100.0)
+        self.assertGreater(shallow, 100.0)
         self.assertFalse(
-            policy.pocket_exit_ready(armed, price=still_green, now=10.0 + 30.0, entry=100.0)
+            policy.pocket_exit_ready(armed, price=shallow, now=10.0 + 30.0, entry=100.0)
         )
-        deep_drop = 101.1 * (1.0 - policy.POCKET_EXIT_DEEP_PULLBACK_PCT / 100.0)
+        deep_drop = armed["high"] * (1.0 - policy.POCKET_EXIT_DEEP_PULLBACK_PCT / 100.0)
         self.assertTrue(
             policy.pocket_exit_ready(armed, price=deep_drop, now=10.0 + 15.0, entry=100.0)
         )
@@ -2124,7 +2124,12 @@ class TestDeskPolicy(unittest.TestCase):
         # При медвежьей плите (obi <= 0.28) откат -0.25% режет сразу без ожидания hold 60с:
         self.assertTrue(
             policy.pocket_exit_ready(
-                armed, price=101.1, bid=101.1 * (1.0 - 0.0025), now=10.0 + 5.0, entry=100.0, obi=obi_bear
+                armed,
+                price=armed["high"],
+                bid=armed["high"] * (1.0 - 0.0025),
+                now=10.0 + 5.0,
+                entry=100.0,
+                obi=obi_bear,
             )
         )
         # Если lastPrice застыл на пике 104.0, но bid в стакане уже упал до need — выход готов:
