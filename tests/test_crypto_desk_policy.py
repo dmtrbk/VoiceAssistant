@@ -1386,6 +1386,20 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             "drop",
         )
+        # CAP: impulse на neutral 15м после холда покупаем, не снимаем.
+        self.assertEqual(
+            policy.probe_arm_action(
+                now=100.0 + policy.PROBE_IMPULSE_HOLD_SEC,
+                armed_ts=100.0,
+                price=1.06,
+                shelf=1.01,
+                trend15="neutral",
+                day_chg=8.0,
+                arm_px=1.05,
+                algo=policy.PROBE_ALGO_IMPULSE,
+            ),
+            "buy",
+        )
 
         stair = []
         px = 1.0

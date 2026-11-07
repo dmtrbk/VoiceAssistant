@@ -2428,8 +2428,11 @@ def probe_arm_action(
     name = str(algo or "").strip().lower()
     if shelf <= 0 or price <= shelf:
         return "drop"
-    # Candle допускает neutral 15м (как на скане); bear — снять.
-    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+    # Impulse/spark/pop не снимаем по тренду на холде: CAP neutral убивал вход через 8 с.
+    # Candle: bear — снять, neutral можно. Остальные алгоритмы ждут bull.
+    if name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+        pass
+    elif name == PROBE_ALGO_CANDLE:
         if trend15 == "bear":
             return "drop"
     elif trend15 != "bull":
