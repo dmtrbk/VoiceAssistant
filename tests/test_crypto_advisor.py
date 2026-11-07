@@ -40,10 +40,9 @@ class TestCryptoAdvisor(unittest.TestCase):
         skill = CryptoSkill()
         with (
             patch.object(skill, "desk_candidates", return_value=[{"ticker": "BTC", "name": "Биткоин", "chg_7": 1.0, "trend": "выше"}]),
-            patch.object(skill, "ai_pick_alloc", return_value=({"BTC": 100.0}, "Только биткоин.")),
             patch.object(skill, "_place_order") as place,
             patch("crypto_advisor.telegram_configured", return_value=False),
         ):
             text = crypto_advisor.run(skill=skill, to_telegram=False, to_stdout=False)
         place.assert_not_called()
-        self.assertIn("Только биткоин.", text)
+        self.assertIn("щупом и карманом", text)

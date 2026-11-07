@@ -695,38 +695,6 @@ def set_live_sleeve(tickers: set[str] | frozenset[str]) -> None:
     }
 
 
-def liquid_sleeve_names(rows: list[dict[str, Any]]) -> set[str]:
-    """Базовый список и любой спот с оборотом ≥ $5 млн. Стейблы и плечо мимо."""
-    names = set(DESK_ALT_SLEEVE)
-    for row in rows:
-        ticker = str(row.get("ticker") or "").upper()
-        if (
-            not ticker
-            or ticker in SLEEVE_SKIP
-            or _leveraged_base(ticker)
-        ):
-            continue
-        try:
-            turnover = float(row.get("turnover") or 0)
-        except (TypeError, ValueError):
-            continue
-        if turnover >= MIN_TURNOVER_USD:
-            names.add(ticker)
-    return names
-
-
-def is_alt_sleeve(ticker: str) -> bool:
-    return str(ticker or "").upper() in sleeve_names()
-
-
-def take_profit_day_pct_for(ticker: str) -> float:
-    return TAKE_PROFIT_ALT_DAY_PCT if is_alt_sleeve(ticker) else TAKE_PROFIT_DAY_PCT
-
-
-def watch_tp_day_pct_for(ticker: str) -> float:
-    return WATCH_TP_ALT_DAY_PCT if is_alt_sleeve(ticker) else WATCH_TP_DAY_PCT
-
-
 def btc_dip_quote(equity: float) -> float:
     """Сколько USDT класть в карман SOL при входе: доля счёта."""
     return max(0.0, float(equity or 0)) * cfg().pocket_pct / 100.0

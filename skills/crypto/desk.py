@@ -48,7 +48,6 @@ from .desk_policy import (
     PROBE_ALGO_PIN,
     PROBE_HUNTER_MAX_LEGS,
     PROBE_SNIPER_MAX_LEGS,
-    set_live_sleeve,
     SLEEVE_SKIP,
     _leveraged_base,
     BTC_DIP_TICKER,
@@ -255,50 +254,12 @@ class CryptoDeskMixin:
             return True
         return self._desk_bought_ready and ticker not in self._desk_bought
 
-    def _refresh_sleeve(self) -> None:
-        """Рукав и alloc сняты — только щуп и карман."""
-        set_live_sleeve(set())
-
     def desk_candidates(self) -> list[dict[str, Any]]:
         """Лента для советника (без автопортфеля)."""
         try:
             return list(self._tape()[:40])
         except Exception:
             return []
-
-    def desk_auto_candidates(self) -> list[dict[str, Any]]:
-        return []
-
-    def desk_score_alloc(
-        self, candidates: list[dict[str, Any]] | None = None
-    ) -> tuple[dict[str, float], str]:
-        return {}, "Автостол: только щуп и карман."
-
-    def ai_pick_alloc(self, candidates: list[dict[str, Any]]) -> tuple[dict[str, float], str]:
-        return {}, "Портфельный alloc снят. Работают щуп и карман."
-
-    def _trade_auto(self, silent: bool = False) -> str:
-        with common._TRADE_LOCK:
-            try:
-                self._reconcile_desk_state()
-                return self._trade_auto_locked(silent)
-            finally:
-                self._earn_park_idle()
-
-    def _trade_auto_locked(self, silent: bool = False) -> str:
-        msg = "Авторебаланс снят. В фоне: щуп и карман."
-        if silent:
-            logger.info("[Крипта] авто: %s", msg)
-        return msg
-
-    def _desk_watch(self, silent: bool = True) -> str:
-        return "Дозор рукава снят."
-
-    def _desk_watch_locked(self, silent: bool = True) -> str:
-        return "Дозор рукава снят."
-
-    def _rebalance(self, target_alloc: dict[str, float], *, respect_hold: bool = True) -> str:
-        return "Ребаланс снят."
 
     def _reconcile_desk_state(self, *, force: bool = False) -> list[str]:
         """Сверить карман/рукав с биржей. Щуп не читаем на запись и не отменяем его заявки."""
@@ -949,7 +910,10 @@ class CryptoDeskMixin:
 
     def _probe_cycle(self) -> None:
         with common._TRADE_LOCK:
-            self._probe_locked()
+            try:
+                self._probe_locked()
+            finally:
+                self._earn_park_idle()
 
     def _note_probe_pause(self, reason: str) -> None:
         kind = _probe_pause_kind(reason)
@@ -2548,7 +2512,6 @@ class CryptoDeskMixin:
             now = time.time()
             try:
                 self._reload_env()
-                self._refresh_sleeve()
             except Exception as exc:
                 logger.warning("[Крипта] env: %s", exc)
             if now >= next_report:

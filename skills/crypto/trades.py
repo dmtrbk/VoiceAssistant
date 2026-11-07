@@ -94,7 +94,8 @@ class CryptoTradesMixin:
             return "Сделки крипты выключены."
         amount = _extract_quote(text)
         if kind == "auto":
-            return self._trade_auto()
+            self._earn_park_idle()
+            return "Щуп и карман сами. Свободное сверх 12$ — в Earn."
         if not self._api_key:
             return "Без ключа Bybit заявки не выставляю."
         target = self._resolve_ticker(ticker)

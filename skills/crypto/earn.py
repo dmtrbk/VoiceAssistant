@@ -18,7 +18,7 @@ _CATEGORY = "FlexibleSaving"
 _PRODUCT_ID = "1"  # USDT Flexible Saving
 _MIN_STAKE = 1.5  # минимум продукта
 # Свободные доллары на споте — для ручной покупки. Остальное под проценты.
-_FREE_BUFFER = 10.0
+_FREE_BUFFER = 12.0
 _POSITION_CACHE_SEC = 20.0
 
 
