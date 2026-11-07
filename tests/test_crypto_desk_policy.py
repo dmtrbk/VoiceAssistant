@@ -663,10 +663,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertIsNone(policy.probe_night_halt_reason(night_ts))
         self.assertIsNone(policy.probe_night_halt_reason(day_ts))
         self.assertEqual(policy.PROBE_MAX_LEGS_BTC_DOWN, 2)
-        self.assertEqual(policy.probe_max_legs(now=day_ts), 2)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 2)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 2)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 2)
+        self.assertEqual(policy.probe_max_legs(now=day_ts), 3)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 3)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 3)
+        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 3)
         self.assertEqual(policy.probe_max_legs(now=night_ts), 2)
         self.assertEqual(policy.tape_btc_day_chg([{"ticker": "ETH", "chg": 1.0}]), None)
         self.assertEqual(
@@ -1400,6 +1400,54 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             "buy",
         )
+        pin_bars = [
+            {"open": 1.00, "high": 1.01, "low": 0.99, "close": 1.00, "volume": 10.0},
+            {"open": 1.00, "high": 1.02, "low": 1.00, "close": 1.015, "volume": 12.0},
+            {"open": 1.015, "high": 1.04, "low": 1.01, "close": 1.035, "volume": 14.0},
+            {"open": 1.035, "high": 1.05, "low": 1.03, "close": 1.048, "volume": 16.0},
+            {"open": 1.048, "high": 1.06, "low": 1.04, "close": 1.055, "volume": 18.0},
+            {"open": 1.055, "high": 1.07, "low": 1.05, "close": 1.062, "volume": 20.0},
+            {"open": 1.055, "high": 1.062, "low": 1.052, "close": 1.058, "volume": 24.0},
+        ]
+        pin_setup = policy.probe_pin_setup(pin_bars)
+        self.assertIsNotNone(pin_setup)
+        assert pin_setup is not None
+        self.assertAlmostEqual(pin_setup["shelf"], 1.05)
+        picked = policy.probe_pick_setup(
+            [],
+            pin_bars,
+            ticker="CAP",
+            pin_ticker="CAP",
+        )
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked["algo"], policy.PROBE_ALGO_PIN)
+        self.assertIsNone(
+            policy.probe_pick_setup([], pin_bars, ticker="CAP", pin_ticker="TA")
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=1.017,
+                entry=1.0,
+                shelf=0.99,
+                trend15="bull",
+                peak=1.03,
+                algo=policy.PROBE_ALGO_PIN,
+                qty=40.0,
+            ),
+            "вершина",
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=1.025,
+                entry=1.0,
+                shelf=0.99,
+                trend15="bull",
+                peak=1.03,
+                algo=policy.PROBE_ALGO_PIN,
+                qty=40.0,
+            )
+        )
 
         stair = []
         px = 1.0
@@ -1705,7 +1753,9 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.probe_should_handoff("стоп"))
         self.assertFalse(policy.probe_should_handoff("вершина"))
         self.assertEqual(policy.pocket_from_probe_max(), 3)
-        self.assertEqual(policy.PROBE_MAX_LEGS, 2)
+        self.assertEqual(policy.PROBE_MAX_LEGS, 3)
+        self.assertEqual(policy.PROBE_HUNTER_MAX_LEGS, 2)
+        self.assertEqual(policy.PROBE_SNIPER_MAX_LEGS, 1)
         best_leg = policy.pick_second_pocket_leg_for_funding(
             [
                 {"ticker": "AGLD", "qty": 160.0, "entry": 0.1872},
@@ -2268,10 +2318,11 @@ class TestDeskPolicy(unittest.TestCase):
 
     def test_probe_reserve_and_boost_quote(self):
         q = policy.probe_quote()
-        # При 2 слотах: 0 ног → резерв 1×quote; 1 нога → ещё 1×quote; 2 ноги → 0.
+        # 3 слота: пусто — резерв одной ноги; есть нога — место под остальные.
         self.assertEqual(policy.probe_reserve_quote(open_legs=0), q)
-        self.assertEqual(policy.probe_reserve_quote(open_legs=1), q)
-        self.assertEqual(policy.probe_reserve_quote(open_legs=2), 0.0)
+        self.assertEqual(policy.probe_reserve_quote(open_legs=1), q * 2)
+        self.assertEqual(policy.probe_reserve_quote(open_legs=2), max(q, policy.PROBE_BOOST_USD))
+        self.assertEqual(policy.probe_reserve_quote(open_legs=3), 0.0)
         legs = [
             {"ticker": "AAA", "entry": 100.0, "qty": 1.0},
             {"ticker": "BBB", "entry": 50.0, "qty": 1.0},

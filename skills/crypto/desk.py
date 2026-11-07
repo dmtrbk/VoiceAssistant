@@ -45,6 +45,9 @@ from .desk_policy import (
     PROBE_ARMED_PERIOD_SEC,
     probe_scan_limits,
     PROBE_ALGO_ORDER,
+    PROBE_ALGO_PIN,
+    PROBE_HUNTER_MAX_LEGS,
+    PROBE_SNIPER_MAX_LEGS,
     set_live_sleeve,
     SLEEVE_SKIP,
     _leveraged_base,
@@ -64,6 +67,8 @@ from .desk_policy import (
     probe_candle_buy_ok,
     probe_spark_buy_ok,
     probe_pop_buy_ok,
+    probe_hunter_count,
+    probe_sniper_count,
     probe_candle_day_ok,
     probe_scan_day_ok,
     probe_daily_loss_blocked,
@@ -1585,6 +1590,15 @@ class CryptoDeskMixin:
             return
         free_cash, held_now = self._cash_and_held()
         legs = probe_legs()
+        if str(algo or "") == PROBE_ALGO_PIN:
+            if probe_sniper_count(legs) >= PROBE_SNIPER_MAX_LEGS:
+                logger.info("[Крипта] щуп %s: слот снайпера занят", ticker)
+                write_probe(drop_arm=ticker)
+                return
+        elif probe_hunter_count(legs) >= PROBE_HUNTER_MAX_LEGS:
+            logger.info("[Крипта] щуп %s: слоты охотников заняты", ticker)
+            write_probe(drop_arm=ticker)
+            return
         if len(legs) >= self._probe_cap():
             while len(probe_legs()) >= self._probe_cap():
                 if not self._probe_make_room():
@@ -1628,8 +1642,11 @@ class CryptoDeskMixin:
             low=entry_low,
             algo=algo or "shelf",
         )
-        tp_px = entry_px * (1.0 + PROBE_LIMIT_TP_PCT / 100.0)
-        tp_order = self._rest_limit_sell(ticker, bought, tp_px)
+        tp_order = ""
+        tp_px = 0.0
+        if str(algo or "") != PROBE_ALGO_PIN:
+            tp_px = entry_px * (1.0 + PROBE_LIMIT_TP_PCT / 100.0)
+            tp_order = self._rest_limit_sell(ticker, bought, tp_px)
         if tp_order:
             write_probe(
                 ticker=ticker,
@@ -1972,7 +1989,7 @@ class CryptoDeskMixin:
             if ticker:
                 ranked.append((turn, ticker))
         ranked.sort(reverse=True)
-        names = [ticker for _turn, ticker in ranked[:8]]
+        names = [ticker for _turn, ticker in ranked[:16]]
         current = str(read_probe_pin().get("ticker") or "").upper()
         if current and current not in names:
             names.append(current)
@@ -2050,7 +2067,15 @@ class CryptoDeskMixin:
             day_chg=day_chg,
             day_high=day_high,
             now=time.time(),
+            ticker=ticker,
+            pin_ticker=pin if relax else "",
         )
+        if (
+            setup
+            and str(setup.get("algo") or "") != PROBE_ALGO_PIN
+            and probe_hunter_count(list(probe_legs()) + list(probe_arms())) >= PROBE_HUNTER_MAX_LEGS
+        ):
+            return False
         if not setup:
             return False
         try:
@@ -2123,15 +2148,18 @@ class CryptoDeskMixin:
             a for a in order if a not in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
         )
 
-        def _arm_slots_left() -> int:
-            left = cap - len(probe_legs()) - len(probe_arms())
+        def _book_items() -> list[dict[str, Any]]:
+            return list(probe_legs()) + list(probe_arms())
+
+        def _hunter_room() -> bool:
             if probe_is_paper():
-                return max(1, left)
-            if left > 0:
-                return left
-            if cfg().second_on and not getattr(self, "_probe_room_tried", False):
-                return 1
-            return 0
+                return True
+            return probe_hunter_count(_book_items()) < PROBE_HUNTER_MAX_LEGS
+
+        def _sniper_room() -> bool:
+            if probe_is_paper():
+                return True
+            return probe_sniper_count(_book_items()) < PROBE_SNIPER_MAX_LEGS
 
         def _try_arm_row(row: dict[str, Any], setup: dict[str, Any], bars15: list, hour: list) -> bool:
             ticker = str(row.get("ticker") or "")
@@ -2140,7 +2168,7 @@ class CryptoDeskMixin:
                 return True
             return False
 
-        if pin and _arm_slots_left() > 0:
+        if pin and _sniper_room():
             pin_row = tape_by.get(pin)
             pin_hit = False
             if pin_row:
@@ -2152,7 +2180,7 @@ class CryptoDeskMixin:
 
         # 1) Скан candle: бой — Топ-10, имитация — широкий список.
         for scan_idx, (_rank, row) in enumerate(ranked[:scan_lim]):
-            if _arm_slots_left() <= 0:
+            if not _hunter_room():
                 break
             ticker = str(row["ticker"])
             if ticker in blocked:
@@ -2163,11 +2191,11 @@ class CryptoDeskMixin:
             )
             self._probe_scan_one(row, blocked, order, cache_sec=8.0 if fast_bar else 45.0)
         # 2) Classic (impulse/…): тот же потолок, что у candle.
-        if not classic or _arm_slots_left() <= 0:
+        if not classic or not _hunter_room():
             self._note_probe_beat(cap=cap, pin=pin)
             return
         for _rank, row in ranked[:classic_lim]:
-            if _arm_slots_left() <= 0:
+            if not _hunter_room():
                 break
             ticker = str(row["ticker"])
             if ticker in blocked:

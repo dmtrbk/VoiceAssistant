@@ -22,7 +22,10 @@ DESK_ALT_SLEEVE = frozenset({
 })
 ALT_SLEEVE_MAX_PCT = 50.0
 ALT_MAX_NAMES = 2
-PROBE_MAX_LEGS = 2
+# 2 охотника (ракеты со дна) + 1 снайпер (пин). Третий слот обычным сетапам не отдаём.
+PROBE_MAX_LEGS = 3
+PROBE_HUNTER_MAX_LEGS = 2
+PROBE_SNIPER_MAX_LEGS = 1
 # BTC за сутки в минусе — не раздувать слоты (сейчас probe_max_legs сутки BTC не режет).
 PROBE_MAX_LEGS_BTC_DOWN = 2
 # Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
@@ -206,6 +209,14 @@ PROBE_PIN_LOSS_LOOKBACK_SEC = 12 * 3600
 # Крошечный срез на сильном дне (ICNT −$0.30 при +13%) пин не банит.
 PROBE_PIN_SCRATCH_IGNORE_USD = 0.50
 PROBE_PIN_SWITCH_SCORE_MULT = 1.15
+# Пин-ретест: откат 0.4–1.5% от локального хая, объём не пустой, отбой вверх.
+PROBE_PIN_PULLBACK_MIN_PCT = 0.4
+PROBE_PIN_PULLBACK_MAX_PCT = 1.5
+PROBE_PIN_VOL_MULT = 1.2
+PROBE_PIN_WICK_FRAC = 0.40
+# Снайпер дышит: взвод +1.5%, трейлинг 1.2%. −1.8% и BE +1.2% общие.
+PROBE_PIN_ARM_PCT = 1.5
+PROBE_PIN_TRAIL_PCT = 1.2
 PROBE_NIGHT_PIN_MAX_LEGS = 2
 PROBE_EMA_FAST = 20
 PROBE_EMA_SLOW = 50
@@ -216,6 +227,7 @@ PROBE_ALGO_CANDLE = "candle"
 PROBE_ALGO_IMPULSE = "impulse"
 PROBE_ALGO_SPARK = "spark"
 PROBE_ALGO_POP = "pop"
+PROBE_ALGO_PIN = "pin_pullback"
 PROBE_ALGO_GRIND = "grind"
 PROBE_ALGO_SPRINT = "sprint"
 PROBE_ALGO_SHELF = "shelf"
@@ -2287,6 +2299,8 @@ def probe_algo_params(algo: str) -> dict[str, float]:
             "hold_sec": float(PROBE_POP_HOLD_SEC),
             "chase_pct": float(PROBE_POP_CHASE_PCT),
         }
+    if name == PROBE_ALGO_PIN:
+        return {"hold_sec": 0.0, "chase_pct": float(PROBE_IMPULSE_CHASE_PCT)}
     if name == PROBE_ALGO_SPRINT:
         return {
             "hold_sec": float(PROBE_SPRINT_HOLD_SEC),
@@ -2303,6 +2317,73 @@ def probe_algo_params(algo: str) -> dict[str, float]:
     }
 
 
+def probe_pin_setup(
+    bars: list[dict[str, Any]],
+    *,
+    now: float | None = None,
+) -> dict[str, float] | None:
+    """Продолжение пина: откат 0.4–1.5% от хая 6 закрытых 5м и отбой вверх.
+
+    Полка — минимум отката. Вызывается только для запиненной монеты.
+    """
+    del now
+    if len(bars) < 7:
+        return None
+    window = bars[-7:-1]
+    forming = bars[-1]
+    try:
+        highs = [float(bar["high"]) for bar in window]
+        local_high = max(highs)
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        vols = [float(bar.get("volume") or 0) for bar in window if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if local_high <= 0 or px <= 0 or op <= 0 or hi <= 0 or lo <= 0 or not vols:
+        return None
+    pullback = (local_high - px) / local_high * 100.0
+    if pullback < PROBE_PIN_PULLBACK_MIN_PCT - 1e-12 or pullback > PROBE_PIN_PULLBACK_MAX_PCT + 1e-12:
+        return None
+    span = hi - lo
+    lower_wick = min(op, px) - lo
+    wick_ok = span > 1e-12 and lower_wick / span >= PROBE_PIN_WICK_FRAC - 1e-12
+    if not (px > op + 1e-12 or wick_ok):
+        return None
+    typical = _median(vols)
+    if typical <= 0 or vol < typical * PROBE_PIN_VOL_MULT - 1e-12:
+        return None
+    start = highs.index(local_high)
+    tail = list(window[start:]) + [forming]
+    try:
+        shelf = min(float(bar["low"]) for bar in tail)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if shelf <= 0 or px <= shelf:
+        return None
+    return {"shelf": shelf, "price": px, "pin": 1.0}
+
+
+def probe_hunter_count(items: list[dict[str, Any]] | None) -> int:
+    """Ноги и взводы обычных сетапов. Снайпер pin_pullback не считается."""
+    return sum(
+        1
+        for item in items or []
+        if str(item.get("algo") or "") != PROBE_ALGO_PIN
+    )
+
+
+def probe_sniper_count(items: list[dict[str, Any]] | None) -> int:
+    """Ноги и взводы сетапа пина."""
+    return sum(
+        1
+        for item in items or []
+        if str(item.get("algo") or "") == PROBE_ALGO_PIN
+    )
+
+
 def probe_pick_setup(
     bars15: list[dict[str, Any]],
     bars5: list[dict[str, Any]] | None = None,
@@ -2311,11 +2392,22 @@ def probe_pick_setup(
     day_chg: float | None = None,
     day_high: float | None = None,
     now: float | None = None,
+    ticker: str = "",
+    pin_ticker: str = "",
 ) -> dict[str, Any] | None:
     """Первый сработавший по order. Живой стол: ступенька, выстрел, spark, pop.
 
-    Sprint/shelf/grind — только явный order= в тестах.
+    Для запиненной монеты сначала pin_pullback. Sprint/shelf/grind — только явный order=.
     """
+    if (
+        pin_ticker
+        and ticker
+        and str(ticker).upper() == str(pin_ticker).upper()
+    ):
+        pin_setup = probe_pin_setup(bars5 or [], now=now)
+        if pin_setup:
+            params = probe_algo_params(PROBE_ALGO_PIN)
+            return {**pin_setup, "algo": PROBE_ALGO_PIN, **params}
     seq = tuple(order or PROBE_ALGO_ORDER)
     for algo in seq:
         name = str(algo or "").strip().lower()
@@ -2391,7 +2483,7 @@ def probe_trends_ok(
     Grind: бычий час. Неделя не слабее −5% (ракеты этот фильтр не проходят — вход сразу).
     """
     name = str(algo or "").strip().lower()
-    if name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+    if name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP, PROBE_ALGO_PIN}:
         return True
     if name == PROBE_ALGO_CANDLE:
         if trend15 == "bear" and trend1h == "bear":
@@ -2431,7 +2523,7 @@ def probe_arm_action(
         return "drop"
     # Impulse/spark/pop не снимаем по тренду на холде: CAP neutral убивал вход через 8 с.
     # Candle: bear — снять, neutral можно. Остальные алгоритмы ждут bull.
-    if name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+    if name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP, PROBE_ALGO_PIN}:
         pass
     elif name == PROBE_ALGO_CANDLE:
         if trend15 == "bear":
@@ -2507,15 +2599,19 @@ def probe_exit_reason(
         else:
             return "полка"
     high = max(float(peak or 0), px)
-    arm_pct = exit_trap_arm_pct(entry=ent, qty=qty, extra_usd=probe_trap_extra_usd(name))
     peak_gain = (high / ent - 1.0) * 100.0 if ent > 0 else 0.0
     exit_px = min(px, float(bid)) if float(bid or 0) > 0 else px
     exit_gain = (exit_px / ent - 1.0) * 100.0 if ent > 0 else 0.0
-    pullback_pct = (
-        POCKET_EXIT_WALL_PULLBACK_PCT
-        if (obi is not None and float(obi) <= EXIT_TRAP_BEAR_OBI + 1e-12)
-        else probe_trap_pullback_pct(name, peak_gain)
-    )
+    if name == PROBE_ALGO_PIN:
+        arm_pct = float(PROBE_PIN_ARM_PCT)
+        pullback_pct = float(PROBE_PIN_TRAIL_PCT)
+    else:
+        arm_pct = exit_trap_arm_pct(entry=ent, qty=qty, extra_usd=probe_trap_extra_usd(name))
+        pullback_pct = (
+            POCKET_EXIT_WALL_PULLBACK_PCT
+            if (obi is not None and float(obi) <= EXIT_TRAP_BEAR_OBI + 1e-12)
+            else probe_trap_pullback_pct(name, peak_gain)
+        )
     if (
         peak_gain >= arm_pct - 1e-6
         and exit_px <= high * (1.0 - pullback_pct / 100.0) + 1e-12
