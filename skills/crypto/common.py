@@ -968,6 +968,8 @@ def _probe_leg_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
         "low": _num("low"),
         "ts": _num("ts"),
         "algo": str(raw.get("algo") or "").strip().lower(),
+        "tp_order": str(raw.get("tp_order") or ""),
+        "tp_px": _num("tp_px"),
     }
 
 
@@ -1122,6 +1124,8 @@ def write_probe(
     low: float = 0.0,
     ts: float = 0.0,
     algo: str = "",
+    tp_order: str | None = None,
+    tp_px: float | None = None,
     drop: str = "",
     drop_arm: str = "",
     clear_arm: bool = False,
@@ -1155,10 +1159,14 @@ def write_probe(
     if name and float(qty) > 0 and float(entry) > 0:
         prev_algo = ""
         prev_ts = 0.0
+        prev_tp_order = ""
+        prev_tp_px = 0.0
         for leg in legs:
             if leg["ticker"] == name:
                 prev_algo = str(leg.get("algo") or "")
                 prev_ts = float(leg.get("ts") or 0)
+                prev_tp_order = str(leg.get("tp_order") or "")
+                prev_tp_px = float(leg.get("tp_px") or 0)
                 break
         legs = [leg for leg in legs if leg["ticker"] != name]
         legs.append({
@@ -1171,6 +1179,8 @@ def write_probe(
             "low": float(low or 0),
             "ts": float(ts or prev_ts or time.time()),
             "algo": str(algo or prev_algo or "").strip().lower(),
+            "tp_order": prev_tp_order if tp_order is None else str(tp_order),
+            "tp_px": prev_tp_px if tp_px is None else float(tp_px or 0),
         })
         arms = [arm for arm in arms if arm["ticker"] != name]
     arm_name = _normalize_ticker(arm_ticker)

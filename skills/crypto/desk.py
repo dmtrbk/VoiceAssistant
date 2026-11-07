@@ -39,6 +39,7 @@ from .common import (
 )
 from .desk_policy import (
     PROBE_ENTRY_HOLD_SEC,
+    PROBE_LIMIT_TP_PCT,
     probe_period_sec,
     probe_scan_algo_order,
     PROBE_ARMED_PERIOD_SEC,
@@ -1071,6 +1072,36 @@ class CryptoDeskMixin:
         if paper or held < cap or (cfg().second_on and not paper):
             self._probe_scan()
 
+    def _probe_journal_limit(self, ticker: str, qty: float, quote: float, fee: float) -> None:
+        """Исполненная лимитка — продажа «вершина», не стоп."""
+        self._pending_exit_reason = "вершина"
+        self._journal_trade(ticker, "Sell", quote, quote / qty, ticker, fee_usd=fee)
+        logger.info("[Крипта] щуп %s: лимитный тейк %.6g по %.4g", ticker, qty, quote / qty)
+
+    def _probe_limit_filled(self, state: dict[str, Any]) -> bool:
+        """Лимитка уже забрана целиком — ногу закрываем без маркета."""
+        order_id = str(state.get("tp_order") or "")
+        ticker = str(state.get("ticker") or "")
+        if not order_id or not ticker:
+            return False
+        row = self._order_state(ticker, order_id)
+        if str(row.get("orderStatus") or "") != "Filled":
+            return False
+        try:
+            done_qty = float(row.get("cumExecQty") or 0)
+            done_quote = float(row.get("cumExecValue") or 0)
+        except (TypeError, ValueError):
+            return False
+        if done_qty <= 0 or done_quote <= 0:
+            return False
+        from .trades import _cum_exec_fee_usdt
+
+        self._probe_journal_limit(
+            ticker, done_qty, done_quote, _cum_exec_fee_usdt(row, ticker, "Sell"),
+        )
+        write_probe(drop=ticker)
+        return True
+
     def _probe_exit(self, state: dict[str, Any]) -> None:
         ticker = str(state.get("ticker") or "")
         try:
@@ -1112,6 +1143,8 @@ class CryptoDeskMixin:
             obi_fn = getattr(self, "_orderbook_obi", None)
             if callable(obi_fn):
                 obi = obi_fn(ticker)
+        if self._probe_limit_filled(state):
+            return
         reason = probe_exit_reason(
             price=price,
             entry=entry,
@@ -1129,6 +1162,22 @@ class CryptoDeskMixin:
         )
         if not reason:
             return
+        # Висящий тейк сам забирает «вершину». Снимаем его только перед стопом, срезом или передачей.
+        tp_order = str(state.get("tp_order") or "")
+        if reason == "вершина" and tp_order:
+            return
+        if tp_order:
+            ok, done_qty, done_quote, done_fee = self._cancel_limit_confirmed(ticker, tp_order)
+            if not ok:
+                logger.info("[Крипта] щуп %s: лимитка не снята, маркет не ставлю", ticker)
+                return
+            if done_qty > 0 and done_quote > 0:
+                self._probe_journal_limit(ticker, done_qty, done_quote, done_fee)
+            qty = max(0.0, qty - done_qty)
+            if qty * price < _MIN_QUOTE:
+                write_probe(drop=ticker)
+                logger.info("[Крипта] щуп %s: тейк закрыл ногу", ticker)
+                return
         shelf = float(state.get("shelf") or 0)
         # Мягкий выход → карман2 только если уже был реальный плюс (ловушка),
         # либо если нога застряла в щупе («застой») — освобождаем слот щупа под минимальный выход в кармане2.
@@ -1191,7 +1240,8 @@ class CryptoDeskMixin:
             write_probe(drop=ticker)
             return
         seen = getattr(self, "_last_fill", None)
-        use_maker = not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
+        # После лимитного тейка защита только маркетом: короткая лимитка снова подвесит стоп.
+        use_maker = not tp_order and not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
         self._pending_exit_reason = str(reason or "")
         try:
             self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker)
@@ -1211,6 +1261,8 @@ class CryptoDeskMixin:
                 arm_px=float(state.get("arm_px") or 0),
                 peak=float(state.get("peak") or 0),
                 low=float(state.get("low") or 0),
+                tp_order="",
+                tp_px=0.0,
             )
             logger.info("[Крипта] щуп %s ещё %.6g монет после неполной продажи", ticker, left)
             return
@@ -1567,16 +1619,32 @@ class CryptoDeskMixin:
         bought = after - before
         if bought <= 0:
             return
+        entry_px = spent_quote / bought
         write_probe(
             ticker=ticker,
             qty=bought,
-            entry=spent_quote / bought,
+            entry=entry_px,
             shelf=shelf,
             arm_px=arm_px or price,
             peak=price,
             low=entry_low,
             algo=algo or "shelf",
         )
+        tp_px = entry_px * (1.0 + PROBE_LIMIT_TP_PCT / 100.0)
+        tp_order = self._rest_limit_sell(ticker, bought, tp_px)
+        if tp_order:
+            write_probe(
+                ticker=ticker,
+                qty=bought,
+                entry=entry_px,
+                shelf=shelf,
+                arm_px=arm_px or price,
+                peak=price,
+                low=entry_low,
+                algo=algo or "shelf",
+                tp_order=tp_order,
+                tp_px=tp_px,
+            )
         tag = ""
         if len(legs) >= 2 and want >= PROBE_BOOST_USD - 1e-6:
             tag = " (3я, boost $60)"

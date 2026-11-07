@@ -3327,9 +3327,11 @@ class TestDeskAutoUsesScore(unittest.TestCase):
     def test_probe_second_leg_keeps_first(self):
         from skills.crypto.common import probe_legs, write_probe, read_probe
 
-        write_probe(ticker="DOOD", qty=20.0, entry=1.5, shelf=1.0, peak=1.5, arm_px=1.4)
+        write_probe(ticker="DOOD", qty=20.0, entry=1.5, shelf=1.0, peak=1.5, arm_px=1.4, tp_order="oid", tp_px=1.5675)
         write_probe(arm_ticker="CAP", arm_shelf=0.09, arm_ts=1.0, arm_px=0.1)
         write_probe(ticker="DOOD", qty=20.0, entry=1.5, shelf=1.0, peak=1.6, arm_px=1.4)
+        self.assertEqual(probe_legs()[0]["tp_order"], "oid")
+        self.assertAlmostEqual(probe_legs()[0]["tp_px"], 1.5675)
         armed = read_probe()
         self.assertEqual(armed["arm_ticker"], "CAP")
         self.assertAlmostEqual(armed["arm_px"], 0.1)
@@ -3997,6 +3999,43 @@ class TestManualTrap(unittest.TestCase):
         self.skill._desk_bought = {"DOOD"}
         self.skill._manual_holds = {"BTC", "ETH"}
         self.skill._api_key = "x"
+
+    def test_probe_market_stop_waits_until_limit_is_cancelled(self):
+        from skills.crypto.common import probe_legs, write_probe
+
+        write_probe(
+            ticker="SPX",
+            qty=100.0,
+            entry=0.41,
+            shelf=0.402,
+            arm_px=0.409,
+            peak=0.409,
+            low=0.408,
+            algo=policy.PROBE_ALGO_GRIND,
+            tp_order="lim-1",
+            tp_px=0.428,
+        )
+        placed: list[tuple] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, maker))
+            return f"ok {ticker}"
+
+        bars = [{"high": 0.41, "low": 0.40, "close": 0.401, "volume": 1.0} for _ in range(80)]
+        with (
+            patch.object(self.skill, "_ticker", return_value={"price": 0.401, "chg": -1.0}),
+            patch.object(self.skill, "_probe_bars", return_value=bars),
+            patch.object(self.skill, "_order_state", return_value={}),
+            patch.object(
+                self.skill, "_cancel_limit_confirmed", return_value=(False, 0.0, 0.0, 0.0),
+            ),
+            patch.object(self.skill, "_cash_and_held", return_value=(100.0, {"SPX": {"qty": 100.0}})),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.desk.ma_trend", return_value="bear"),
+        ):
+            self.skill._probe_exit(probe_legs()[0])
+        self.assertEqual(placed, [])
+        self.assertEqual(probe_legs()[0]["ticker"], "SPX")
 
     def test_free_qty_subtracts_managed(self):
         self.assertAlmostEqual(

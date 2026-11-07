@@ -313,6 +313,75 @@ class CryptoTradesMixin:
             return 0.0, 0.0, 0.0
         return max(qty, 0.0), max(quote, 0.0), _cum_exec_fee_usdt(state, ticker, side)
 
+    def _rest_limit_sell(self, ticker: str, qty: float, price: float) -> str:
+        """Лимитная продажа PostOnly, остаётся в стакане. Пустая строка — не встала."""
+        ticker = ticker.upper()
+        try:
+            filters = self._filters(ticker)
+            book = self._book(ticker)
+            ask = float(book.get("ask") or 0)
+            # Ниже аска PostOnly снимут: если ход уже выше тейка, встаём на аск.
+            raw_px = max(float(price or 0), ask)
+            if raw_px <= 0:
+                return ""
+            price_s = common._price_str(raw_px, filters["tick"], round_up=True)
+            px = float(price_s)
+            qty_s = _qty_str(qty, filters["step"])
+            lot = float(qty_s or 0)
+            if lot <= 0 or lot * px + 1e-9 < max(filters["min_amt"], _MIN_QUOTE):
+                return ""
+            data = self._signed(
+                "POST",
+                "/v5/order/create",
+                {
+                    "category": "spot",
+                    "symbol": self._symbol(ticker),
+                    "side": "Sell",
+                    "orderType": "Limit",
+                    "timeInForce": "PostOnly",
+                    "isLeverage": 0,
+                    "qty": qty_s,
+                    "price": price_s,
+                },
+            )
+            order_id = str((data.get("result") or {}).get("orderId") or "")
+            if order_id:
+                logger.info("[Крипта] лимитный тейк %s: %.6g по %s", ticker, lot, price_s)
+            return order_id
+        except Exception as exc:
+            logger.info("[Крипта] лимитный тейк %s не встал: %s", ticker, exc)
+            return ""
+
+    def _cancel_limit_confirmed(
+        self, ticker: str, order_id: str,
+    ) -> tuple[bool, float, float, float]:
+        """Снять лимитку и дождаться конечного статуса.
+
+        False — заявка ещё жива, маркет ставить нельзя.
+        Возвращает (подтверждено, исполнено монет, сумма, комиссия).
+        """
+        terminal = {"Filled", "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"}
+        ticker = ticker.upper()
+        state = self._order_state(ticker, order_id)
+        status = str(state.get("orderStatus") or "")
+        if status not in terminal:
+            self._cancel_order(ticker, order_id)
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                time.sleep(0.3)
+                state = self._order_state(ticker, order_id)
+                status = str(state.get("orderStatus") or "")
+                if status in terminal:
+                    break
+        if status not in terminal:
+            return False, 0.0, 0.0, 0.0
+        try:
+            done_qty = max(0.0, float(state.get("cumExecQty") or 0))
+            done_quote = max(0.0, float(state.get("cumExecValue") or 0))
+        except (TypeError, ValueError):
+            done_qty = done_quote = 0.0
+        return True, done_qty, done_quote, _cum_exec_fee_usdt(state, ticker, "Sell")
+
     def _place_order(
         self,
         ticker: str,
