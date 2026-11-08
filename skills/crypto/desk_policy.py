@@ -189,7 +189,7 @@ PROBE_REENTRY_HOURS = 0.75
 PROBE_REENTRY_BREAKOUT_PCT = 2.5
 # Мягкий автопин: смотрит имя первым, слот не занимает.
 PROBE_PIN_ON = True
-PROBE_PIN_MIN_TURNOVER_USD = 1_200_000.0
+PROBE_PIN_MIN_TURNOVER_USD = 600_000.0
 PROBE_PIN_MIN_DAY_PCT = 7.0
 PROBE_PIN_MAX_DAY_PCT = 35.0
 # Перехай суток — нормальный сетап. Глубже −0.5% от записанного хая уже догон.
@@ -248,10 +248,10 @@ PROBE_CANDLE_MAX_BODY_PCT = 2.0
 # продавленные снизу фитили отсекаются, сильный зелёный бар у верха — нет.
 PROBE_CANDLE_MIN_BAR_POS = 0.35
 PROBE_CANDLE_MAX_BAR_POS = 0.98
-# Верхний фитиль ≤ 0.90% от open, отступ от кончика high ≥ 0.25%; нижний пролив под open ≤ 0.80%.
+# Верхний фитиль ≤ 0.90% от open. Кончик — отступ 0.05%; хай без фитиля не отмена.
 PROBE_CANDLE_MAX_WICK_PCT = 0.90
 PROBE_CANDLE_MAX_DIP_PCT = 0.80
-PROBE_CANDLE_TIP_GAP_PCT = 0.25
+PROBE_CANDLE_TIP_GAP_PCT = 0.05
 # В первые минуты 5м свечи нормируем порог объёма по доле прошедшего времени (min 0.30 бара).
 PROBE_CANDLE_MIN_ELAPSED_FRAC = 0.30
 # Касание open — фитиль той же свечи, не провал. Полка — только уход под open.
@@ -297,8 +297,8 @@ PROBE_STAIR2_VOL2_MULT = 1.6
 PROBE_STAIR2_VOL_MIN_MULT = 1.2
 PROBE_STAIR2_MIN_1H_POS = 0.88
 # Защита от проскальзывания по пустому стакану перед рыночной покупкой щупа (GROVE 0.007281->0.007409):
-PROBE_MAX_SPREAD_PCT = 0.35
-PROBE_MAX_ASK_SLIP_PCT = 0.45
+PROBE_MAX_SPREAD_PCT = 0.55
+PROBE_MAX_ASK_SLIP_PCT = 0.65
 # OBI на каждом входе. Нет котировки стакана — не блокируем.
 PROBE_MIN_ENTRY_OBI = 0.55
 # Жёсткий режим (бывшие паузы: полка, час, серия, день): щуп не молчит, фильтры туже.
@@ -324,8 +324,8 @@ PROBE_IMPULSE_MAX_BAR_POS = 0.99
 PROBE_IMPULSE_TIP_GAP_PCT = 0.05
 # Spark: одиночная 5м в начале бара. Покупка сразу (hold 0): иначе 6–10с до buy и tip.
 # Pos до хая бара — ранняя свеча часто закрывается у high.
-# Spark на любой монете: 3× типичного. Иначе за 45 с хватает 0.45× и это шум боковика.
-PROBE_SPARK_VOL_MULT = 3.0
+# Spark на любой монете: 2.2× типичного. 1.5× шумит, 3× глушит импульс.
+PROBE_SPARK_VOL_MULT = 2.2
 PROBE_SPARK_MAX_ELAPSED_SEC = 120.0
 PROBE_SPARK_MAX_BAR_POS = 1.0
 PROBE_SPARK_HOLD_SEC = 0.0
@@ -334,7 +334,7 @@ PROBE_SPARK_CHASE_PCT = 1.2
 PROBE_POP_MIN_BODY_PCT = 1.5
 PROBE_POP_MAX_BODY_PCT = 8.5
 PROBE_POP_MAX_ELAPSED_SEC = 300.0
-PROBE_POP_VOL_MULT = 3.0
+PROBE_POP_VOL_MULT = 2.2
 # Дно (сутки ≤ +2%): шум 1.5×/тело 1.5% кормит комиссию. Ракета даёт 3× и тело от 2.3%.
 PROBE_BOTTOM_MAX_DAY_PCT = 2.0
 PROBE_BOTTOM_VOL_MULT = 3.0
@@ -1498,9 +1498,11 @@ def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_o
     upper_wick = (hi - px) / op * 100.0
     if upper_wick > PROBE_CANDLE_MAX_WICK_PCT + 1e-12:
         return False
-    tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
-    if px > tip_cap + 1e-12:
-        return False
+    # Цена на хае и фитиля нет — это старт импульса, не покупка в откат с кончика.
+    if upper_wick > 1e-9:
+        tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
+        if px > tip_cap + 1e-12:
+            return False
     # Глубокий пролив под open — не чистый старт восходящей свечи.
     if lo < op:
         dip = (op - lo) / op * 100.0
@@ -1728,9 +1730,11 @@ def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_op
         and upper_wick <= PROBE_STAIR_MAX_WICK_PCT + 1e-12
         and pos >= PROBE_STAIR_MIN_BAR_POS - 1e-12
     )
-    tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
-    if px > tip_cap + 1e-12 and not tight_stair:
-        return False
+    # Хай без фитиля не считаем кончиком: у старта импульса цена и есть high.
+    if upper_wick > 1e-9:
+        tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
+        if px > tip_cap + 1e-12 and not tight_stair:
+            return False
     if lo > 0 and hi > lo + 1e-12:
         if pos < PROBE_CANDLE_MIN_BAR_POS - 1e-12:
             return False

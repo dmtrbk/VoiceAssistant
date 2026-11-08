@@ -1013,7 +1013,7 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertIsNone(
             policy.probe_pop_setup(
-                base5 + [{**pop_bar, "volume": 16.0}], now=1180.0, day_chg=0.5
+                base5 + [{**pop_bar, "volume": 12.0}], now=1180.0, day_chg=0.5
             )
         )
         self.assertIsNone(
@@ -1143,6 +1143,14 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(
             policy.probe_candle_buy_ok(1.005, 1.0055, 1.000, 1.000)
         )
+        # PIEVERSE: цена на хае, фитиля нет — не кончик.
+        self.assertTrue(
+            policy.probe_candle_buy_ok(1.490, 1.490, 1.489, 1.489)
+        )
+        # Крошечный фитиль ближе 0.05% к хаю по-прежнему кончик.
+        self.assertFalse(
+            policy.probe_candle_buy_ok(1.4897, 1.490, 1.489, 1.489)
+        )
         # Контроль спреда и проскальзывания ask (GROVE: 0.007281 -> ask 0.007409).
         self.assertTrue(
             policy.probe_book_buy_ok(bid=0.00727, ask=0.00729, arm_px=0.007281)
@@ -1152,6 +1160,11 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertFalse(
             policy.probe_book_buy_ok(bid=0.00739, ask=0.007409, arm_px=0.007281)
+        )
+        self.assertEqual(policy.PROBE_MAX_SPREAD_PCT, 0.55)
+        self.assertEqual(policy.PROBE_MAX_ASK_SLIP_PCT, 0.65)
+        self.assertTrue(
+            policy.probe_book_buy_ok(bid=0.04051, ask=0.04071, arm_px=0.0405)
         )
         self.assertEqual(policy.PROBE_MIN_ENTRY_OBI, 0.55)
         self.assertTrue(policy.probe_entry_obi_ok(None))
@@ -2553,8 +2566,19 @@ class TestJournalChurnAndDaily(unittest.TestCase):
             "TA",
             crypto_journal.scratch_reentry_tickers(scratch, now=now + 21 * 60),
         )
-        self.assertEqual(policy.PROBE_SPARK_VOL_MULT, 3.0)
-        self.assertEqual(policy.PROBE_POP_VOL_MULT, 3.0)
+        self.assertEqual(policy.PROBE_SPARK_VOL_MULT, 2.2)
+        self.assertEqual(policy.PROBE_POP_VOL_MULT, 2.2)
+        self.assertEqual(policy.PROBE_PIN_MIN_TURNOVER_USD, 600_000.0)
+        self.assertTrue(
+            policy.probe_pin_row_ok(
+                {"ticker": "TA", "chg": 18.0, "turnover": 600_000, "price": 0.10, "high": 0.101}
+            )
+        )
+        self.assertFalse(
+            policy.probe_pin_row_ok(
+                {"ticker": "TA", "chg": 18.0, "turnover": 599_000, "price": 0.10, "high": 0.101}
+            )
+        )
         self.assertEqual(policy.PROBE_SCRATCH_COOLDOWN_SEC, 20 * 60)
         self.assertIn("FOGO", crypto_journal.shelf_reentry_tickers(shelf, now=now))
         self.assertNotIn("CAP", crypto_journal.shelf_reentry_tickers(shelf, now=now))
