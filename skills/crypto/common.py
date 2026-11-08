@@ -767,6 +767,8 @@ def write_second_pocket_legs(
             row["low"] = float(leg["low"])
         if bool(leg.get("scratch")):
             row["scratch"] = True
+        if bool(leg.get("unwind")):
+            row["unwind"] = True
         clean.append(row)
     if not clean:
         try:
