@@ -1481,7 +1481,7 @@ def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
 
 
 def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
-    """Начало восходящей свечи: тело 0.6..2.0% от open, цена до верхней части бара без слива."""
+    """Начало восходящей свечи: сильный бар у хая без фитиля слива не режем."""
     px = float(price or 0)
     hi = float(live_high or 0)
     lo = float(live_low or 0)
@@ -1494,12 +1494,11 @@ def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_o
     min_body = probe_candle_min_body_pct()
     if body < min_body - 1e-12 or body > probe_candle_max_body_pct() + 1e-12:
         return False
-    # Откат сверху от high свечи (верхний фитиль) — признак уже продавленной свечи.
     upper_wick = (hi - px) / op * 100.0
     if upper_wick > PROBE_CANDLE_MAX_WICK_PCT + 1e-12:
         return False
-    # Цена на хае и фитиля нет — это старт импульса, не покупка в откат с кончика.
-    if upper_wick > 1e-9:
+    # tip_cap только при фитиле слива. Хай без фитиля (px == hi) не режем.
+    if upper_wick > 0.15:
         tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
         if px > tip_cap + 1e-12:
             return False
@@ -1705,7 +1704,7 @@ def probe_pop_setup(
 
 
 def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
-    """Перед buy после arm: свеча всё ещё восходящая, не у самого кончика (кроме плотной ступеньки) и без слива."""
+    """Перед buy candle: не режем сильный бар у хая, если у него нет верхнего фитиля слива."""
     px = float(price or 0)
     hi = float(live_high or 0)
     lo = float(live_low or 0)
@@ -1724,17 +1723,18 @@ def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_op
     if body > probe_candle_max_body_pct() + 1e-12:
         return False
     upper_wick = (hi - px) / op * 100.0
+    # Фитиль до 0.15% — цена у хая (PIEVERSE). tip_cap тут физически запрещает px == hi.
+    if upper_wick <= 0.15:
+        return True
     pos = (px - lo) / (hi - lo) if (lo > 0 and hi > lo + 1e-12) else 1.0
     tight_stair = (
         PROBE_STAIR_MIN_BODY_PCT <= body <= PROBE_STAIR_MAX_BODY_PCT + 1e-12
         and upper_wick <= PROBE_STAIR_MAX_WICK_PCT + 1e-12
         and pos >= PROBE_STAIR_MIN_BAR_POS - 1e-12
     )
-    # Хай без фитиля не считаем кончиком: у старта импульса цена и есть high.
-    if upper_wick > 1e-9:
-        tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
-        if px > tip_cap + 1e-12 and not tight_stair:
-            return False
+    tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
+    if px > tip_cap + 1e-12 and not tight_stair:
+        return False
     if lo > 0 and hi > lo + 1e-12:
         if pos < PROBE_CANDLE_MIN_BAR_POS - 1e-12:
             return False

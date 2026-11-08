@@ -1143,12 +1143,12 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(
             policy.probe_candle_buy_ok(1.005, 1.0055, 1.000, 1.000)
         )
-        # PIEVERSE: цена на хае, фитиля нет — не кончик.
+        # PIEVERSE: px == hi, фитиль 0. tip_cap = hi*0.9995 всегда ниже цены.
         self.assertTrue(
             policy.probe_candle_buy_ok(1.490, 1.490, 1.489, 1.489)
         )
-        # Крошечный фитиль ближе 0.05% к хаю по-прежнему кончик.
-        self.assertFalse(
+        # Фитиль 0.02% тоже у хая: порог пропуска 0.15%.
+        self.assertTrue(
             policy.probe_candle_buy_ok(1.4897, 1.490, 1.489, 1.489)
         )
         # Контроль спреда и проскальзывания ask (GROVE: 0.007281 -> ask 0.007409).
