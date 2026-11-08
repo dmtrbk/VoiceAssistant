@@ -13,6 +13,8 @@ _YEKT = timezone(timedelta(hours=5))
 
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _PROBE_TUNE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe_tune.json")
+_DAILY_META_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_daily.json")
+_NIGHT_LIFT_KEY = "probe_night_lift_until"
 
 # Рукав альтов: до 50% счёта, 2 слота. Карман SOL 25%. Остаток — кэш и щупы.
 # Берём только на провале у нижней полосы.
@@ -742,9 +744,52 @@ def probe_should_handoff(reason: str | None) -> bool:
     return str(reason or "") in PROBE_HANDOFF_REASONS
 
 
+def _read_daily_meta_file() -> dict[str, Any]:
+    if not os.path.isfile(_DAILY_META_PATH):
+        return {}
+    try:
+        with open(_DAILY_META_PATH, encoding="utf-8") as handle:
+            raw = json.load(handle)
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_daily_meta_file(payload: dict[str, Any]) -> None:
+    tmp_path = _DAILY_META_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, _DAILY_META_PATH)
+
+
+def probe_night_lift_until(now: float | None = None) -> float:
+    """До какого unix-ts ночной фильтр снят вручную. 0 — не снят."""
+    del now
+    try:
+        return float(_read_daily_meta_file().get(_NIGHT_LIFT_KEY) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def lift_probe_night(*, hours: float = 1.0, now: float | None = None) -> float:
+    """Снять ночной узкий фильтр на hours часов. Возвращает until."""
+    ts = float(now if now is not None else time.time())
+    until = ts + max(0.0, float(hours)) * 3600.0
+    meta = _read_daily_meta_file()
+    meta[_NIGHT_LIFT_KEY] = until
+    _write_daily_meta_file(meta)
+    return until
+
+
 def probe_night_halted(now: float | None = None) -> bool:
-    """Ночное окно щупа 23:00–06:00 YEKT: не стоп, а узкий фильтр (сильный сетап + $250k)."""
+    """Ночное окно щупа 23:00–06:00 YEKT: не стоп, а узкий фильтр (сильный сетап + оборот).
+
+    Ручной lift_probe_night() временно считает окно дневным.
+    """
     ts = time.time() if now is None else float(now)
+    until = probe_night_lift_until()
+    if until > ts + 1e-9:
+        return False
     hr = datetime.fromtimestamp(ts, _YEKT).hour
     return hr >= PROBE_NIGHT_START_HOUR_YEKT or hr < PROBE_NIGHT_END_HOUR_YEKT
 

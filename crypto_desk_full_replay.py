@@ -835,8 +835,9 @@ def main() -> int:
                 price = prices.get(ticker) or 0
                 day = day_chg_at(series[ticker]["15"], ts, price)
                 week = week_chg_at(series[ticker]["60"], ts, price)
-                # Сетка 5м. now внутри бара: spark (≤120с) и pop (≤300с) видят close.
-                seen_at = ts + 90.0
+                # Честный реплей: сетка = закрытие 5м. OHLC бара ts уже известны.
+                # Без mid-bar look-ahead (раньше ts+90 видел high/low будущего бара).
+                seen_at = float(ts) + 300.0
                 bars5_setup = [
                     {
                         "open": float(b.get("open") or b["close"]),
@@ -870,6 +871,7 @@ def main() -> int:
                 hold = float(setup["hold_sec"]) if setup.get("hold_sec") is not None else 90.0
                 live5 = bars5[-1]
                 elapsed = seen_at - float(live5.get("ts") or ts)
+                # Spark (≤120с) на закрытии бара честно молчит — без 1м данных mid-bar не моделируем.
                 if algo == P.PROBE_ALGO_POP and not probe_pop_buy_ok(
                     price,
                     float(live5.get("high") or 0),
@@ -893,7 +895,7 @@ def main() -> int:
                     float(live5.get("open") or 0),
                 ):
                     continue
-                # hold 0..30с в бою покупается в том же цикле. На сетке 5м — в этом баре.
+                # hold 0..30с в бою покупается в том же цикле. На сетке 5м — на закрытии бара.
                 if hold <= 30.0:
                     if book.cash < probe_usd * 0.5:
                         continue

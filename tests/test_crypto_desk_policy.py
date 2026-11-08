@@ -645,6 +645,17 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_setup_ok_now(night_candle, now=night_ts, turnover=5_000_000)
         )
+        # Ручной lift на час — ночь как день (слабый candle тоже ок).
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = os.path.join(tmp, "daily.json")
+            with patch.object(policy, "_DAILY_META_PATH", daily):
+                until = policy.lift_probe_night(hours=1.0, now=night_ts)
+                self.assertGreater(until, night_ts)
+                self.assertFalse(policy.probe_night_halted(night_ts))
+                self.assertTrue(policy.probe_night_halted(night_ts + 3601))
+                self.assertTrue(
+                    policy.probe_setup_ok_now(night_candle, now=night_ts, turnover=200_000)
+                )
         night_spark = {"shelf": 1.0, "price": 1.01, "spark": 1.0, "algo": "spark"}
         self.assertTrue(
             policy.probe_setup_ok_now(night_spark, now=night_ts, turnover=600_000)
@@ -2699,7 +2710,7 @@ class TestJournalChurnAndDaily(unittest.TestCase):
 
 
 class TestMakerOrders(unittest.TestCase):
-    """Лимитные заявки стола: maker 0.1% вместо taker 0.18%, остаток добираем рыночной."""
+    """Лимитные заявки стола: maker 0.1%, остаток — Limit IOC с потолком slip."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -2726,9 +2737,21 @@ class TestMakerOrders(unittest.TestCase):
             p = patch.object(self.skill, target, **kwargs)
             p.start()
             self.addCleanup(p.stop)
-        p = patch("skills.crypto.trades.time.sleep")
-        p.start()
-        self.addCleanup(p.stop)
+        self._clock = {"t": 1_000_000.0}
+
+        def fake_time():
+            return self._clock["t"]
+
+        def fake_sleep(dt):
+            self._clock["t"] += float(dt)
+
+        for target, fn in (
+            ("skills.crypto.trades.time.time", fake_time),
+            ("skills.crypto.trades.time.sleep", fake_sleep),
+        ):
+            p = patch(target, side_effect=fn)
+            p.start()
+            self.addCleanup(p.stop)
 
     def _signed(self, method, path, params=None):
         if path == "/v5/order/create":
@@ -2751,25 +2774,59 @@ class TestMakerOrders(unittest.TestCase):
         self.assertEqual(self.bodies[0]["price"], "99.99")
         self.assertIn("26", phrase)
 
-    def test_partial_fill_tops_up_with_market(self):
+    def test_partial_fill_tops_up_with_ioc(self):
         self.states = [
             {"orderStatus": "PartiallyFilled", "cumExecQty": "0.10", "cumExecValue": "10.0"},
             {"orderStatus": "Cancelled", "cumExecQty": "0.10", "cumExecValue": "10.0"},
-            {"orderStatus": "Filled", "cumExecQty": "0.16", "cumExecValue": "16.0"},
+            {"orderStatus": "Filled", "cumExecQty": "0.15", "cumExecValue": "16.0"},
         ]
         self._run("Buy", quote_usdt=26.0)
-        self.assertEqual([b["orderType"] for b in self.bodies], ["Limit", "Market"])
-        self.assertAlmostEqual(float(self.bodies[1]["qty"]), 16.0, places=2)
+        self.assertEqual([b["orderType"] for b in self.bodies], ["Limit", "Limit"])
+        self.assertEqual(self.bodies[0]["timeInForce"], "PostOnly")
+        self.assertEqual(self.bodies[1]["timeInForce"], "IOC")
+        # Потолок ask + 0.35%, qty в базе от остатка quote.
+        self.assertEqual(self.bodies[1]["price"], "100.37")
+        self.assertAlmostEqual(float(self.bodies[1]["qty"]), 0.15, places=2)
 
-    def test_unfilled_limit_falls_back_to_market(self):
+    def test_unfilled_limit_falls_back_to_ioc(self):
         self.states = [
             {"orderStatus": "Cancelled", "cumExecQty": "0", "cumExecValue": "0"},
             {"orderStatus": "Filled", "cumExecQty": "0.26", "cumExecValue": "26.0"},
         ]
         self._run("Sell", base_qty=0.26, price=100.0)
-        self.assertEqual([b["orderType"] for b in self.bodies], ["Limit", "Market"])
-        self.assertEqual(self.bodies[0]["price"], "100.01")  # продажа округляется вверх
+        self.assertEqual([b["orderType"] for b in self.bodies], ["Limit", "Limit"])
+        self.assertEqual(self.bodies[0]["price"], "100.01")  # PostOnly продажа вверх
+        self.assertEqual(self.bodies[0]["timeInForce"], "PostOnly")
+        self.assertEqual(self.bodies[1]["timeInForce"], "IOC")
         self.assertAlmostEqual(float(self.bodies[1]["qty"]), 0.26, places=4)
+        # Пол bid − 0.35%.
+        self.assertEqual(self.bodies[1]["price"], "99.64")
+
+    def test_alive_limit_skips_top_up(self):
+        """Отмена не подтвердилась — добор не ставим, иначе оверфилл."""
+        self.states = [
+            {"orderStatus": "PartiallyFilled", "cumExecQty": "0.10", "cumExecValue": "10.0"},
+        ]
+        # После дедлайна cancel всё ещё New — can_top_up=False.
+        def always_new(*_a, **_k):
+            return {"orderStatus": "New", "cumExecQty": "0.10", "cumExecValue": "10.0"}
+
+        clock = {"t": 1000.0}
+
+        def fake_time():
+            return clock["t"]
+
+        def fake_sleep(dt):
+            clock["t"] += float(dt)
+
+        with patch.object(self.skill, "_signed", side_effect=self._signed), \
+             patch.object(self.skill, "_order_state", side_effect=always_new), \
+             patch("skills.crypto.trades.time.time", side_effect=fake_time), \
+             patch("skills.crypto.trades.time.sleep", side_effect=fake_sleep):
+            phrase = self.skill._place_order("DOGE", "Buy", quote_usdt=26.0, maker=True)
+        self.assertEqual(len(self.bodies), 1)
+        self.assertEqual(self.bodies[0]["timeInForce"], "PostOnly")
+        self.assertIn("10", phrase)
 
     def test_voice_order_stays_market(self):
         self.states = [{"orderStatus": "Filled", "cumExecQty": "0.26", "cumExecValue": "26.0"}]

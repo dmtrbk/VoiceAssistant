@@ -40,6 +40,7 @@ from .common import (
     _testnet,
     _watchlist,
 )
+from . import bybit_log
 from .indicators import BB_PERIOD, bollinger, closes_from_kline
 
 logger = logging.getLogger(__name__)
@@ -230,6 +231,9 @@ class CryptoQuotesMixin:
                 )
                 if _retcode(raw) != 0:
                     msg = str(raw.get("retMsg") or "bybit error")
+                    bybit_log.log_rest(
+                        method="GET", path=path, params=params, data=raw, error=msg,
+                    )
                     if _is_rate_limit_msg(msg):
                         raise RuntimeError(f"bybit 429: {msg}")
                     raise RuntimeError(msg)
@@ -238,13 +242,23 @@ class CryptoQuotesMixin:
             except RuntimeError as exc:
                 last = exc
                 if not _is_rate_limit_msg(str(exc)):
+                    bybit_log.log_rest(
+                        method="GET", path=path, params=params, error=str(exc),
+                    )
                     raise
                 if index + 1 < 3:
                     time.sleep(0.5 * (2 ** index))
                     continue
+                bybit_log.log_rest(
+                    method="GET", path=path, params=params, error=str(exc),
+                )
                 raise
         if data is None:
+            bybit_log.log_rest(
+                method="GET", path=path, params=params, error=f"transient: {last}",
+            )
             raise RuntimeError(f"bybit transient: {last}") from last
+        bybit_log.log_rest(method="GET", path=path, params=params, data=data)
         if ttl > 0:
             self._cache[cache_key] = (time.time(), data)
         return data
@@ -282,8 +296,26 @@ class CryptoQuotesMixin:
                 return self._session.get(url, headers=headers, timeout=8)
             return self._session.post(url, data=body, headers=headers, timeout=8)
 
-        data = _with_retry(op, signed=True)
+        try:
+            data = _with_retry(op, signed=True)
+        except Exception as exc:
+            bybit_log.log_rest(
+                method=method,
+                path=path,
+                params=params,
+                error=str(exc),
+                signed=True,
+            )
+            raise
         code = _retcode(data)
+        bybit_log.log_rest(
+            method=method,
+            path=path,
+            params=params,
+            data=data,
+            signed=True,
+            error=(str(data.get("retMsg") or "") if code != 0 else None),
+        )
         if code != 0:
             msg = str(data.get("retMsg") or "")
             low = msg.lower()

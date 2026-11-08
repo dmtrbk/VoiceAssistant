@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
 import time
 from typing import Any
 
+from . import bybit_log
 from .common import _QUOTE, _testnet
 from .desk_policy_legacy import WATCH_PERIOD_CALM, watch_period_sec
 
@@ -19,6 +21,7 @@ _WS_PROD = "wss://stream.bybit.com/v5/public/spot"
 _WS_TEST = "wss://stream-testnet.bybit.com/v5/public/spot"
 _QUOTE_MAX_AGE = 15.0
 _STALE_SEC = 40.0
+_TICKER_QUEUE_MAX = 4096
 
 
 def _ws_url(testnet: bool = False) -> str:
@@ -55,6 +58,10 @@ class BybitPublicTape:
         self._last_msg = 0.0
         self._ws: Any = None
         self._thread: threading.Thread | None = None
+        self._ticker_q: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue(
+            maxsize=_TICKER_QUEUE_MAX,
+        )
+        self._worker: threading.Thread | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -65,12 +72,21 @@ class BybitPublicTape:
             logger.warning("[Крипта] лента: нет websocket-client — только REST")
             return
         self._stop.clear()
+        if not (self._worker and self._worker.is_alive()):
+            self._worker = threading.Thread(
+                target=self._ticker_worker, daemon=True, name="bybit-ws-ticker",
+            )
+            self._worker.start()
         self._thread = threading.Thread(target=self._run, daemon=True, name="bybit-ws")
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         self._signal.set()
+        try:
+            self._ticker_q.put_nowait(None)
+        except Exception:
+            pass
         ws = self._ws
         if ws is not None:
             try:
@@ -240,6 +256,10 @@ class BybitPublicTape:
         return (time.time() - self._last_msg) < max_age
 
     def apply_message(self, raw: str | dict[str, Any]) -> None:
+        try:
+            bybit_log.log_ws(raw)
+        except Exception:
+            pass
         msg = json.loads(raw) if isinstance(raw, str) else raw
         if not isinstance(msg, dict):
             return
@@ -252,7 +272,23 @@ class BybitPublicTape:
         topic = str(msg.get("topic") or "")
         data = msg.get("data")
         if topic.startswith("tickers.") and isinstance(data, dict):
-            self._on_ticker(topic, data)
+            # Живой сокет: в очередь, чтобы не блокировать ping/pong.
+            # Тесты без worker — синхронно.
+            if self._worker and self._worker.is_alive():
+                try:
+                    self._ticker_q.put_nowait((topic, data))
+                except queue.Full:
+                    # Шторм тикеров: роняем хвост, сокет не блокируем.
+                    try:
+                        self._ticker_q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._ticker_q.put_nowait((topic, data))
+                    except queue.Full:
+                        pass
+            else:
+                self._on_ticker(topic, data)
             return
         if topic.startswith("kline.240.") and isinstance(data, list) and data:
             row = data[0] if isinstance(data[0], dict) else {}
@@ -261,6 +297,20 @@ class BybitPublicTape:
                 self._kline.set()
                 self._signal.set()
                 logger.info("[Крипта] лента: закрылась 4h %s", topic.split(".")[-1])
+
+    def _ticker_worker(self) -> None:
+        while not self._stop.is_set():
+            try:
+                item = self._ticker_q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                return
+            topic, data = item
+            try:
+                self._on_ticker(topic, data)
+            except Exception as exc:
+                logger.info("[Крипта] лента ticker: %s", exc)
 
     def _on_ticker(self, topic: str, data: dict[str, Any]) -> None:
         symbol = str(data.get("symbol") or topic.split(".", 1)[-1] or "").upper()

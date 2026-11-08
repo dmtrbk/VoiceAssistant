@@ -237,20 +237,25 @@ class CryptoTradesMixin:
         *,
         quote_usdt: float = 0.0,
         base_qty: float = 0.0,
-    ) -> tuple[float, float, float]:
-        """Лимитная PostOnly у своей стороны книги. Возвращает (монеты, сумма, комиссия USDT)."""
+    ) -> tuple[float, float, float, bool]:
+        """Лимитная PostOnly у своей стороны книги.
+
+        Возвращает (монеты, сумма, комиссия USDT, можно_добирать).
+        Можно добирать только после терминального статуса — иначе риск оверфилла.
+        """
+        terminal = {"Filled", "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"}
         min_amt = max(filters["min_amt"], _MIN_QUOTE)
         book = self._book(ticker)
         px = book["bid"] if side == "Buy" else book["ask"]
         if px <= 0:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, True
         price_s = common._price_str(px, filters["tick"], round_up=(side == "Sell"))
         px = float(price_s)
         qty = (quote_usdt / px if px else 0.0) if side == "Buy" else base_qty
         qty_s = _qty_str(qty, filters["step"])
         qty = float(qty_s or 0)
         if qty <= 0 or qty * px + 1e-9 < min_amt:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, True
         data = self._signed(
             "POST",
             "/v5/order/create",
@@ -267,22 +272,37 @@ class CryptoTradesMixin:
         )
         order_id = str((data.get("result") or {}).get("orderId") or "")
         if not order_id:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, True
         deadline = time.time() + common._MAKER_WAIT_SEC
         state: dict[str, Any] = {}
+        status = ""
         while time.time() < deadline:
             time.sleep(common._MAKER_POLL_SEC)
             state = self._order_state(ticker, order_id)
             status = str(state.get("orderStatus") or "")
-            if status in {"Filled", "Cancelled", "Rejected", "Deactivated"}:
+            if status in terminal:
                 break
+        if status not in terminal:
+            ok, done_qty, done_quote, fee = self._cancel_limit_confirmed(
+                ticker, order_id, side=side,
+            )
+            if done_qty > 0:
+                logger.info(
+                    "[Крипта] лимитная %s %s: %.6g на %.2f$",
+                    side,
+                    ticker,
+                    done_qty,
+                    done_quote,
+                )
+            if not ok:
+                logger.info(
+                    "[Крипта] лимитка %s %s ещё жива — добор не ставлю",
+                    side,
+                    ticker,
+                )
+            return done_qty, done_quote, fee, ok
         done_qty = float(state.get("cumExecQty") or 0)
         done_quote = float(state.get("cumExecValue") or 0)
-        if str(state.get("orderStatus") or "") not in {"Filled", "Cancelled", "Rejected", "Deactivated"}:
-            self._cancel_order(ticker, order_id)
-            state = self._order_state(ticker, order_id)
-            done_qty = float(state.get("cumExecQty") or done_qty)
-            done_quote = float(state.get("cumExecValue") or done_quote)
         if done_qty > 0:
             logger.info(
                 "[Крипта] лимитная %s %s: %.6g по %.6g на %.2f$",
@@ -292,7 +312,7 @@ class CryptoTradesMixin:
                 px,
                 done_quote,
             )
-        return done_qty, done_quote, _cum_exec_fee_usdt(state, ticker, side)
+        return done_qty, done_quote, _cum_exec_fee_usdt(state, ticker, side), True
 
     def _await_fill(self, ticker: str, order_id: str, side: str = "") -> tuple[float, float, float]:
         """Сколько рыночная заявка реально исполнилась. Принятие ордера ещё не сделка."""
@@ -354,11 +374,15 @@ class CryptoTradesMixin:
             return ""
 
     def _cancel_limit_confirmed(
-        self, ticker: str, order_id: str,
+        self,
+        ticker: str,
+        order_id: str,
+        *,
+        side: str = "Sell",
     ) -> tuple[bool, float, float, float]:
         """Снять лимитку и дождаться конечного статуса.
 
-        False — заявка ещё жива, маркет ставить нельзя.
+        False — заявка ещё жива, добор ставить нельзя.
         Возвращает (подтверждено, исполнено монет, сумма, комиссия).
         """
         terminal = {"Filled", "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"}
@@ -367,21 +391,92 @@ class CryptoTradesMixin:
         status = str(state.get("orderStatus") or "")
         if status not in terminal:
             self._cancel_order(ticker, order_id)
-            deadline = time.time() + 3.0
+            deadline = time.time() + common._IOC_CANCEL_WAIT_SEC
             while time.time() < deadline:
                 time.sleep(0.3)
                 state = self._order_state(ticker, order_id)
                 status = str(state.get("orderStatus") or "")
                 if status in terminal:
                     break
-        if status not in terminal:
-            return False, 0.0, 0.0, 0.0
         try:
             done_qty = max(0.0, float(state.get("cumExecQty") or 0))
             done_quote = max(0.0, float(state.get("cumExecValue") or 0))
         except (TypeError, ValueError):
             done_qty = done_quote = 0.0
-        return True, done_qty, done_quote, _cum_exec_fee_usdt(state, ticker, "Sell")
+        fee = _cum_exec_fee_usdt(state, ticker, side)
+        if status not in terminal:
+            # Заявка ещё жива — добор запрещён; уже известный fill всё же возвращаем.
+            return False, done_qty, done_quote, fee
+        return True, done_qty, done_quote, fee
+
+    def _ioc_leg(
+        self,
+        ticker: str,
+        side: str,
+        filters: dict[str, float],
+        *,
+        quote_usdt: float = 0.0,
+        base_qty: float = 0.0,
+    ) -> tuple[float, float, float]:
+        """Добор Limit IOC с потолком ask/bid ± slip. Без слепого Market."""
+        min_amt = max(filters["min_amt"], _MIN_QUOTE)
+        book = self._book(ticker)
+        ask = float(book.get("ask") or 0)
+        bid = float(book.get("bid") or 0)
+        slip = common._IOC_MAX_SLIP_PCT / 100.0
+        if side == "Buy":
+            if ask <= 0 or quote_usdt <= 0:
+                return 0.0, 0.0, 0.0
+            cap = ask * (1.0 + slip)
+            price_s = common._price_str(cap, filters["tick"], round_up=True)
+            px = float(price_s)
+            if px <= 0:
+                return 0.0, 0.0, 0.0
+            qty_s = _qty_str(quote_usdt / px, filters["step"])
+            qty = float(qty_s or 0)
+            if qty <= 0 or qty * px + 1e-9 < min_amt:
+                return 0.0, 0.0, 0.0
+        else:
+            if bid <= 0 or base_qty <= 0:
+                return 0.0, 0.0, 0.0
+            floor = bid * (1.0 - slip)
+            price_s = common._price_str(floor, filters["tick"], round_up=False)
+            px = float(price_s)
+            qty_s = _qty_str(base_qty, filters["step"])
+            qty = float(qty_s or 0)
+            if px <= 0 or qty <= 0 or qty * px + 1e-9 < min_amt:
+                return 0.0, 0.0, 0.0
+        data = self._signed(
+            "POST",
+            "/v5/order/create",
+            {
+                "category": "spot",
+                "symbol": self._symbol(ticker),
+                "side": side,
+                "orderType": "Limit",
+                "timeInForce": "IOC",
+                "isLeverage": 0,
+                "qty": qty_s,
+                "price": price_s,
+            },
+        )
+        order_id = str((data.get("result") or {}).get("orderId") or "")
+        if not order_id:
+            return 0.0, 0.0, 0.0
+        done_qty, done_quote, fee = self._await_fill(ticker, order_id, side)
+        if done_qty > 0 and done_quote <= 0:
+            done_quote = done_qty * px
+        if done_qty > 0:
+            logger.info(
+                "[Крипта] IOC %s %s: %.6g по %.6g на %.2f$ (потолок %s)",
+                side,
+                ticker,
+                done_qty,
+                done_quote / done_qty,
+                done_quote,
+                price_s,
+            )
+        return done_qty, done_quote, fee
 
     def _place_order(
         self,
@@ -408,9 +503,11 @@ class CryptoTradesMixin:
         if side == "Buy":
             self._earn_free_cash(want_quote)
         maker_qty = maker_quote = maker_fee = 0.0
-        if maker and common._maker_orders_enabled():
+        can_top_up = True
+        use_maker = bool(maker and common._maker_orders_enabled())
+        if use_maker:
             try:
-                maker_qty, maker_quote, maker_fee = self._maker_leg(
+                maker_qty, maker_quote, maker_fee, can_top_up = self._maker_leg(
                     ticker,
                     side,
                     filters,
@@ -421,56 +518,84 @@ class CryptoTradesMixin:
                 logger.info("[Крипта] лимитная %s %s не прошла: %s", side, ticker, exc)
 
         min_amt = max(filters["min_amt"], _MIN_QUOTE)
-        body: dict[str, Any] = {
-            "category": "spot",
-            "symbol": self._symbol(ticker),
-            "side": side,
-            "orderType": "Market",
-            "isLeverage": 0,
-        }
-        if side == "Buy":
-            amt = want_quote - maker_quote
-            body["marketUnit"] = "quoteCoin"
-            body["qty"] = f"{amt:.2f}"
-            market_quote = amt
-        else:
-            qty_s = _qty_str(max(0.0, want_qty - maker_qty), filters["step"])
-            body["marketUnit"] = "baseCoin"
-            body["qty"] = qty_s
-            market_quote = float(qty_s or 0) * px
-        # Остаток меньше минимального лота — лимитной хватило, рыночную не ставим.
-        if market_quote + 1e-9 < min_amt:
-            if maker_quote <= 0:
+        rem_quote = want_quote - maker_quote if side == "Buy" else 0.0
+        rem_qty = max(0.0, want_qty - maker_qty) if side == "Sell" else 0.0
+        rem_notional = rem_quote if side == "Buy" else rem_qty * px
+        # Остаток меньше минимального лота — лимитной хватило.
+        if rem_notional + 1e-9 < min_amt:
+            if maker_quote <= 0 and maker_qty <= 0:
                 raise RuntimeError("no lots")
+            fill_quote = maker_quote if maker_quote > 0 else maker_qty * px
+            fill_qty = maker_qty
             return self._finish_order(
                 ticker,
                 side,
-                maker_quote,
-                maker_quote / maker_qty,
+                fill_quote,
+                fill_quote / fill_qty if fill_qty else px,
+                qty=fill_qty,
+                fee_usd=maker_fee,
+            )
+        if use_maker and not can_top_up:
+            if maker_qty <= 0:
+                raise RuntimeError("заявка не исполнилась")
+            fill_quote = maker_quote if maker_quote > 0 else maker_qty * px
+            return self._finish_order(
+                ticker,
+                side,
+                fill_quote,
+                fill_quote / maker_qty,
                 qty=maker_qty,
                 fee_usd=maker_fee,
             )
-        data = self._signed("POST", "/v5/order/create", body)
-        result = data.get("result") or {}
-        order_id = str(result.get("orderId") or "")
-        if not order_id and not result.get("orderLinkId"):
-            raise RuntimeError(str(data.get("retMsg") or "заявка не прошла"))
-        mkt_qty, mkt_quote, mkt_fee = (
-            self._await_fill(ticker, order_id, side) if order_id else (0.0, 0.0, 0.0)
-        )
-        if mkt_qty > 0 and mkt_quote <= 0:
-            mkt_quote = mkt_qty * px
-        if mkt_qty > 0:
-            logger.info(
-                "[Крипта] рыночная %s %s: %.6g по %.6g на %.2f$",
-                side,
-                ticker,
-                mkt_qty,
-                mkt_quote / mkt_qty,
-                mkt_quote,
+
+        top_qty = top_quote = top_fee = 0.0
+        if use_maker:
+            try:
+                top_qty, top_quote, top_fee = self._ioc_leg(
+                    ticker,
+                    side,
+                    filters,
+                    quote_usdt=rem_quote,
+                    base_qty=rem_qty,
+                )
+            except Exception as exc:
+                logger.info("[Крипта] IOC %s %s не прошёл: %s", side, ticker, exc)
+        else:
+            body: dict[str, Any] = {
+                "category": "spot",
+                "symbol": self._symbol(ticker),
+                "side": side,
+                "orderType": "Market",
+                "isLeverage": 0,
+            }
+            if side == "Buy":
+                body["marketUnit"] = "quoteCoin"
+                body["qty"] = f"{rem_quote:.2f}"
+            else:
+                body["marketUnit"] = "baseCoin"
+                body["qty"] = _qty_str(rem_qty, filters["step"])
+            data = self._signed("POST", "/v5/order/create", body)
+            result = data.get("result") or {}
+            order_id = str(result.get("orderId") or "")
+            if not order_id and not result.get("orderLinkId"):
+                raise RuntimeError(str(data.get("retMsg") or "заявка не прошла"))
+            top_qty, top_quote, top_fee = (
+                self._await_fill(ticker, order_id, side) if order_id else (0.0, 0.0, 0.0)
             )
-        total_qty = maker_qty + mkt_qty
-        total_quote = maker_quote + mkt_quote
+            if top_qty > 0 and top_quote <= 0:
+                top_quote = top_qty * px
+            if top_qty > 0:
+                logger.info(
+                    "[Крипта] рыночная %s %s: %.6g по %.6g на %.2f$",
+                    side,
+                    ticker,
+                    top_qty,
+                    top_quote / top_qty,
+                    top_quote,
+                )
+
+        total_qty = maker_qty + top_qty
+        total_quote = maker_quote + top_quote
         if total_qty <= 0 or total_quote <= 0:
             raise RuntimeError("заявка не исполнилась")
         return self._finish_order(
@@ -479,7 +604,7 @@ class CryptoTradesMixin:
             total_quote,
             total_quote / total_qty,
             qty=total_qty,
-            fee_usd=maker_fee + mkt_fee,
+            fee_usd=maker_fee + top_fee,
         )
 
     def _finish_order(

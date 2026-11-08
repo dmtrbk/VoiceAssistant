@@ -38,9 +38,12 @@ _SMALL_EQUITY = 50.0
 _AI_MAX_NAMES = 4
 # Запас под комиссию/пыль при market buy «на весь кэш» или хвост ребаланса.
 _BUY_CASH_BUFFER = 0.998
-# Лимитные заявки стола: maker 0.1% вместо taker 0.18%. Не исполнилась — добираем рыночной.
+# Лимитные заявки стола: maker 0.1% вместо taker 0.18%. Не исполнилась — добор IOC.
 _MAKER_WAIT_SEC = 24.0
 _MAKER_POLL_SEC = 1.5
+# Добор Limit IOC: потолок цены относительно ask/bid, без слепого Market.
+_IOC_MAX_SLIP_PCT = 0.35
+_IOC_CANCEL_WAIT_SEC = 3.0
 _TRADE_HISTORY_KEEP = 5000
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_holds.json")

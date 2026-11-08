@@ -1055,6 +1055,33 @@ def reset_probe_daily_loss(
     return ts
 
 
+def probe_hourly_lift_until(path: str | None = None) -> float:
+    """До какого unix-ts игнорируется часовая просадка в жёстком режиме. 0 — не снят."""
+    try:
+        return float(_read_daily_meta(path).get("probe_hourly_lift_until") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def lift_probe_hourly(
+    *,
+    hours: float = 1.0,
+    now: float | None = None,
+    path: str | None = None,
+) -> float:
+    """Снять часовой жёсткий режим на hours часов. Серия/полка и дневной стоп не трогаем."""
+    ts = float(now if now is not None else time.time())
+    until = ts + max(0.0, float(hours)) * 3600.0
+    meta = _read_daily_meta(path)
+    meta["probe_hourly_lift_until"] = until
+    _write_daily_meta(meta, path)
+    logger.info(
+        "[Крипта] часовой жёсткий режим снят до %s",
+        datetime.fromtimestamp(until, _MSK).strftime("%d.%m %H:%M"),
+    )
+    return until
+
+
 def probe_loss_guard_reason(
     *,
     now: float | None = None,
@@ -1125,7 +1152,10 @@ def probe_loss_guard_reason(
         return f"дневной лимит убытка ({day_pnl:+.2f}$)"
     hour_pnl = sum(pnl for ep, pnl in closed if now_ts - 3600.0 <= ep <= now_ts)
     if hour_pnl <= -PROBE_HOURLY_MAX_LOSS_USD + 1e-9:
-        return f"просадка за час ({hour_pnl:+.2f}$)"
+        if probe_hourly_lift_until() > now_ts + 1e-9:
+            pass  # ручной lift: часовую просадку не считаем
+        else:
+            return f"просадка за час ({hour_pnl:+.2f}$)"
     if len(closed) >= PROBE_MAX_CONSECUTIVE_LOSSES:
         tail = closed[-PROBE_MAX_CONSECUTIVE_LOSSES:]
         if all(pnl < -0.15 for _ep, pnl in tail):

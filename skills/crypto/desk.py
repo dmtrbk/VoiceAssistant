@@ -83,6 +83,8 @@ from .desk_policy import (
     probe_max_legs,
     probe_setup_ok_now,
     probe_min_turnover_usd,
+    probe_night_halted,
+    probe_night_lift_until,
     probe_strict_reason,
     tape_btc_day_chg,
     PROBE_REENTRY_HOURS,
@@ -136,6 +138,7 @@ logger = logging.getLogger(__name__)
 _RECONCILE_MIN_GAP_SEC = 45.0
 _PROBE_PAUSE_LOG_SEC = 300.0
 _PROBE_PIN_IDLE_LOG_SEC = 300.0
+_PROBE_SKIP_LOG_MAX = 24
 
 
 def _probe_pause_kind(reason: str) -> str:
@@ -914,6 +917,21 @@ class CryptoDeskMixin:
                 self._probe_locked()
             finally:
                 self._earn_park_idle()
+
+    def _probe_skip(self, msg: str) -> None:
+        """Копится до бита: почему топ не взяли. Без спама на каждый тихий тикер."""
+        bag: list[str] | None = getattr(self, "_probe_skip_notes", None)
+        if bag is None:
+            self._probe_skip_notes = bag = []
+        text = str(msg or "").strip()
+        if not text or text in bag or len(bag) >= _PROBE_SKIP_LOG_MAX:
+            return
+        bag.append(text)
+
+    def _probe_skip_bump(self, key: str, n: int = 1) -> None:
+        stats: dict[str, int] = getattr(self, "_probe_skip_stats", None) or {}
+        stats[key] = int(stats.get(key) or 0) + int(n)
+        self._probe_skip_stats = stats
 
     def _note_probe_pause(self, reason: str) -> None:
         kind = _probe_pause_kind(reason)
@@ -1800,12 +1818,18 @@ class CryptoDeskMixin:
         ticker = str(row.get("ticker") or "")
         paper = probe_is_paper()
         strict = bool(self._probe_loss_guard_reason()) if probe_places_buys() else False
+        turn = float(row.get("turnover") or 0)
+        algo = str(setup.get("algo") or "shelf")
         if not probe_setup_ok_now(
             setup,
             now=time.time(),
-            turnover=float(row.get("turnover") or 0),
+            turnover=turn,
             strict=strict,
         ):
+            mode = "жёсткий" if strict else ("ночь" if probe_night_halted() else "фильтр")
+            self._probe_skip(
+                f"{ticker} {algo}: {mode} turn=${turn/1e3:.0f}k"
+            )
             return False
         cap = self._probe_cap()
         if len(probe_legs()) + len(probe_arms()) >= cap:
@@ -1818,16 +1842,23 @@ class CryptoDeskMixin:
                 return False
             while len(probe_legs()) + len(probe_arms()) >= cap:
                 if not self._probe_make_room():
+                    self._probe_skip(f"{ticker} {algo}: слоты заняты")
                     return False
         week = self._probe_week(ticker)
-        algo = str(setup.get("algo") or "shelf")
+        t15 = ma_trend([bar["close"] for bar in bars15])
+        t1h = ma_trend([bar["close"] for bar in hour])
+        day_chg = float(row.get("chg") or 0)
         if week is None or not probe_trends_ok(
-            ma_trend([bar["close"] for bar in bars15]),
-            ma_trend([bar["close"] for bar in hour]),
-            float(row.get("chg") or 0),
+            t15,
+            t1h,
+            day_chg,
             week_chg=week,
             algo=algo,
         ):
+            week_bit = "нет" if week is None else f"{week:+.1f}%"
+            self._probe_skip(
+                f"{ticker} {algo}: тренд 15м={t15} 1h={t1h} 7d={week_bit} day={day_chg:+.1f}%"
+            )
             return False
         # Имитация: сразу в свой журнал, без боевого взвода и без виджета.
         if paper:
@@ -2009,11 +2040,13 @@ class CryptoDeskMixin:
         relax = bool(pin) and ticker.upper() == pin
         day_chg = None if relax else float(row.get("chg") or 0)
         day_high = 0.0 if relax else float(row.get("high") or 0)
+        self._probe_skip_bump("смотрели")
         if not relax and not probe_scan_day_ok(
             price=float(row.get("price") or 0),
             day_high=float(row.get("high") or 0),
             day_chg=float(row.get("chg") or 0),
         ):
+            self._probe_skip_bump("сутки")
             return False
         try:
             bars5 = self._probe_bars(ticker, "5", 80, cache_sec=cache_sec)
@@ -2039,9 +2072,14 @@ class CryptoDeskMixin:
             and str(setup.get("algo") or "") != PROBE_ALGO_PIN
             and probe_hunter_count(list(probe_legs()) + list(probe_arms())) >= PROBE_HUNTER_MAX_LEGS
         ):
+            self._probe_skip(
+                f"{ticker} {setup.get('algo')}: охотники заняты"
+            )
             return False
         if not setup:
+            self._probe_skip_bump("без_сетапа")
             return False
+        self._probe_skip_bump("сетап")
         try:
             bars15 = self._probe_bars(ticker, "15", 120)
             hour = self._probe_bars(ticker, "60", 80)
@@ -2059,6 +2097,8 @@ class CryptoDeskMixin:
         except Exception as exc:
             logger.info("[Крипта] щуп лента: %s", exc)
             return
+        self._probe_skip_notes = []
+        self._probe_skip_stats = {}
         paper = probe_is_paper()
         pause: str | None = None
         strict = False
@@ -2089,10 +2129,11 @@ class CryptoDeskMixin:
                 continue
             candidates.append(row)
         scan_lim, classic_lim, mand_top = probe_scan_limits()
+        min_turn = probe_min_turnover_usd(now=time.time(), strict=strict)
         ranked = probe_scan_ranked_rows(
             candidates,
             now=time.time(),
-            min_turnover=probe_min_turnover_usd(now=time.time(), strict=strict),
+            min_turnover=min_turn,
             limit=scan_lim,
         )
         self._probe_scan_top = [
@@ -2100,6 +2141,13 @@ class CryptoDeskMixin:
             for score, row in ranked[:10]
             if str(row.get("ticker") or "")
         ]
+        self._probe_scan_meta = {
+            "candidates": len(candidates),
+            "ranked": len(ranked),
+            "min_turn": min_turn,
+            "strict": strict,
+            "scan_lim": scan_lim,
+        }
         if (
             len(probe_legs()) + len(probe_arms()) >= cap
             and not paper
@@ -2192,7 +2240,7 @@ class CryptoDeskMixin:
         self._note_probe_beat(cap=cap, pin=pin)
 
     def _note_probe_beat(self, *, cap: int, pin: str) -> None:
-        """Раз в минуту: топ-10 суток, слоты, пин и кто идёт за ~10м."""
+        """Раз в минуту: топ-10 суток, слоты, пин, фильтры и почему не взяли."""
         now = time.time()
         last = float(getattr(self, "_probe_beat_ts", 0.0) or 0.0)
         if now - last < 60.0:
@@ -2209,15 +2257,50 @@ class CryptoDeskMixin:
         move_bit = ", ".join(f"{name} {float(chg):+.1f}%" for name, chg in top) or "никого"
         held = len(probe_legs()) + len(probe_arms())
         mode = "бумага" if probe_is_paper() else "бой"
+        meta = getattr(self, "_probe_scan_meta", None) or {}
+        night = probe_night_halted(now)
+        night_lift = float(probe_night_lift_until() or 0)
+        hour_lift = float(crypto_journal.probe_hourly_lift_until() or 0)
+        filter_bits: list[str] = []
+        if night:
+            filter_bits.append("ночь")
+        elif night_lift > now:
+            left = max(1, int((night_lift - now + 59) // 60))
+            filter_bits.append(f"ночь снята {left}м")
+        if meta.get("strict"):
+            filter_bits.append("жёсткий")
+        elif hour_lift > now:
+            left = max(1, int((hour_lift - now + 59) // 60))
+            filter_bits.append(f"час снят {left}м")
+        turn = float(meta.get("min_turn") or 0)
+        if turn > 0:
+            filter_bits.append(f"оборот≥${turn/1e3:.0f}k")
+        stats = getattr(self, "_probe_skip_stats", None) or {}
+        if stats:
+            filter_bits.append(
+                "скан "
+                + "/".join(
+                    f"{key}={stats[key]}"
+                    for key in ("смотрели", "сутки", "без_сетапа", "сетап")
+                    if key in stats
+                )
+            )
+        filt_bit = ", ".join(filter_bits) if filter_bits else "день"
+        skips = list(getattr(self, "_probe_skip_notes", None) or [])
+        skip_bit = "; ".join(skips[:12]) if skips else "—"
         logger.info(
-            "[Крипта] щуп: %s, топ %s, слоты %s/%s, пин %s, ход: %s",
+            "[Крипта] щуп: %s, топ %s, слоты %s/%s, пин %s, ход: %s | %s | отказы: %s",
             mode,
             top_bit,
             held,
             cap,
             pin or "нет",
             move_bit,
+            filt_bit,
+            skip_bit,
         )
+        self._probe_skip_notes = []
+        self._probe_skip_stats = {}
 
     def _spot_buy_vwap(self, ticker: str, need_qty: float) -> float | None:
         """Средняя цена ручной покупки по свежим fill Bybit (spot)."""
