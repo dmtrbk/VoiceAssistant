@@ -330,6 +330,9 @@ PROBE_SPARK_MAX_ELAPSED_SEC = 120.0
 PROBE_SPARK_MAX_BAR_POS = 1.0
 PROBE_SPARK_HOLD_SEC = 0.0
 PROBE_SPARK_CHASE_PCT = 1.2
+# Spark/pop после дневного пампа: +22% вечером — излёт, не ракета со дна (TA).
+PROBE_SPARK_MAX_DAY_PCT = 18.0
+PROBE_POP_MAX_DAY_PCT = 18.0
 # Pop: вертикальные свечи. 4.2%/0.5%/5.5% браковали ракеты +6..+15%.
 PROBE_POP_MIN_BODY_PCT = 1.5
 PROBE_POP_MAX_BODY_PCT = 8.5
@@ -2105,13 +2108,16 @@ def probe_candle_day_ok(
     day_chg: float | None,
     stair: bool = False,
     allow_breakout: bool = False,
+    max_day_pct: float | None = None,
 ) -> bool:
-    """Топ по росту идут у хая суток; отсекаем перегрев ≥45% и глубокий слив с пика (>28%).
+    """Топ по росту идут у хая суток; отсекаем перегрев и глубокий слив с пика (>28%).
 
     allow_breakout: spark и pop могут обновлять хай суток (запас до −0.5%).
+    max_day_pct: потолок суток (spark/pop 18%, candle по умолчанию 45%).
     Impulse эту проверку не проходит — хай ему и так не запрещён.
     """
-    if day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
+    ceiling = float(PROBE_CANDLE_MAX_DAY_PCT if max_day_pct is None else max_day_pct)
+    if day_chg is not None and float(day_chg) >= ceiling - 1e-12:
         return False
     hi = float(day_high or 0)
     px = float(price or 0)
@@ -2400,6 +2406,18 @@ def probe_pick_setup(
         ):
             continue
         if (
+            name == PROBE_ALGO_SPARK
+            and day_chg is not None
+            and float(day_chg) >= PROBE_SPARK_MAX_DAY_PCT
+        ):
+            continue
+        if (
+            name == PROBE_ALGO_POP
+            and day_chg is not None
+            and float(day_chg) >= PROBE_POP_MAX_DAY_PCT
+        ):
+            continue
+        if (
             name == PROBE_ALGO_GRIND
             and day_chg is not None
             and float(day_chg) >= PROBE_GRIND_MAX_DAY_PCT
@@ -2424,6 +2442,7 @@ def probe_pick_setup(
                 day_chg=day_chg,
                 stair=False,
                 allow_breakout=True,
+                max_day_pct=PROBE_SPARK_MAX_DAY_PCT,
             ):
                 continue
         elif name == PROBE_ALGO_POP:
@@ -2434,6 +2453,7 @@ def probe_pick_setup(
                 day_chg=day_chg,
                 stair=False,
                 allow_breakout=True,
+                max_day_pct=PROBE_POP_MAX_DAY_PCT,
             ):
                 continue
         elif name == PROBE_ALGO_GRIND:
@@ -2518,7 +2538,11 @@ def probe_arm_action(
         and float(day_chg) >= PROBE_IMPULSE_MAX_DAY_PCT
     ):
         return "drop"
-    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP} and day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
+    if name == PROBE_ALGO_SPARK and day_chg is not None and float(day_chg) >= PROBE_SPARK_MAX_DAY_PCT:
+        return "drop"
+    if name == PROBE_ALGO_POP and day_chg is not None and float(day_chg) >= PROBE_POP_MAX_DAY_PCT:
+        return "drop"
+    if name == PROBE_ALGO_CANDLE and day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
         return "drop"
     if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
         return "drop"

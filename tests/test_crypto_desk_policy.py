@@ -2568,6 +2568,33 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         )
         self.assertEqual(policy.PROBE_SPARK_VOL_MULT, 2.2)
         self.assertEqual(policy.PROBE_POP_VOL_MULT, 2.2)
+        self.assertEqual(policy.PROBE_SPARK_MAX_DAY_PCT, 18.0)
+        self.assertEqual(policy.PROBE_POP_MAX_DAY_PCT, 18.0)
+        # TA +22% вечером: spark/pop режем, candle ещё пускает до 45%.
+        self.assertFalse(
+            policy.probe_candle_day_ok(
+                price=0.10, day_high=0.101, day_chg=22.1, allow_breakout=True,
+                max_day_pct=policy.PROBE_SPARK_MAX_DAY_PCT,
+            )
+        )
+        self.assertTrue(
+            policy.probe_candle_day_ok(
+                price=0.10, day_high=0.101, day_chg=22.1, allow_breakout=True,
+            )
+        )
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=100.0,
+                now=200.0,
+                price=0.101,
+                shelf=0.099,
+                trend15="bull",
+                day_chg=22.1,
+                arm_px=0.100,
+                algo=policy.PROBE_ALGO_SPARK,
+            ),
+            "drop",
+        )
         self.assertEqual(policy.PROBE_PIN_MIN_TURNOVER_USD, 600_000.0)
         self.assertTrue(
             policy.probe_pin_row_ok(
