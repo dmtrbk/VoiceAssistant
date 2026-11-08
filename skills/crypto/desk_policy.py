@@ -35,8 +35,8 @@ POCKET_FROM_PROBE_MAX = 6
 PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд", "застой"})
 PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "дно", "срез"})
 PROBE_CANDLE_STALE_SEC = 2 * 3600
-# Срез только если сломана полка. Минус к входу за 90 с при живой полке — не режем (ICNT).
-PROBE_FAIL_SCRATCH_SEC = 90.0
+# Срез только если сломана полка. 3 минуты — дыхание 5м свечи. Слив режет кап −1.8%.
+PROBE_FAIL_SCRATCH_SEC = 180.0
 # Нет взвода ловушки и цена ≤ входа ≥ 10м — «срез». Ракета либо идёт сразу, либо слот свободен.
 PROBE_NO_TRAP_TIMEOUT_SEC = 10 * 60
 # Лимитный тейк на всю ногу сразу после покупки. Стоп и срез остаются маркетом.
@@ -120,10 +120,10 @@ _live_extra: set[str] = set()
 # Щуп: 40$ на пробой тихой полки / свечи. Не слот рукава и не карман.
 PROBE_USD = 40.0
 # Днём ≥ $500k: хвост $150k — пустой стакан и фитили. Ночь — тот же пол.
-# Жёсткий режим после убытков — по-прежнему ≥ $1.5M.
+# Жёсткий режим после убытков — ≥ $800k. $1.5M вырезал ракеты из сканера.
 PROBE_MIN_TURNOVER_USD = 500_000.0
 PROBE_NIGHT_MIN_TURNOVER_USD = 500_000.0
-PROBE_STRICT_MIN_TURNOVER_USD = 1_500_000.0
+PROBE_STRICT_MIN_TURNOVER_USD = 800_000.0
 PROBE_NIGHT_START_HOUR_YEKT = 23
 PROBE_NIGHT_END_HOUR_YEKT = 6
 # Защита от падающего рынка: сутки BTC / flash 15м / ширина рынка.
@@ -131,8 +131,9 @@ PROBE_MARKET_FALL_ON = True
 PROBE_BTC_MAX_DROP_DAY_PCT = -2.5
 PROBE_BTC_FLASH_DROP_PCT = -1.0
 PROBE_BTC_FLASH_BARS = 3
-# Ширина — live-стоп без часового залипания (иначе при 33–35% пропускаем ракеты лидеров).
-PROBE_MIN_MARKET_BREADTH_PCT = 25.0
+# Ширина — live-стоп без часового залипания. Ниже 16% или пролив BTC.
+# 21–24% на споте альт ещё стреляет в одиночку, скан не глушим.
+PROBE_MIN_MARKET_BREADTH_PCT = 16.0
 # Часовая пауза только после пролива BTC (сутки / flash), не из-за ширины.
 PROBE_MARKET_FALL_PAUSE_SEC = 3600.0
 PROBE_HOURLY_MAX_LOSS_USD = 1.50
@@ -141,7 +142,7 @@ PROBE_STREAK_PAUSE_SEC = 3600.0
 # После среза «полка» не перерабатывать слот в тот же чоп (ZAMA→DOOD, LA→INIT).
 PROBE_SHELF_COOLDOWN_SEC = 25 * 60
 PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
-# Жёсткий режим (оборот $1.5M, OBI 0.70) только на свои локальные убытки.
+# Жёсткий режим (оборот $800k, OBI 0.60) только на свои локальные убытки.
 # Дневной −$6 — полный стоп входов. Падающий рынок — PROBE_MARKET_FALL_ON.
 PROBE_STRICT_MODE = True
 PROBE_RISING_BTC_MIN_PCT = 0.0
@@ -205,9 +206,9 @@ PROBE_PIN_MOVE_PCT = 1.5
 PROBE_PIN_MOVE_BARS = 2
 PROBE_PIN_MOVE_VOL_MULT = 1.5
 PROBE_PIN_SWITCH_PCT = 0.3
-PROBE_PIN_LOSS_LOOKBACK_SEC = 12 * 3600
-# Крошечный срез на сильном дне (ICNT −$0.30 при +13%) пин не банит.
-PROBE_PIN_SCRATCH_IGNORE_USD = 0.50
+PROBE_PIN_LOSS_LOOKBACK_SEC = 45 * 60
+# Убыток до $1 на сильном дне пин не банит. Перехай +2.5% над продажей снимает бан сразу.
+PROBE_PIN_SCRATCH_IGNORE_USD = 1.00
 PROBE_PIN_SWITCH_SCORE_MULT = 1.15
 # Пин-ретест: откат 0.4–1.5% от локального хая, объём не пустой, отбой вверх.
 PROBE_PIN_PULLBACK_MIN_PCT = 0.4
@@ -301,7 +302,7 @@ PROBE_MAX_ASK_SLIP_PCT = 0.45
 # OBI на каждом входе. Нет котировки стакана — не блокируем.
 PROBE_MIN_ENTRY_OBI = 0.55
 # Жёсткий режим (бывшие паузы: полка, час, серия, день): щуп не молчит, фильтры туже.
-PROBE_STRICT_MIN_ENTRY_OBI = 0.70
+PROBE_STRICT_MIN_ENTRY_OBI = 0.60
 PROBE_STRICT_MAX_SPREAD_PCT = 0.20
 PROBE_STRICT_MAX_ASK_SLIP_PCT = 0.25
 # Жёсткий дневной риск-лимит (Daily Max Drawdown) на новые входы щупа.
@@ -787,7 +788,7 @@ def probe_setup_ok_now(
     turnover: float | None = None,
     strict: bool = False,
 ) -> bool:
-    """Ночь: сильный сетап и ≥ $250k. Жёсткий режим: то же и ≥ $1.5M."""
+    """Ночь и жёсткий режим: сильный сетап и оборот не ниже своего пола."""
     if not setup:
         return False
     if not strict and not probe_night_halted(now):
@@ -809,7 +810,7 @@ def probe_setup_ok_now(
 
 
 def probe_min_turnover_usd(now: float | None = None, *, strict: bool = False) -> float:
-    """Порог оборота: день $150k, ночь $250k, жёсткий режим $1.5M."""
+    """Порог оборота: день и ночь $500k, жёсткий режим $800k."""
     if strict:
         return float(PROBE_STRICT_MIN_TURNOVER_USD)
     if now is not None and probe_night_halted(now):
@@ -1150,6 +1151,15 @@ def probe_pin_move(bars: list[dict[str, Any]] | None) -> float | None:
     if typical <= 0 or live_vol < typical * PROBE_PIN_MOVE_VOL_MULT - 1e-12:
         return None
     return move
+
+
+def probe_pin_loss_breakout(sell_px: float, live_px: float) -> bool:
+    """Цена выше продажи на PROBE_REENTRY_BREAKOUT_PCT — бан пина с этой продажи снят."""
+    sell = float(sell_px or 0)
+    live = float(live_px or 0)
+    if sell <= 0 or live <= 0:
+        return False
+    return live >= sell * (1.0 + PROBE_REENTRY_BREAKOUT_PCT / 100.0) - 1e-12
 
 
 def probe_pin_hard_drop_reason(
@@ -1751,7 +1761,7 @@ def probe_book_buy_ok(
 
 
 def probe_entry_obi_floor(*, strict: bool = False) -> float:
-    """Порог OBI: обычный вход 0.55, жёсткий режим 0.70."""
+    """Порог OBI: обычный вход 0.55, жёсткий режим 0.60."""
     if strict:
         return float(PROBE_STRICT_MIN_ENTRY_OBI)
     return float(PROBE_MIN_ENTRY_OBI)

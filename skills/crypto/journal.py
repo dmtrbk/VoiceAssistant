@@ -861,13 +861,15 @@ def probe_recent_loss_tickers(
 ) -> set[str]:
     """Тикеры с закрытием щупа/ноги ≤ −loss за lookback — пин туда не вешаем.
 
-    Крошечный срез на сильном дне (рост ≥ PROBE_PIN_MIN_DAY_PCT) не банит.
+    Убыток до PROBE_PIN_SCRATCH_IGNORE_USD на сильном дне не банит.
+    Цена выше этой продажи на PROBE_REENTRY_BREAKOUT_PCT снимает бан сразу.
     """
     from .desk_policy import (
         PROBE_PIN_LOSS_LOOKBACK_SEC,
         PROBE_PIN_MIN_DAY_PCT,
         PROBE_PIN_SCRATCH_IGNORE_USD,
         PROBE_SHELF_COOLDOWN_LOSS_USD,
+        probe_pin_loss_breakout,
     )
 
     now_ts = float(now if now is not None else time.time())
@@ -875,6 +877,7 @@ def probe_recent_loss_tickers(
     floor = float(PROBE_SHELF_COOLDOWN_LOSS_USD if loss_usd is None else loss_usd)
     ignore = float(PROBE_PIN_SCRATCH_IGNORE_USD)
     day_chg: dict[str, float] = {}
+    live_px: dict[str, float] = {}
     for row in tape or []:
         if not isinstance(row, dict):
             continue
@@ -884,7 +887,13 @@ def probe_recent_loss_tickers(
         try:
             day_chg[name] = float(row.get("chg"))
         except (TypeError, ValueError):
-            continue
+            pass
+        try:
+            px = float(row.get("price") or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if px > 0:
+            live_px[name] = px
     rows = trades if trades is not None else _read_trades()
     lots: dict[str, dict[str, float]] = {}
     lost: set[str] = set()
@@ -923,6 +932,8 @@ def probe_recent_loss_tickers(
         if epoch is None or not (now_ts - window <= epoch <= now_ts + 1.0):
             continue
         if pnl > -floor + 1e-9:
+            continue
+        if probe_pin_loss_breakout(price, live_px.get(ticker) or 0.0):
             continue
         chg = day_chg.get(ticker)
         if (
