@@ -62,6 +62,7 @@ from .desk_policy import (
     probe_book_buy_ok,
     probe_entry_obi_ok,
     probe_entry_obi_floor,
+    probe_volume_surge,
     probe_exit_reason,
     probe_candle_buy_ok,
     probe_spark_buy_ok,
@@ -96,6 +97,7 @@ from .desk_policy import (
     probe_quote,
     probe_quote_for_buy,
     PROBE_BOOST_USD,
+    PROBE_MIN_QUOTE_FRAC,
     probe_scan_rank,
     probe_scan_ranked_rows,
     probe_choose_pin,
@@ -1149,20 +1151,41 @@ class CryptoDeskMixin:
         )
         if not reason:
             return
-        # Любой выход, включая разворот «вершина» до лимитки: сначала подтверждённо снимаем тейк.
+        # Спот без OCO: лимитный TP снимаем и ждём terminal ДО любого маркета
+        # (срез 18м/45м, стоп, полка) — иначе Insufficient Balance / фантомный шорт.
         tp_order = str(state.get("tp_order") or "")
         if tp_order:
             ok, done_qty, done_quote, done_fee = self._cancel_limit_confirmed(ticker, tp_order)
             if not ok:
-                logger.info("[Крипта] щуп %s: лимитка не снята, маркет не ставлю", ticker)
+                logger.info(
+                    "[Крипта] щуп %s: лимитка %s жива (%s) — маркет не ставлю",
+                    ticker,
+                    tp_order,
+                    reason,
+                )
                 return
             if done_qty > 0 and done_quote > 0:
                 self._probe_journal_limit(ticker, done_qty, done_quote, done_fee)
             qty = max(0.0, qty - done_qty)
+            # TP снят: не оставляем id в JSON на случай ретрая/краша.
+            if qty * price >= _MIN_QUOTE:
+                write_probe(
+                    ticker=ticker,
+                    qty=qty,
+                    entry=entry,
+                    shelf=float(state.get("shelf") or 0),
+                    arm_px=float(state.get("arm_px") or 0),
+                    peak=peak,
+                    low=float(state.get("low") or 0),
+                    algo=leg_algo,
+                    tp_order="",
+                    tp_px=0.0,
+                )
             if qty * price < _MIN_QUOTE:
                 write_probe(drop=ticker)
                 logger.info("[Крипта] щуп %s: тейк закрыл ногу", ticker)
                 return
+            tp_order = ""
         shelf = float(state.get("shelf") or 0)
         # Мягкий выход → карман2 только если уже был реальный плюс (ловушка),
         # либо если нога застряла в щупе («застой») — освобождаем слот щупа под минимальный выход в кармане2.
@@ -1225,8 +1248,13 @@ class CryptoDeskMixin:
             write_probe(drop=ticker)
             return
         seen = getattr(self, "_last_fill", None)
-        # После лимитного тейка защита только маркетом: короткая лимитка снова подвесит стоп.
-        use_maker = not tp_order and not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
+        # Срез/стоп/полка — только маркет. Maker после TP снова подвесит монеты.
+        force_market = str(reason) in {"срез", "стоп", "полка", "дно"}
+        use_maker = (
+            not force_market
+            and not tp_order
+            and not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
+        )
         self._pending_exit_reason = str(reason or "")
         try:
             self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker)
@@ -1338,6 +1366,7 @@ class CryptoDeskMixin:
                     float(live.get("low") or 0),
                 )
                 return
+        surge = False
         if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
             # Актуальных 5м: buy_ok мягче live_ok — иначе hold убивает вход (CPOOL).
             try:
@@ -1355,11 +1384,17 @@ class CryptoDeskMixin:
                 ask = float(book.get("ask") or 0)
             except Exception:
                 bid = ask = 0.0
+            tick = 0.0
+            try:
+                tick = float((self._filters(ticker) or {}).get("tick") or 0)
+            except Exception:
+                tick = 0.0
             if not probe_book_buy_ok(
                 bid=bid,
                 ask=ask,
                 arm_px=arm_px,
                 strict=bool(self._probe_loss_guard_reason()),
+                tick_size=tick,
             ):
                 write_probe(drop_arm=ticker)
                 logger.info(
@@ -1398,18 +1433,20 @@ class CryptoDeskMixin:
                     live_hi,
                 )
                 return
+            surge = probe_volume_surge(bars5, now=time.time())
         obi = None
         obi_fn = getattr(self, "_orderbook_obi", None)
         if callable(obi_fn):
             obi = obi_fn(ticker)
         strict = bool(self._probe_loss_guard_reason())
-        if not probe_entry_obi_ok(obi, strict=strict):
+        if not probe_entry_obi_ok(obi, strict=strict, volume_surge=surge):
             write_probe(drop_arm=ticker)
             logger.info(
-                "[Крипта] щуп %s снят (obi): %.2f < %.2f",
+                "[Крипта] щуп %s снят (obi%s): %.2f < %.2f",
                 ticker,
+                ", объём" if surge else "",
                 float(obi or 0),
-                probe_entry_obi_floor(strict=strict),
+                probe_entry_obi_floor(strict=strict, volume_surge=surge),
             )
             return
         self._probe_buy(
@@ -1589,12 +1626,13 @@ class CryptoDeskMixin:
                     return
             legs = probe_legs()
         want = probe_quote_for_buy(legs=legs, prices=self._probe_leg_prices(legs))
+        min_frac = float(PROBE_MIN_QUOTE_FRAC)
         quote = min(want, free_cash * common._BUY_CASH_BUFFER)
-        if quote < want * 0.9:
+        if quote < want * min_frac:
             free_cash = self._free_second_pocket_for_probe(want)
             _, held_now = self._cash_and_held()
             quote = min(want, free_cash * common._BUY_CASH_BUFFER)
-        if quote < want * 0.9:
+        if quote < want * min_frac:
             logger.info("[Крипта] щуп %s: кэша мало на %.0f$", ticker, want)
             return
         before = float((held_now.get(ticker) or {}).get("qty") or 0)

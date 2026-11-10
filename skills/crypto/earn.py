@@ -17,8 +17,12 @@ logger = logging.getLogger(__name__)
 _CATEGORY = "FlexibleSaving"
 _PRODUCT_ID = "1"  # USDT Flexible Saving
 _MIN_STAKE = 1.5  # минимум продукта
-# Свободные доллары на споте — для ручной покупки. Остальное под проценты.
-_FREE_BUFFER = 12.0
+# Буфер на споте: 3 слота щупа × $40.
+_FREE_BUFFER = 120.0
+# Гистерезис: долив только ниже пола (не дёргать Earn на $1.50 каждые 2 мин).
+_FREE_BUFFER_FLOOR = 105.0
+_FREE_TOPUP_MIN = 10.0
+_FREE_TOPUP_CHUNK = 25.0
 _POSITION_CACHE_SEC = 20.0
 
 
@@ -173,29 +177,32 @@ class CryptoEarnMixin:
         return flow
 
     def _earn_park_idle(self) -> None:
-        """Свободный кэш сверх буфера — под проценты."""
+        """Сверх буфера — в Earn. Долив только при free < пола, траншем ≥ $10."""
         if not self._earn_enabled():
             return
         try:
             free, _positions = self._wallet(with_earn=False)
         except Exception:
             return
-        if free + 1e-9 < _FREE_BUFFER:
+        # 105…120: гистерезис, не redeem на $1.50.
+        if free + 1e-9 < _FREE_BUFFER_FLOOR:
             gap = _FREE_BUFFER - free
             staked = self._earn_staked(fresh=True)
             if staked <= 0:
                 return
-            amount = min(staked, gap)
-            if amount < _MIN_STAKE:
-                amount = min(staked, _MIN_STAKE)
+            amount = min(staked, max(gap, _FREE_TOPUP_CHUNK))
+            if amount + 1e-9 < _FREE_TOPUP_MIN:
+                return
             if amount < _MIN_STAKE:
                 return
             if self._earn_order("Redeem", amount):
                 logger.info(
-                    "[Крипта] Earn: вернул %.2f$ — на споте %.0f$ для ручной покупки",
+                    "[Крипта] Earn: вернул %.2f$ (пол щупа) — цель спот %.0f$",
                     amount,
                     _FREE_BUFFER,
                 )
+            return
+        if free + 1e-9 < _FREE_BUFFER:
             return
         amount = free - _FREE_BUFFER
         if amount < _MIN_STAKE:

@@ -1095,6 +1095,8 @@ def probe_loss_guard_reason(
         PROBE_MAX_CONSECUTIVE_LOSSES,
         PROBE_SHELF_COOLDOWN_LOSS_USD,
         PROBE_SHELF_COOLDOWN_SEC,
+        PROBE_STREAK_IGNORE_SCRATCH_USD,
+        PROBE_STREAK_MIN_LOSS_PCT,
         PROBE_STREAK_PAUSE_SEC,
         PROBE_STRICT_MODE,
         probe_daily_loss_blocked,
@@ -1117,7 +1119,8 @@ def probe_loss_guard_reason(
     rows = trades if trades is not None else _read_trades()
     lots: dict[str, dict[str, float]] = {}
     day_pnl = 0.0
-    closed: list[tuple[float, float]] = []
+    # (epoch, pnl, cost_sold, reason)
+    closed: list[tuple[float, float, float, str]] = []
     for entry in rows:
         ticker = str(entry.get("ticker") or "").upper()
         side = str(entry.get("side") or "").lower()
@@ -1142,7 +1145,7 @@ def probe_loss_guard_reason(
         if epoch is not None and epoch <= now_ts + 1.0:
             if day_start <= epoch < day_end:
                 day_pnl += pnl
-            closed.append((epoch, pnl))
+            closed.append((epoch, pnl, cost_sold, str(entry.get("reason") or "")))
         lot["qty"] -= sell_qty
         lot["cost"] -= cost_sold
         if lot["qty"] < 1e-12:
@@ -1150,21 +1153,33 @@ def probe_loss_guard_reason(
             lot["cost"] = 0.0
     if probe_daily_loss_blocked(round(day_pnl, 2)):
         return f"дневной лимит убытка ({day_pnl:+.2f}$)"
-    hour_pnl = sum(pnl for ep, pnl in closed if now_ts - 3600.0 <= ep <= now_ts)
+    hour_pnl = sum(pnl for ep, pnl, _cost, _reason in closed if now_ts - 3600.0 <= ep <= now_ts)
     if hour_pnl <= -PROBE_HOURLY_MAX_LOSS_USD + 1e-9:
         if probe_hourly_lift_until() > now_ts + 1e-9:
             pass  # ручной lift: часовую просадку не считаем
         else:
             return f"просадка за час ({hour_pnl:+.2f}$)"
+
+    def _streak_loss(pnl: float, cost: float, reason: str) -> bool:
+        """Системный лось для серии: ≥1% cost. Таймаут-срез с шумом −$0.25 — нет."""
+        note = str(reason or "")
+        if note == "срез" and float(pnl) > -PROBE_STREAK_IGNORE_SCRATCH_USD + 1e-9:
+            return False
+        if float(cost) <= 1e-12:
+            return False
+        loss_pct = float(pnl) / float(cost) * 100.0
+        return loss_pct <= -PROBE_STREAK_MIN_LOSS_PCT + 1e-9
+
     if len(closed) >= PROBE_MAX_CONSECUTIVE_LOSSES:
+        # Три жёстких лося подряд (≥1% cost). Скрэтч-таймаут −$0.10 хвост не банит.
         tail = closed[-PROBE_MAX_CONSECUTIVE_LOSSES:]
-        if all(pnl < -0.15 for _ep, pnl in tail):
+        if all(_streak_loss(pnl, cost, reason) for _ep, pnl, cost, reason in tail):
             last_ep = tail[-1][0]
             if now_ts - last_ep < PROBE_STREAK_PAUSE_SEC:
                 return f"серия из {PROBE_MAX_CONSECUTIVE_LOSSES} убытков (пауза 60м)"
     shelf_hits = [
         ep
-        for ep, pnl in closed
+        for ep, pnl, _cost, _reason in closed
         if now_ts - PROBE_SHELF_COOLDOWN_SEC <= ep <= now_ts + 1.0
         and pnl <= -PROBE_SHELF_COOLDOWN_LOSS_USD + 1e-9
     ]

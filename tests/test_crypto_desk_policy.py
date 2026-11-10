@@ -600,50 +600,58 @@ class TestDeskPolicy(unittest.TestCase):
         night_ts = datetime(2026, 10, 31, 23, 0, tzinfo=yekt).timestamp()
         self.assertEqual(policy.probe_min_turnover_usd(day_ts), 500_000.0)
         self.assertEqual(policy.probe_min_turnover_usd(night_ts), 500_000.0)
-        self.assertFalse(policy.probe_night_halted(day_ts))
-        self.assertTrue(policy.probe_night_halted(night_ts))
-        self.assertFalse(
-            policy.probe_night_halted(datetime(2026, 10, 31, 21, 0, tzinfo=yekt).timestamp())
-        )
-        self.assertFalse(
-            policy.probe_night_halted(datetime(2026, 10, 31, 22, 59, tzinfo=yekt).timestamp())
-        )
-        self.assertTrue(
-            policy.probe_night_halted(datetime(2026, 10, 31, 23, 0, tzinfo=yekt).timestamp())
-        )
-        self.assertFalse(
-            policy.probe_night_halted(datetime(2026, 10, 31, 20, 59, tzinfo=yekt).timestamp())
-        )
-        self.assertTrue(
-            policy.probe_night_halted(datetime(2026, 11, 1, 5, 59, tzinfo=yekt).timestamp())
-        )
-        self.assertFalse(
-            policy.probe_night_halted(datetime(2026, 11, 1, 6, 0, tzinfo=yekt).timestamp())
-        )
+        night_stair = {"shelf": 1.0, "price": 1.01, "stair": 1.0, "algo": "candle"}
+        night_candle = {"shelf": 1.0, "price": 1.01, "algo": "candle"}
+        night_spark = {"shelf": 1.0, "price": 1.01, "spark": 1.0, "algo": "spark"}
+        with patch.object(policy, "probe_night_lift_until", return_value=0.0):
+            self.assertFalse(policy.probe_night_halted(day_ts))
+            self.assertTrue(policy.probe_night_halted(night_ts))
+            self.assertFalse(
+                policy.probe_night_halted(datetime(2026, 10, 31, 21, 0, tzinfo=yekt).timestamp())
+            )
+            self.assertFalse(
+                policy.probe_night_halted(datetime(2026, 10, 31, 22, 59, tzinfo=yekt).timestamp())
+            )
+            self.assertTrue(
+                policy.probe_night_halted(datetime(2026, 10, 31, 23, 0, tzinfo=yekt).timestamp())
+            )
+            self.assertFalse(
+                policy.probe_night_halted(datetime(2026, 10, 31, 20, 59, tzinfo=yekt).timestamp())
+            )
+            self.assertTrue(
+                policy.probe_night_halted(datetime(2026, 11, 1, 5, 59, tzinfo=yekt).timestamp())
+            )
+            self.assertFalse(
+                policy.probe_night_halted(datetime(2026, 11, 1, 6, 0, tzinfo=yekt).timestamp())
+            )
+            self.assertEqual(policy.probe_max_legs(now=day_ts), 3)
+            self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 3)
+            self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 3)
+            self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 3)
+            self.assertEqual(policy.probe_max_legs(now=night_ts), 2)
+            self.assertTrue(policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=600_000))
+            self.assertTrue(
+                policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=600_000)
+            )
+            self.assertFalse(
+                policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=200_000)
+            )
+            self.assertFalse(
+                policy.probe_setup_ok_now(night_candle, now=night_ts, turnover=5_000_000)
+            )
+            self.assertTrue(
+                policy.probe_setup_ok_now(night_spark, now=night_ts, turnover=600_000)
+            )
+            self.assertFalse(
+                policy.probe_setup_ok_now(night_spark, now=night_ts, turnover=200_000)
+            )
         self.assertIsNone(policy.probe_night_halt_reason(night_ts))
         self.assertIsNone(policy.probe_night_halt_reason(day_ts))
         self.assertEqual(policy.PROBE_MAX_LEGS_BTC_DOWN, 2)
-        self.assertEqual(policy.probe_max_legs(now=day_ts), 3)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.4, now=day_ts), 3)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=0.0, now=day_ts), 3)
-        self.assertEqual(policy.probe_max_legs(btc_day_chg=-0.01, now=day_ts), 3)
-        self.assertEqual(policy.probe_max_legs(now=night_ts), 2)
         self.assertEqual(policy.tape_btc_day_chg([{"ticker": "ETH", "chg": 1.0}]), None)
         self.assertEqual(
             policy.tape_btc_day_chg([{"ticker": "BTC", "chg": -1.2}, {"ticker": "ETH", "chg": 2.0}]),
             -1.2,
-        )
-        night_stair = {"shelf": 1.0, "price": 1.01, "stair": 1.0, "algo": "candle"}
-        night_candle = {"shelf": 1.0, "price": 1.01, "algo": "candle"}
-        self.assertTrue(policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=600_000))
-        self.assertTrue(
-            policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=600_000)
-        )
-        self.assertFalse(
-            policy.probe_setup_ok_now(night_stair, now=night_ts, turnover=200_000)
-        )
-        self.assertFalse(
-            policy.probe_setup_ok_now(night_candle, now=night_ts, turnover=5_000_000)
         )
         # Ручной lift на час — ночь как день (слабый candle тоже ок).
         with tempfile.TemporaryDirectory() as tmp:
@@ -656,13 +664,6 @@ class TestDeskPolicy(unittest.TestCase):
                 self.assertTrue(
                     policy.probe_setup_ok_now(night_candle, now=night_ts, turnover=200_000)
                 )
-        night_spark = {"shelf": 1.0, "price": 1.01, "spark": 1.0, "algo": "spark"}
-        self.assertTrue(
-            policy.probe_setup_ok_now(night_spark, now=night_ts, turnover=600_000)
-        )
-        self.assertFalse(
-            policy.probe_setup_ok_now(night_spark, now=night_ts, turnover=200_000)
-        )
         self.assertFalse(
             policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=200_000, strict=True)
         )
@@ -1034,7 +1035,7 @@ class TestDeskPolicy(unittest.TestCase):
                 day_chg=-1.0,
             )
         )
-        self.assertEqual(policy.PROBE_NO_TRAP_TIMEOUT_SEC, 10 * 60)
+        self.assertEqual(policy.PROBE_NO_TRAP_TIMEOUT_SEC, 18 * 60)
         assert pop is not None
         self.assertAlmostEqual(pop["shelf"], 1.0)
         self.assertEqual(pop.get("pop"), 1.0)
@@ -1154,11 +1155,14 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(
             policy.probe_candle_buy_ok(1.005, 1.0055, 1.000, 1.000)
         )
-        # PIEVERSE: px == hi, фитиль 0. tip_cap = hi*0.9995 всегда ниже цены.
+        # PIEVERSE / TA: px == hi, фитиль 0 — tip_cap больше не режет импульс.
         self.assertTrue(
             policy.probe_candle_buy_ok(1.490, 1.490, 1.489, 1.489)
         )
-        # Фитиль 0.02% тоже у хая: порог пропуска 0.15%.
+        self.assertTrue(
+            policy.probe_candle_buy_ok(0.1035, 0.1035, 0.1018, 0.1020)
+        )
+        # Фитиль 0.02% тоже у хая: порог пропуска 0.15% / wick_ratio ≤ 0.10.
         self.assertTrue(
             policy.probe_candle_buy_ok(1.4897, 1.490, 1.489, 1.489)
         )
@@ -1177,6 +1181,16 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(
             policy.probe_book_buy_ok(bid=0.04051, ask=0.04071, arm_px=0.0405)
         )
+        # DEGEN low-nominal: спред 0.82% проходит при потолке 1.0% для px<$0.01.
+        self.assertTrue(
+            policy.probe_book_buy_ok(
+                bid=0.0009107, ask=0.0009182, arm_px=0.000921, tick_size=1e-7
+            )
+        )
+        # CPOOL pop tip: тело чуть ниже 1.5%, wick_ratio мал — buy_ok.
+        self.assertTrue(
+            policy.probe_pop_buy_ok(0.02789, 0.02795, 0.02740, 0.02748, elapsed_sec=30.0)
+        )
         self.assertEqual(policy.PROBE_MIN_ENTRY_OBI, 0.55)
         self.assertTrue(policy.probe_entry_obi_ok(None))
         self.assertFalse(policy.probe_entry_obi_ok(0.50))
@@ -1187,6 +1201,11 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(policy.probe_entry_obi_ok(0.60, strict=True))
         self.assertFalse(policy.probe_entry_obi_ok(0.59, strict=True))
         self.assertFalse(policy.probe_entry_obi_ok(0.40, strict=True))
+        # Всплеск объёма: порог OBI 0.35 (импульс уплотняет ask).
+        self.assertTrue(policy.probe_entry_obi_ok(0.35, volume_surge=True))
+        self.assertFalse(policy.probe_entry_obi_ok(0.34, volume_surge=True))
+        self.assertTrue(policy.probe_entry_obi_ok(0.40, strict=True, volume_surge=True))
+        self.assertFalse(policy.probe_entry_obi_ok(0.39, strict=True, volume_surge=True))
         self.assertFalse(
             policy.probe_book_buy_ok(bid=0.00727, ask=0.00729, arm_px=0.007281, strict=True)
         )
@@ -1234,7 +1253,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.PROBE_POP_MAX_BODY_PCT, 8.5)
         self.assertEqual(policy.PROBE_POP_MAX_WICK_PCT, 1.80)
         self.assertEqual(policy.PROBE_POP_MAX_30M_CHG_PCT, 16.0)
-        self.assertEqual(policy.PROBE_CANDLE_MAX_BAR_POS, 0.98)
+        self.assertEqual(policy.PROBE_CANDLE_MAX_BAR_POS, 1.0)
         weak = {**rising, "close": 1.004, "high": 1.012}
         self.assertIsNone(policy.probe_candle_setup(base5 + [weak]))
         # Ступенька мельче пробоя — не вход. +48% и пик суток — тоже нет.
@@ -1920,7 +1939,7 @@ class TestDeskPolicy(unittest.TestCase):
                 qty=40.0,
             )
         )
-        # Нет трапа и цена ≤ входа ≥ 20м → «срез» (не ждём 2ч).
+        # Нет трапа и минус ≥ 0.20% после 18м → «срез» (не ждём 2ч).
         self.assertEqual(
             policy.probe_exit_reason(
                 price=0.3143,
@@ -1932,6 +1951,35 @@ class TestDeskPolicy(unittest.TestCase):
                 qty=94.5,
                 opened_ts=1000.0,
                 now=1000.0 + policy.PROBE_NO_TRAP_TIMEOUT_SEC + 1.0,
+            ),
+            "срез",
+        )
+        # Плоский/мелкий минус после 18м не режем — даём ретесту 5м дожить.
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.3170,
+                entry=0.3174,
+                shelf=0.314,
+                trend15="neutral",
+                peak=0.3199,
+                algo=policy.PROBE_ALGO_CANDLE,
+                qty=94.5,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_NO_TRAP_TIMEOUT_SEC + 1.0,
+            )
+        )
+        # Плоский чоп без трапа: 45м — срез (не 2ч застой).
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.3175,
+                entry=0.3174,
+                shelf=0.314,
+                trend15="neutral",
+                peak=0.3180,
+                algo=policy.PROBE_ALGO_CANDLE,
+                qty=94.5,
+                opened_ts=1000.0,
+                now=1000.0 + policy.PROBE_NO_TRAP_MAX_STALE_SEC + 1.0,
             ),
             "срез",
         )
@@ -1949,6 +1997,59 @@ class TestDeskPolicy(unittest.TestCase):
                 now=1000.0 + policy.PROBE_NO_TRAP_TIMEOUT_SEC - 1.0,
             )
         )
+        # Плоский бар H=L: wick_ratio без ZeroDivisionError.
+        self.assertEqual(
+            policy._candle_upper_wick_ratio(1.0, 1.0, 1.0, 1.0),
+            0.0,
+        )
+        # Candle chase от полки, не от цены взвода.
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=1000.0,
+                now=1001.0,
+                price=1.013,
+                shelf=1.0,
+                trend15="bull",
+                day_chg=5.0,
+                arm_px=1.011,
+                algo=policy.PROBE_ALGO_CANDLE,
+                hold_sec=0.0,
+                chase_pct=1.2,
+            ),
+            "drop",
+        )
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=1000.0,
+                now=1001.0,
+                price=1.011,
+                shelf=1.0,
+                trend15="bull",
+                day_chg=5.0,
+                arm_px=1.011,
+                algo=policy.PROBE_ALGO_CANDLE,
+                hold_sec=0.0,
+                chase_pct=1.2,
+            ),
+            "buy",
+        )
+        # OBI surge: в первые ~45с нормируем на 0.15 бара.
+        early_bars = [
+            {"open": 1.0, "high": 1.01, "low": 0.99, "close": 1.0, "volume": 10.0, "ts": 100.0}
+            for _ in range(13)
+        ] + [
+            {
+                "open": 1.0,
+                "high": 1.01,
+                "low": 0.99,
+                "close": 1.008,
+                "volume": 3.1,
+                "ts": 1000.0,
+            }
+        ]
+        self.assertTrue(
+            policy.probe_volume_surge(early_bars, now=1045.0)
+        )  # 3.1 >= 10*2*0.15
         # Трап взвёлся, лёгкий минус (выше BE−0.1%), ≥2ч → «застой», не полка-BE.
         self.assertEqual(
             policy.probe_exit_reason(
@@ -1964,10 +2065,10 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             "застой",
         )
-        # Плюс над входом не режем scratch: ждём ловушку или полку.
+        # Уверенный плюс (≥0.50%) без трапа: 45м-срез не трогает, ждём ловушку/полку.
         self.assertIsNone(
             policy.probe_exit_reason(
-                price=0.3180,
+                price=0.3195,
                 entry=0.3174,
                 shelf=0.314,
                 trend15="neutral",
@@ -2655,6 +2756,60 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertIsNone(
             crypto_journal.probe_loss_guard_reason(now=day, trades=scratch, enabled=True)
         )
+        # Три таймаут-скрэтча ≈ −$0.11 (−0.28%) — не серия strict.
+        micro = []
+        for i, name in enumerate(("TA", "SPX", "ONDO")):
+            t0 = day - 900 + i * 200
+            micro.extend(
+                [
+                    {
+                        "ticker": name,
+                        "side": "buy",
+                        "quote": 40.0,
+                        "price": 1.0,
+                        "ts_epoch": t0,
+                    },
+                    {
+                        "ticker": name,
+                        "side": "sell",
+                        "quote": 39.89,
+                        "price": 0.99725,
+                        "ts_epoch": t0 + 60,
+                        "reason": "срез",
+                    },
+                ]
+            )
+        self.assertIsNone(
+            crypto_journal.probe_loss_guard_reason(now=day, trades=micro, enabled=True)
+        )
+        # Три полки ≤ −1% cost — серия.
+        hard = []
+        for i, name in enumerate(("AAA", "BBB", "CCC")):
+            t0 = day - 900 + i * 200
+            hard.extend(
+                [
+                    {
+                        "ticker": name,
+                        "side": "buy",
+                        "quote": 40.0,
+                        "price": 1.0,
+                        "ts_epoch": t0,
+                    },
+                    {
+                        "ticker": name,
+                        "side": "sell",
+                        "quote": 39.20,
+                        "price": 0.98,
+                        "ts_epoch": t0 + 60,
+                        "reason": "полка",
+                    },
+                ]
+            )
+        hard_reason = crypto_journal.probe_loss_guard_reason(
+            now=day, trades=hard, enabled=True
+        )
+        self.assertIsNotNone(hard_reason)
+        self.assertTrue(str(hard_reason).startswith("серия из"))
         self.assertTrue(policy.PROBE_STRICT_MODE)
         self.assertIsNotNone(
             crypto_journal.probe_loss_guard_reason(now=day, trades=shelf_trades)
@@ -2914,8 +3069,9 @@ class TestEarn(unittest.TestCase):
         with self._patched():
             self.skill._earn_free_cash(26.0)
         self.assertEqual(self.orders[0][0], "Redeem")
-        self.assertAlmostEqual(self.orders[0][1], 28.0)  # дыра 16$ + буфер 12$
-        self.assertAlmostEqual(self.spot, 38.0)
+        # дыра 16$ + буфер щупа $120, но в Earn только 100$
+        self.assertAlmostEqual(self.orders[0][1], 100.0)
+        self.assertAlmostEqual(self.spot, 110.0)
 
     def test_no_redeem_when_spot_enough(self):
         self.spot = 40.0
@@ -2924,23 +3080,31 @@ class TestEarn(unittest.TestCase):
         self.assertEqual(self.orders, [])
 
     def test_park_idle_cash(self):
-        self.spot = 80.0
+        self.spot = 200.0
         with self._patched():
             self.skill._earn_park_idle()
         self.assertEqual(self.orders[0][0], "Stake")
-        self.assertAlmostEqual(self.orders[0][1], 68.0)
-        self.assertAlmostEqual(self.spot, 12.0)
+        self.assertAlmostEqual(self.orders[0][1], 80.0)
+        self.assertAlmostEqual(self.spot, 120.0)
 
     def test_park_tops_up_spot_buffer(self):
         self.spot = 0.2
         with self._patched():
             self.skill._earn_park_idle()
         self.assertEqual(self.orders[0][0], "Redeem")
-        self.assertAlmostEqual(self.orders[0][1], 11.8)
-        self.assertAlmostEqual(self.spot, 12.0)
+        # Транш max(gap, $25) до буфера $120, но в Earn только 100$.
+        self.assertAlmostEqual(self.orders[0][1], 100.0)
+        self.assertAlmostEqual(self.spot, 100.2)
+
+    def test_park_hysteresis_skips_tiny_topup(self):
+        """105…120: не дёргать Earn на $1.50."""
+        self.spot = 110.0
+        with self._patched():
+            self.skill._earn_park_idle()
+        self.assertEqual(self.orders, [])
 
     def test_park_skips_small_leftover(self):
-        self.spot = 13.0
+        self.spot = 121.0  # буфер $120 + меньше минимума стейка
         with self._patched():
             self.skill._earn_park_idle()
         self.assertEqual(self.orders, [])
@@ -3156,6 +3320,57 @@ class TestManualTrap(unittest.TestCase):
             self.skill._probe_exit(probe_legs()[0])
         self.assertEqual(placed, [])
         self.assertEqual(probe_legs()[0]["ticker"], "SPX")
+
+    def test_probe_timeout_scratch_cancels_tp_then_market(self):
+        """Срез 45м: TP снимается, затем market Sell (спот без OCO)."""
+        from skills.crypto.common import probe_legs, write_probe
+
+        opened = time.time() - (policy.PROBE_NO_TRAP_MAX_STALE_SEC + 5)
+        write_probe(
+            ticker="ONDO",
+            qty=100.0,
+            entry=0.376,
+            shelf=0.374,
+            arm_px=0.376,
+            peak=0.377,
+            low=0.373,
+            algo=policy.PROBE_ALGO_CANDLE,
+            tp_order="lim-ondo",
+            tp_px=0.393,
+            ts=opened,
+        )
+
+        placed: list[tuple] = []
+        cancels: list[str] = []
+
+        def place(ticker, side, quote_usdt=None, base_qty=None, price=0.0, maker=False):
+            placed.append((ticker, side, maker, base_qty))
+            self.skill._last_fill = {"qty": float(base_qty or 0), "quote": 37.4}
+            return f"ok {ticker}"
+
+        def cancel(ticker, order_id, side="Sell"):
+            cancels.append(order_id)
+            return True, 0.0, 0.0, 0.0
+
+        bars = [{"high": 0.38, "low": 0.37, "close": 0.375, "volume": 1.0} for _ in range(80)]
+        with (
+            patch.object(self.skill, "_ticker", return_value={"price": 0.3755, "chg": 1.0}),
+            patch.object(self.skill, "_tape_quote", return_value={"price": 0.3755, "bid": 0.375}),
+            patch.object(self.skill, "_probe_bars", return_value=bars),
+            patch.object(self.skill, "_cancel_limit_confirmed", side_effect=cancel),
+            patch.object(
+                self.skill, "_cash_and_held", return_value=(100.0, {"ONDO": {"qty": 100.0}})
+            ),
+            patch.object(self.skill, "_place_order", side_effect=place),
+            patch("skills.crypto.desk.ma_trend", return_value="neutral"),
+        ):
+            self.skill._probe_exit(probe_legs()[0])
+        self.assertEqual(cancels, ["lim-ondo"])
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(placed[0][0], "ONDO")
+        self.assertEqual(placed[0][1], "Sell")
+        self.assertFalse(placed[0][2])  # market, не maker
+        self.assertEqual(probe_legs(), [])
 
     def test_free_qty_subtracts_managed(self):
         self.assertAlmostEqual(

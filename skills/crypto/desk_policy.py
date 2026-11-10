@@ -39,8 +39,17 @@ PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "д�
 PROBE_CANDLE_STALE_SEC = 2 * 3600
 # Срез только если сломана полка. 3 минуты — дыхание 5м свечи. Слив режет кап −1.8%.
 PROBE_FAIL_SCRATCH_SEC = 180.0
-# Нет взвода ловушки и цена ≤ входа ≥ 10м — «срез». Ракета либо идёт сразу, либо слот свободен.
-PROBE_NO_TRAP_TIMEOUT_SEC = 10 * 60
+# Нет взвода ловушки и цена ниже входа ≥ 18м — «срез».
+# 10м = 2×5м: резали ретест/флаг на taker round-trip (TA/SPX/ONDO).
+PROBE_NO_TRAP_TIMEOUT_SEC = 18 * 60
+# Срез по таймауту только в минусе глубже комиссии-шума, не на нуле.
+# Gross ±0%: после taker×2 (~0.36%) уже минус — 18м режет только явный минус цены.
+PROBE_NO_TRAP_MIN_LOSS_PCT = 0.20
+# Плоский чоп (−0.19…+0.50%) без трапа: не висеть вечно — 45м ≈ 9×5м.
+PROBE_NO_TRAP_MAX_STALE_SEC = 45 * 60
+PROBE_NO_TRAP_MAX_STALE_GAIN_PCT = 0.50
+# Минимальная доля want при Buy: после лосей буфер $118 → 3-й слот не отваливается на 0.9×$40.
+PROBE_MIN_QUOTE_FRAC = 0.85
 # Лимитный тейк на всю ногу сразу после покупки. Стоп и срез остаются маркетом.
 PROBE_LIMIT_TP_PCT = 4.5
 # После «среза» не входить в ту же пилу сразу (TA/CARV/GROVE по 4–5 раз).
@@ -141,6 +150,10 @@ PROBE_MARKET_FALL_PAUSE_SEC = 3600.0
 PROBE_HOURLY_MAX_LOSS_USD = 1.50
 PROBE_MAX_CONSECUTIVE_LOSSES = 3
 PROBE_STREAK_PAUSE_SEC = 3600.0
+# Серия strict: только системный лось ≥ 1% cost (полка/стоп). Скрэтч −$0.10 — опцион, не бан.
+PROBE_STREAK_MIN_LOSS_PCT = 1.0
+# Таймаут-срез с мизерным PnL (>$−0.25) в серию не входит, даже если % формально жёсткий на пыли.
+PROBE_STREAK_IGNORE_SCRATCH_USD = 0.25
 # После среза «полка» не перерабатывать слот в тот же чоп (ZAMA→DOOD, LA→INIT).
 PROBE_SHELF_COOLDOWN_SEC = 25 * 60
 PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
@@ -246,16 +259,19 @@ PROBE_CANDLE_LOOKBACK = 12
 # 0,25% ловил шум (CSPR/BICO +0,5%). INIT был +0,67…1,3% от open.
 PROBE_CANDLE_MIN_BODY_PCT = 0.6
 PROBE_CANDLE_MAX_BODY_PCT = 2.0
-# Середина и верх восходящей свечи (pos 0.35..0.85):
-# продавленные снизу фитили отсекаются, сильный зелёный бар у верха — нет.
+# Середина и верх восходящей свечи. Pos до 1.0: px == hi не «кончик», а импульс.
 PROBE_CANDLE_MIN_BAR_POS = 0.35
-PROBE_CANDLE_MAX_BAR_POS = 0.98
-# Верхний фитиль ≤ 0.90% от open. Кончик — отступ 0.05%; хай без фитиля не отмена.
+PROBE_CANDLE_MAX_BAR_POS = 1.0
+# Верхний фитиль ≤ 0.90% от open. У хая без фитиля слива (ratio ≤ 0.10) — вход ок.
 PROBE_CANDLE_MAX_WICK_PCT = 0.90
 PROBE_CANDLE_MAX_DIP_PCT = 0.80
 PROBE_CANDLE_TIP_GAP_PCT = 0.05
+# Доля верхней тени от (high−low): ≤10% — чистый импульс у хая, tip_cap не режем.
+PROBE_CANDLE_TIP_WICK_RATIO = 0.10
 # В первые минуты 5м свечи нормируем порог объёма по доле прошедшего времени (min 0.30 бара).
 PROBE_CANDLE_MIN_ELAPSED_FRAC = 0.30
+# OBI-surge: раньше 0.30 глушил ракету в 1-й минуте (сырой V << 2×median).
+PROBE_OBI_SURGE_MIN_ELAPSED_FRAC = 0.15
 # Касание open — фитиль той же свечи, не провал. Полка — только уход под open.
 PROBE_CANDLE_SHELF_BREAK_PCT = 0.4
 PROBE_CANDLE_VOL_MULT = 1.5
@@ -301,8 +317,18 @@ PROBE_STAIR2_MIN_1H_POS = 0.88
 # Защита от проскальзывания по пустому стакану перед рыночной покупкой щупа (GROVE 0.007281->0.007409):
 PROBE_MAX_SPREAD_PCT = 0.55
 PROBE_MAX_ASK_SLIP_PCT = 0.65
+# Дешёвые монеты (<$0.01): тик раздувает % спреда (DEGEN 0.82% при пороге 0.55).
+PROBE_LOW_NOMINAL_PX = 0.01
+PROBE_LOW_NOMINAL_MAX_SPREAD_PCT = 1.0
+PROBE_LOW_NOMINAL_SPREAD_TICKS = 3.0
+# Buy-ok: микрососкальзывание тела после взвода (CPOOL 1.491% < 1.50%) не tip.
+PROBE_BUY_BODY_SLACK = 0.92
 # OBI на каждом входе. Нет котировки стакана — не блокируем.
 PROBE_MIN_ENTRY_OBI = 0.55
+# При всплеске объёма ask уплотняется тейками — сырой OBI падает, импульс жив (TIA/CPOOL).
+PROBE_MIN_ENTRY_OBI_SURGE = 0.35
+PROBE_STRICT_MIN_ENTRY_OBI_SURGE = 0.40
+PROBE_OBI_SURGE_VOL_MULT = 2.0
 # Жёсткий режим (бывшие паузы: полка, час, серия, день): щуп не молчит, фильтры туже.
 PROBE_STRICT_MIN_ENTRY_OBI = 0.60
 PROBE_STRICT_MAX_SPREAD_PCT = 0.20
@@ -1528,6 +1554,24 @@ def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
     return probe_shelf_setup_daily(bars) or probe_shelf_setup_local(bars)
 
 
+def _candle_upper_wick_ratio(
+    price: float, live_high: float, live_low: float, live_open: float
+) -> float:
+    """Верхняя тень / (high−low). Плоский бар (H=L) → 0, без ZeroDivisionError."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0:
+        return 0.0
+    raw = hi - lo
+    if raw <= 1e-12:
+        return 0.0
+    span = max(1e-8, raw)
+    top = max(op, px) if op > 0 else px
+    return max(0.0, (hi - top) / span)
+
+
 def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
     """Начало восходящей свечи: сильный бар у хая без фитиля слива не режем."""
     px = float(price or 0)
@@ -1545,8 +1589,9 @@ def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_o
     upper_wick = (hi - px) / op * 100.0
     if upper_wick > PROBE_CANDLE_MAX_WICK_PCT + 1e-12:
         return False
-    # tip_cap только при фитиле слива. Хай без фитиля (px == hi) не режем.
-    if upper_wick > 0.15:
+    # Фитиль слива по размаху: tip_cap больше не режет px == hi.
+    wick_ratio = _candle_upper_wick_ratio(px, hi, lo, op)
+    if wick_ratio > PROBE_CANDLE_TIP_WICK_RATIO + 1e-12:
         tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
         if px > tip_cap + 1e-12:
             return False
@@ -1592,6 +1637,25 @@ def probe_spark_live_ok(price: float, live_high: float, live_low: float, live_op
     return True
 
 
+def probe_tip_wick_ok(
+    price: float, live_high: float, live_low: float, live_open: float
+) -> bool:
+    """Единый допуск кончика: wick_ratio ≤ 0.10 или микрофитиль ≤ 0.25% open."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if (
+        _candle_upper_wick_ratio(px, hi, lo, op)
+        <= PROBE_CANDLE_TIP_WICK_RATIO + 1e-12
+    ):
+        return True
+    # CPOOL: ratio ~0.11 при фитиле 0.21% open — не слив.
+    if px > 0 and hi > 0 and op > 0 and (hi - px) / op * 100.0 <= 0.25 + 1e-12:
+        return True
+    return False
+
+
 def probe_spark_buy_ok(
     price: float,
     live_high: float,
@@ -1600,10 +1664,23 @@ def probe_spark_buy_ok(
     *,
     elapsed_sec: float | None = None,
 ) -> bool:
-    """Перед buy spark: окно 2 мин ещё живо и свеча не слилась."""
+    """Перед buy spark: окно 2 мин ещё живо; тонкий фитиль у хая не tip."""
     if elapsed_sec is not None and float(elapsed_sec) > PROBE_SPARK_MAX_ELAPSED_SEC + 1e-12:
         return False
-    return probe_spark_live_ok(price, live_high, live_low, live_open)
+    if probe_spark_live_ok(price, live_high, live_low, live_open):
+        return True
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or op <= 0 or px <= op + 1e-12:
+        return False
+    if not probe_tip_wick_ok(px, hi, lo if lo > 0 else min(op, px), op):
+        return False
+    body = (px / op - 1.0) * 100.0
+    min_body = probe_candle_min_body_pct() * PROBE_BUY_BODY_SLACK
+    max_body = probe_candle_max_body_pct()
+    return min_body - 1e-12 <= body <= max_body + 1e-12
 
 
 def probe_spark_setup(
@@ -1701,13 +1778,27 @@ def probe_pop_buy_ok(
     live_open: float,
     *,
     elapsed_sec: float | None = None,
+    min_body: float | None = None,
 ) -> bool:
-    """Перед buy pop: бар ещё не закрыт и свеча всё ещё в полосе тела."""
+    """Перед buy pop: бар жив; wick_ratio ≤ 0.10 не режем как tip (CPOOL)."""
     if elapsed_sec is not None and (
         float(elapsed_sec) < 0.0 or float(elapsed_sec) > PROBE_POP_MAX_ELAPSED_SEC + 1e-12
     ):
         return False
-    return probe_pop_live_ok(price, live_high, live_low, live_open)
+    if probe_pop_live_ok(price, live_high, live_low, live_open, min_body=min_body):
+        return True
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or op <= 0 or px <= op + 1e-12:
+        return False
+    if not probe_tip_wick_ok(px, hi, lo if lo > 0 else min(op, px), op):
+        return False
+    body = (px / op - 1.0) * 100.0
+    floor = PROBE_POP_MIN_BODY_PCT if min_body is None else float(min_body)
+    soft = float(floor) * PROBE_BUY_BODY_SLACK
+    return soft - 1e-12 <= body <= PROBE_POP_MAX_BODY_PCT + 1e-12
 
 
 def probe_pop_setup(
@@ -1752,7 +1843,7 @@ def probe_pop_setup(
 
 
 def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
-    """Перед buy candle: не режем сильный бар у хая, если у него нет верхнего фитиля слива."""
+    """Перед buy candle: импульс у хая без фитиля слива (ratio) не режем tip_cap."""
     px = float(price or 0)
     hi = float(live_high or 0)
     lo = float(live_low or 0)
@@ -1771,8 +1862,9 @@ def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_op
     if body > probe_candle_max_body_pct() + 1e-12:
         return False
     upper_wick = (hi - px) / op * 100.0
-    # Фитиль до 0.15% — цена у хая (PIEVERSE). tip_cap тут физически запрещает px == hi.
-    if upper_wick <= 0.15:
+    wick_ratio = _candle_upper_wick_ratio(px, hi, lo if lo > 0 else min(op, px), op)
+    # Чистый хай / тонкий фитиль ≤ 10% размаха — вход (TA/INIT), не tip_cap.
+    if wick_ratio <= PROBE_CANDLE_TIP_WICK_RATIO + 1e-12 or upper_wick <= 0.15:
         return True
     pos = (px - lo) / (hi - lo) if (lo > 0 and hi > lo + 1e-12) else 1.0
     tight_stair = (
@@ -1789,12 +1881,36 @@ def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_op
     return True
 
 
+def probe_max_spread_pct(
+    *,
+    bid: float = 0.0,
+    ask: float = 0.0,
+    tick_size: float = 0.0,
+    strict: bool = False,
+) -> float:
+    """Потолок спреда: база; для px<$0.01 вне жёсткого — max(база, 1.0%, 3×tick/mid)."""
+    base = PROBE_STRICT_MAX_SPREAD_PCT if strict else PROBE_MAX_SPREAD_PCT
+    if strict:
+        return float(base)
+    b = float(bid or 0)
+    a = float(ask or 0)
+    mid = (b + a) / 2.0 if b > 0 and a > 0 else max(b, a)
+    if mid <= 0 or mid >= PROBE_LOW_NOMINAL_PX - 1e-15:
+        return float(base)
+    ceiling = max(float(base), float(PROBE_LOW_NOMINAL_MAX_SPREAD_PCT))
+    tick = float(tick_size or 0)
+    if tick > 0:
+        ceiling = max(ceiling, PROBE_LOW_NOMINAL_SPREAD_TICKS * tick / mid * 100.0)
+    return float(ceiling)
+
+
 def probe_book_buy_ok(
     *,
     bid: float,
     ask: float,
     arm_px: float = 0.0,
     strict: bool = False,
+    tick_size: float = 0.0,
 ) -> bool:
     """Проверка живого стакана перед рыночным Buy: спред и ask-slip. В жёстком режиме туже."""
     b = float(bid or 0)
@@ -1802,7 +1918,7 @@ def probe_book_buy_ok(
     if b <= 0 or a <= 0 or a < b:
         return True
     spread_pct = (a - b) / b * 100.0
-    max_spread = PROBE_STRICT_MAX_SPREAD_PCT if strict else PROBE_MAX_SPREAD_PCT
+    max_spread = probe_max_spread_pct(bid=b, ask=a, tick_size=tick_size, strict=strict)
     max_slip = PROBE_STRICT_MAX_ASK_SLIP_PCT if strict else PROBE_MAX_ASK_SLIP_PCT
     if spread_pct > max_spread + 1e-12:
         return False
@@ -1812,14 +1928,54 @@ def probe_book_buy_ok(
     return True
 
 
-def probe_entry_obi_floor(*, strict: bool = False) -> float:
-    """Порог OBI: обычный вход 0.55, жёсткий режим 0.60."""
+def probe_volume_surge(
+    bars: list[dict[str, Any]] | None,
+    *,
+    now: float | None = None,
+    mult: float | None = None,
+) -> bool:
+    """Живой 5м бар ≥ mult× медианы окна (с поправкой на долю минуты)."""
+    rows = list(bars or [])
+    need = PROBE_CANDLE_LOOKBACK + 2
+    if len(rows) < need:
+        return False
+    forming = rows[-1]
+    window = rows[-(PROBE_CANDLE_LOOKBACK + 1) : -1]
+    try:
+        vol = float(forming.get("volume") or 0)
+        bar_ts = float(forming.get("ts") or 0)
+        vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError, KeyError):
+        return False
+    if vol <= 0 or not vols:
+        return False
+    typical = _median(vols)
+    if typical <= 0:
+        return False
+    elapsed_frac = 1.0
+    ts = time.time() if now is None else float(now)
+    if bar_ts > 0:
+        elapsed = max(0.0, ts - bar_ts)
+        # V_norm = V / max(0.15, t/300): ранняя ракета получает soft OBI.
+        elapsed_frac = max(PROBE_OBI_SURGE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
+    floor = float(PROBE_OBI_SURGE_VOL_MULT if mult is None else mult)
+    return vol >= typical * floor * elapsed_frac - 1e-12
+
+
+def probe_entry_obi_floor(*, strict: bool = False, volume_surge: bool = False) -> float:
+    """Порог OBI: 0.55 / жёсткий 0.60; при всплеске объёма 0.35 / 0.40."""
+    if volume_surge:
+        if strict:
+            return float(PROBE_STRICT_MIN_ENTRY_OBI_SURGE)
+        return float(PROBE_MIN_ENTRY_OBI_SURGE)
     if strict:
         return float(PROBE_STRICT_MIN_ENTRY_OBI)
     return float(PROBE_MIN_ENTRY_OBI)
 
 
-def probe_entry_obi_ok(obi: float | None, *, strict: bool = False) -> bool:
+def probe_entry_obi_ok(
+    obi: float | None, *, strict: bool = False, volume_surge: bool = False
+) -> bool:
     """OBI перед Buy. Нет котировки стакана — не блокируем."""
     if obi is None:
         return True
@@ -1827,7 +1983,7 @@ def probe_entry_obi_ok(obi: float | None, *, strict: bool = False) -> bool:
         value = float(obi)
     except (TypeError, ValueError):
         return True
-    return value >= probe_entry_obi_floor(strict=strict) - 1e-12
+    return value >= probe_entry_obi_floor(strict=strict, volume_surge=volume_surge) - 1e-12
 
 
 def _probe_staircase_setup(
@@ -2223,13 +2379,20 @@ def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
         return None
     if price < prior_high:
         return None
-    # Не на самом кончике живой свечи; выстрел почти всегда у верха бара.
+    # Кончик: тот же wick_ratio ≤ 0.10, что у candle/pop/spark — не tip_cap от хая.
     if live_high > 0 and live_low > 0:
-        tip_cap = live_high * (1.0 - PROBE_IMPULSE_TIP_GAP_PCT / 100.0)
-        if price > tip_cap + 1e-12:
-            return None
+        try:
+            live_open = float(forming.get("open") or 0)
+        except (TypeError, ValueError):
+            live_open = 0.0
+        clean_tip = probe_tip_wick_ok(price, live_high, live_low, live_open or price)
+        if not clean_tip:
+            tip_cap = live_high * (1.0 - PROBE_IMPULSE_TIP_GAP_PCT / 100.0)
+            if price > tip_cap + 1e-12:
+                return None
         span = live_high - live_low
-        if span > 1e-12 and (price - live_low) / span > PROBE_IMPULSE_MAX_BAR_POS + 1e-12:
+        max_pos = 1.0 if clean_tip else PROBE_IMPULSE_MAX_BAR_POS
+        if span > 1e-12 and (price - live_low) / span > max_pos + 1e-12:
             return None
     return {"shelf": prior_high, "price": price, "impulse": 1.0}
 
@@ -2594,7 +2757,13 @@ def probe_arm_action(
     params = probe_algo_params(algo)
     chase = float(params["chase_pct"] if chase_pct is None else chase_pct)
     hold = float(params["hold_sec"] if hold_sec is None else hold_sec)
-    if arm_px > 0 and price > arm_px * (1.0 + chase / 100.0):
+    # Candle: догон от полки пробоя, не от хая/цены взвода (slip на кончике).
+    # Spark/pop: shelf=open — отсчёт от arm_px, иначе тело 1–2% сразу «догон».
+    if name == PROBE_ALGO_CANDLE and float(shelf or 0) > 0:
+        chase_ref = float(shelf)
+    else:
+        chase_ref = float(arm_px or 0) or float(shelf or 0)
+    if chase_ref > 0 and price > chase_ref * (1.0 + chase / 100.0):
         return "drop"
     if float(now) - float(armed_ts) < hold:
         return "wait"
@@ -2625,7 +2794,7 @@ def probe_exit_reason(
     Impulse: запас $0.48 и откат 1.50%. Медвежий стакан сжимает откат до 0.20%.
 
     Пока ловушка не взведена: soft-выходы; подножка impulse/sprint/grind их не берёт.
-    Нет трапа и цена ≤ входа ≥ PROBE_NO_TRAP_TIMEOUT_SEC — «срез».
+    Нет трапа и цена ниже входа ≥ PROBE_NO_TRAP_TIMEOUT_SEC — «срез».
     Минус ≥ PROBE_CANDLE_STALE_SEC при уже взведённом пике — «застой» (карман2).
     """
     px = float(price or 0)
@@ -2689,13 +2858,22 @@ def probe_exit_reason(
             shelf_lost = level > 0 and px <= level + 1e-12
         if shelf_lost:
             return "срез"
-    # Трап не взвёлся, сидим в нуле/минусе — не ждём 2ч «застой».
+    # Трап не взвёлся и сидим в минусе глубже шума — не ждём 2ч «застой».
     if (
         float(opened_ts or 0) > 0
         and now is not None
         and float(now) - float(opened_ts) >= PROBE_NO_TRAP_TIMEOUT_SEC
         and peak_gain < arm_pct - 1e-6
-        and gain <= 1e-12
+        and gain <= -PROBE_NO_TRAP_MIN_LOSS_PCT + 1e-12
+    ):
+        return "срез"
+    # Плоский чоп без трапа: 45м потолок (gross ±0% всё ещё net −0.36% на комиссиях).
+    if (
+        float(opened_ts or 0) > 0
+        and now is not None
+        and float(now) - float(opened_ts) >= PROBE_NO_TRAP_MAX_STALE_SEC
+        and peak_gain < arm_pct - 1e-6
+        and gain < PROBE_NO_TRAP_MAX_STALE_GAIN_PCT - 1e-12
     ):
         return "срез"
     if (
