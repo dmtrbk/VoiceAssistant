@@ -705,6 +705,13 @@ def _parse_second_pocket_leg(raw: Any) -> dict[str, Any] | None:
         out["scratch"] = True
     if bool(raw.get("unwind")):
         out["unwind"] = True
+    sell_order = str(raw.get("sell_order") or "").strip()
+    if sell_order:
+        out["sell_order"] = sell_order
+        try:
+            out["sell_px"] = float(raw.get("sell_px") or 0)
+        except (TypeError, ValueError):
+            out["sell_px"] = 0.0
     return out
 
 
@@ -772,6 +779,10 @@ def write_second_pocket_legs(
             row["scratch"] = True
         if bool(leg.get("unwind")):
             row["unwind"] = True
+        if str(leg.get("sell_order") or "").strip():
+            row["sell_order"] = str(leg["sell_order"]).strip()
+            if float(leg.get("sell_px") or 0) > 0:
+                row["sell_px"] = float(leg["sell_px"])
         clean.append(row)
     if not clean:
         try:
@@ -872,6 +883,8 @@ def update_second_pocket_leg(
     low: float | None = None,
     exit_high: float | None = None,
     exit_ts: float | None = None,
+    sell_order: str | None = None,
+    sell_px: float | None = None,
     path: str | None = None,
 ) -> None:
     coin = _normalize_ticker(str(ticker or ""))
@@ -896,6 +909,15 @@ def update_second_pocket_leg(
             row["exit_high"] = max(0.0, float(exit_high))
         if exit_ts is not None:
             row["exit_ts"] = float(exit_ts)
+        if sell_order is not None:
+            note = str(sell_order or "").strip()
+            if note:
+                row["sell_order"] = note
+            else:
+                row.pop("sell_order", None)
+                row.pop("sell_px", None)
+        if sell_px is not None and float(sell_px or 0) > 0:
+            row["sell_px"] = float(sell_px)
         out.append(row)
     write_second_pocket_legs(out, path=path)
 

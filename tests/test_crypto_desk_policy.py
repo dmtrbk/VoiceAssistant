@@ -1866,7 +1866,7 @@ class TestDeskPolicy(unittest.TestCase):
                 algo=policy.PROBE_ALGO_POP,
                 qty=30.0,
             ),
-            "полка",
+            "безубыток",
         )
         self.assertIsNone(
             policy.probe_exit_reason(
@@ -1879,6 +1879,34 @@ class TestDeskPolicy(unittest.TestCase):
                 qty=30.0,
             )
         )
+        # CAP-like: пик +3.58%, откат impulse 1.5% → вершина; возврат к входу → безубыток.
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.11684,
+                entry=0.11482,
+                shelf=0.1111,
+                trend15="bull",
+                peak=0.11893,
+                algo=policy.PROBE_ALGO_IMPULSE,
+                qty=40.0 / 0.11482,
+                bid=0.11684,
+            ),
+            "вершина",
+        )
+        self.assertEqual(
+            policy.probe_exit_reason(
+                price=0.1143,
+                entry=0.11482,
+                shelf=0.1111,
+                trend15="bull",
+                peak=0.11893,
+                algo=policy.PROBE_ALGO_IMPULSE,
+                qty=40.0 / 0.11482,
+            ),
+            "безубыток",
+        )
+        self.assertIn("безубыток", policy.PROBE_SELL_REASONS)
+        self.assertFalse(policy.probe_should_handoff("безубыток"))
         # Пик +1.7% и откат 0.5% ещё выше круга комиссии. Откат 1.5% уже ниже — не продаём.
         self.assertEqual(
             policy.probe_exit_reason(
@@ -2954,8 +2982,55 @@ class TestMakerOrders(unittest.TestCase):
         self.assertEqual(self.bodies[0]["timeInForce"], "PostOnly")
         self.assertEqual(self.bodies[1]["timeInForce"], "IOC")
         self.assertAlmostEqual(float(self.bodies[1]["qty"]), 0.26, places=4)
-        # Пол bid − 0.35%.
-        self.assertEqual(self.bodies[1]["price"], "99.64")
+        # Sell IOC на лучшем bid (без bid−slip — иначе EC_ReachMarketPriceLimit).
+        self.assertEqual(self.bodies[1]["price"], "99.99")
+
+    def test_sell_price_floor_skips_maker_uses_ioc_bid(self):
+        """Памп Bybit: PostOnly ниже пола — IOC@bid по уровням (INIT)."""
+        from skills.crypto.trades import _sell_price_floor_from_exc
+
+        self.assertAlmostEqual(
+            _sell_price_floor_from_exc(
+                "Sell order price cannot be lower than 0.2928USDT."
+            )
+            or 0.0,
+            0.2928,
+            places=4,
+        )
+
+        def signed_smart(method, path, params=None):
+            if path == "/v5/order/create":
+                body = dict(params or {})
+                self.bodies.append(body)
+                # PostOnly на ask ниже пола — отказ; IOC@bid проходит.
+                if body.get("timeInForce") == "PostOnly":
+                    raise RuntimeError(
+                        "Sell order price cannot be lower than 0.2928USDT."
+                    )
+                return {"result": {"orderId": f"id{len(self.bodies)}"}}
+            if path in {"/v5/order/realtime", "/v5/order/history"}:
+                return {
+                    "result": {
+                        "list": [self.states.pop(0)] if self.states else []
+                    }
+                }
+            return {"result": {}}
+
+        self.states = [
+            {"orderStatus": "Filled", "cumExecQty": "100", "cumExecValue": "29.0"},
+        ]
+        with patch.object(
+            self.skill, "_book", return_value={"bid": 0.29, "ask": 0.291, "last": 0.29}
+        ), patch.object(
+            self.skill, "_ticker", return_value={"price": 0.29, "chg": 50.0, "turnover": 1}
+        ), patch.object(self.skill, "_signed", side_effect=signed_smart):
+            phrase = self.skill._place_order(
+                "INIT", "Sell", base_qty=100.0, price=0.29, maker=True
+            )
+        tifs = [b.get("timeInForce") for b in self.bodies]
+        self.assertIn("IOC", tifs)
+        self.assertNotIn("Market", [b.get("orderType") for b in self.bodies])
+        self.assertIn("29", phrase)
 
     def test_alive_limit_skips_top_up(self):
         """Отмена не подтвердилась — добор не ставим, иначе оверфилл."""

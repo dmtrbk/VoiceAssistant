@@ -35,7 +35,7 @@ POCKET_FROM_PROBE_MAX = 6
 # Мягкий выход щупа → передача во второй карман; жёсткий — продажа.
 # «дно» не передаём: цена уже у low щупа — карман2 сразу резал бы тем же дном.
 PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд", "застой"})
-PROBE_SELL_REASONS = frozenset({"стоп", "полка", "вершина", "дно", "срез"})
+PROBE_SELL_REASONS = frozenset({"стоп", "полка", "безубыток", "вершина", "дно", "срез"})
 PROBE_CANDLE_STALE_SEC = 2 * 3600
 # Срез только если сломана полка. 3 минуты — дыхание 5м свечи. Слив режет кап −1.8%.
 PROBE_FAIL_SCRATCH_SEC = 180.0
@@ -2839,11 +2839,12 @@ def probe_exit_reason(
     ):
         return "вершина"
     # После пика +1.2% возврат к entry−0.1% — BE (независимо от PROBE_SHELF_EXIT_ON).
+    # Не «полка»: иначе journal/reentry/cooldown карают как слом поддержки.
     if (
         peak_gain >= PROBE_FAST_BE_PEAK_PCT - 1e-9
         and px <= ent * (1.0 - PROBE_FAST_BE_BUFFER_PCT / 100.0) + 1e-12
     ):
-        return "полка"
+        return "безубыток"
     if (
         name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
         and float(opened_ts or 0) > 0

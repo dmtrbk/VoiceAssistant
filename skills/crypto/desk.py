@@ -534,6 +534,10 @@ class CryptoDeskMixin:
         blocked: set[str],
     ) -> list[str]:
         """Выход по ногам второго кармана (переданы с щупа). Покупок здесь нет."""
+        import re
+
+        from .trades import _sell_price_floor_from_exc
+
         phrases: list[str] = []
         for leg in list(read_second_pocket_legs()):
             ticker = str(leg.get("ticker") or "")
@@ -550,6 +554,71 @@ class CryptoDeskMixin:
             live_bid = float((live or {}).get("bid") or 0)
             entry = position_basis(book_entry, read_anchors().get(ticker))
             now = time.time()
+            # Уже висит лимитка на биржевом полу — ждём fill, не дублируем Sell.
+            sell_order = str(leg.get("sell_order") or "")
+            if sell_order:
+                row = self._order_state(ticker, sell_order)
+                status = str(row.get("orderStatus") or "")
+                try:
+                    done_qty = float(row.get("cumExecQty") or 0)
+                    done_quote = float(row.get("cumExecValue") or 0)
+                except (TypeError, ValueError):
+                    done_qty = done_quote = 0.0
+                if status == "Filled" or (
+                    done_qty > 0 and status in {"Cancelled", "PartiallyFilledCanceled"}
+                ):
+                    fill_px = done_quote / done_qty if done_qty > 0 else float(leg.get("sell_px") or price)
+                    self._pending_exit_reason = "вершина"
+                    try:
+                        from .trades import _cum_exec_fee_usdt
+
+                        self._journal_trade(
+                            ticker,
+                            "Sell",
+                            done_quote,
+                            fill_px,
+                            ticker,
+                            fee_usd=_cum_exec_fee_usdt(row, ticker, "Sell"),
+                        )
+                    except Exception as exc:
+                        logger.info("[Крипта] карман2 %s журнал пола: %s", ticker, exc)
+                    remain = max(0.0, qty - done_qty)
+                    if remain * max(fill_px, price, 1e-12) < _MIN_QUOTE:
+                        drop_second_pocket_leg(ticker)
+                        self._drop_anchor(ticker)
+                    else:
+                        update_second_pocket_leg(
+                            ticker,
+                            qty=remain,
+                            entry=book_entry,
+                            low=float(leg.get("low") or 0),
+                            exit_high=float(leg.get("exit_high") or 0),
+                            exit_ts=float(leg.get("exit_ts") or 0),
+                            sell_order="",
+                        )
+                    logger.info(
+                        "[Крипта] карман2 %s: выход (пол биржи) %.6g по %.4g",
+                        ticker,
+                        done_qty,
+                        fill_px,
+                    )
+                    continue
+                if status in {"Cancelled", "Rejected", "Deactivated"}:
+                    update_second_pocket_leg(ticker, sell_order="")
+                    logger.info(
+                        "[Крипта] карман2 %s: лимитка пола снята (%s) — пробую снова",
+                        ticker,
+                        status,
+                    )
+                else:
+                    logger.info(
+                        "[Крипта] карман2 %s жду пол биржи: заявка %s px %.4g сейчас %.4g",
+                        ticker,
+                        sell_order,
+                        float(leg.get("sell_px") or 0),
+                        price,
+                    )
+                    continue
             exit_state = None
             if float(leg.get("exit_high") or 0) > 0:
                 exit_state = {
@@ -627,6 +696,34 @@ class CryptoDeskMixin:
                 )
             except Exception as exc:
                 self._pending_exit_reason = ""
+                msg = str(exc or "")
+                floor_px = _sell_price_floor_from_exc(msg)
+                if floor_px is None:
+                    match = re.search(
+                        r"пол биржи\s+([0-9]+(?:\.[0-9]+)?)",
+                        msg,
+                        flags=re.IGNORECASE,
+                    )
+                    if match:
+                        try:
+                            floor_px = float(match.group(1))
+                        except ValueError:
+                            floor_px = None
+                if floor_px and floor_px > 0:
+                    order_id = self._rest_limit_sell(ticker, sell_qty, floor_px)
+                    if order_id:
+                        update_second_pocket_leg(
+                            ticker,
+                            sell_order=order_id,
+                            sell_px=floor_px,
+                        )
+                        logger.info(
+                            "[Крипта] карман2 %s: пол биржи %.6g > рынок — лимитка %s",
+                            ticker,
+                            floor_px,
+                            order_id,
+                        )
+                        continue
                 logger.info("[Крипта] карман2 %s продажа не прошла: %s", ticker, exc)
                 continue
             fill = getattr(self, "_last_fill", None)
@@ -1022,13 +1119,12 @@ class CryptoDeskMixin:
         return probe_strict_reason(raw, rows, btc_flash_pct=flash)
 
     def _probe_locked(self) -> None:
-        state = read_probe()
-        for leg in probe_legs(state):
-            self._probe_exit(leg)
+        self._probe_check_exits()
         paper = probe_is_paper()
         if paper:
             self._probe_paper_tick()
             # Имитация не держит взвод в боевом jarvis_crypto_probe.json.
+            state = read_probe()
             for arm in probe_arms(state):
                 write_probe(drop_arm=str(arm.get("ticker") or ""))
         if not cfg().probe_on:
@@ -1068,6 +1164,8 @@ class CryptoDeskMixin:
         held = len(probe_legs(state)) + len(probe_arms(state))
         if paper or held < cap or (cfg().second_on and not paper):
             self._probe_scan()
+            # Скан 25–45с держит замок: сразу после — догнать вершину/BE, что пропустили.
+            self._probe_check_exits()
 
     def _probe_journal_limit(self, ticker: str, qty: float, quote: float, fee: float) -> None:
         """Исполненная лимитка — продажа «вершина», не стоп."""
@@ -1099,21 +1197,35 @@ class CryptoDeskMixin:
         write_probe(drop=ticker)
         return True
 
+    def _probe_check_exits(self) -> None:
+        """Продать/передать открытые ноги. Зовут часто: до/после скана, в скане, по WS."""
+        state = read_probe()
+        for leg in probe_legs(state):
+            self._probe_exit(leg)
+
+    def _probe_exits_tick(self) -> None:
+        """WS/таймер вне полного цикла щупа: только выходы, без тяжёлого скана."""
+        if not probe_legs():
+            return
+        with common._TRADE_LOCK:
+            self._probe_check_exits()
+
     def _probe_exit(self, state: dict[str, Any]) -> None:
         ticker = str(state.get("ticker") or "")
-        try:
-            px = self._ticker(ticker)
-            price = float(px.get("price") or 0)
-        except Exception as exc:
-            logger.info("[Крипта] щуп %s цена: %s", ticker, exc)
-            return
         live = self._tape_quote(ticker)
-        if live and float(live.get("price") or 0) > 0:
-            price = float(live["price"])
+        price = float((live or {}).get("price") or 0)
         live_bid = float((live or {}).get("bid") or 0)
+        if price <= 0:
+            try:
+                px = self._ticker(ticker)
+                price = float(px.get("price") or 0)
+            except Exception as exc:
+                logger.info("[Крипта] щуп %s цена: %s", ticker, exc)
+                return
         trend = "bull"
         try:
-            bars = self._probe_bars(ticker, "15", 80)
+            # Кэш 30с: частые WS-проверки не должны бить REST на каждый тик.
+            bars = self._probe_bars(ticker, "15", 80, cache_sec=30.0)
             if bars:
                 trend = ma_trend([bar["close"] for bar in bars])
         except Exception as exc:
@@ -1257,7 +1369,7 @@ class CryptoDeskMixin:
             return
         seen = getattr(self, "_last_fill", None)
         # Срез/стоп/полка — только маркет. Maker после TP снова подвесит монеты.
-        force_market = str(reason) in {"срез", "стоп", "полка", "дно"}
+        force_market = str(reason) in {"срез", "стоп", "полка", "безубыток", "дно"}
         use_maker = (
             not force_market
             and not tp_order
@@ -2254,6 +2366,19 @@ class CryptoDeskMixin:
             }:
                 self._note_pin_idle(pin)
 
+        # Пока скан держит _TRADE_LOCK, WS не достучится до выходов — сами будим ноги.
+        last_exit_check = time.time()
+
+        def _exit_pulse() -> None:
+            nonlocal last_exit_check
+            if not probe_legs():
+                return
+            now_ex = time.time()
+            if now_ex - last_exit_check < 1.5:
+                return
+            self._probe_check_exits()
+            last_exit_check = time.time()
+
         # 1) Скан candle: бой — Топ-10, имитация — широкий список.
         for scan_idx, (_rank, row) in enumerate(ranked[:scan_lim]):
             if not _hunter_room():
@@ -2266,6 +2391,7 @@ class CryptoDeskMixin:
                 or float(row.get("turnover") or 0) >= 1_000_000.0
             )
             self._probe_scan_one(row, blocked, order, cache_sec=8.0 if fast_bar else 45.0)
+            _exit_pulse()
         # 2) Classic (impulse/…): тот же потолок, что у candle.
         if not classic or not _hunter_room():
             self._note_probe_beat(cap=cap, pin=pin)
@@ -2301,6 +2427,7 @@ class CryptoDeskMixin:
                 logger.info("[Крипта] щуп %s час: %s", ticker, exc)
                 continue
             _try_arm_row(row, setup, bars15, hour)
+            _exit_pulse()
         self._note_probe_beat(cap=cap, pin=pin)
 
     def _note_probe_beat(self, *, cap: int, pin: str) -> None:
@@ -2655,6 +2782,11 @@ class CryptoDeskMixin:
                     if fired:
                         tape.consume_signals()
                         self._pockets_tick()
+                        # Тикер щупа будит выходы сразу, не ждём next_probe / конец скана.
+                        try:
+                            self._probe_exits_tick()
+                        except Exception as exc:
+                            logger.warning("[Крипта] щуп выход по ленте: %s", exc)
                         break
                 elif self._desk_stop.wait(remaining):
                     return

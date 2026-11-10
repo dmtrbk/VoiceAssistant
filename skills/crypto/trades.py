@@ -25,6 +25,23 @@ from .common import (
 logger = logging.getLogger(__name__)
 
 
+def _sell_price_floor_from_exc(exc: BaseException | str) -> float | None:
+    """Bybit на пампе: «Sell order price cannot be lower than 0.2928USDT»."""
+    msg = str(exc or "")
+    match = re.search(
+        r"cannot be lower than\s*([0-9]+(?:\.[0-9]+)?)",
+        msg,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    try:
+        px = float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return px if px > 0 else None
+
+
 def _cum_exec_fee_usdt(state: dict[str, Any], ticker: str, side: str) -> float:
     """cumExecFee заявки в USDT. Buy без feeCurrency — комиссия в монете."""
     try:
@@ -256,20 +273,29 @@ class CryptoTradesMixin:
         qty = float(qty_s or 0)
         if qty <= 0 or qty * px + 1e-9 < min_amt:
             return 0.0, 0.0, 0.0, True
-        data = self._signed(
-            "POST",
-            "/v5/order/create",
-            {
-                "category": "spot",
-                "symbol": self._symbol(ticker),
-                "side": side,
-                "orderType": "Limit",
-                "timeInForce": "PostOnly",
-                "isLeverage": 0,
-                "qty": qty_s,
-                "price": price_s,
-            },
-        )
+        body = {
+            "category": "spot",
+            "symbol": self._symbol(ticker),
+            "side": side,
+            "orderType": "Limit",
+            "timeInForce": "PostOnly",
+            "isLeverage": 0,
+            "qty": qty_s,
+            "price": price_s,
+        }
+        try:
+            data = self._signed("POST", "/v5/order/create", body)
+        except Exception as exc:
+            floor_px = _sell_price_floor_from_exc(exc) if side == "Sell" else None
+            if floor_px is None:
+                raise
+            # PostOnly на полу выше ask не закроет выход — сразу к IOC/Market.
+            logger.info(
+                "[Крипта] лимитная Sell %s: пол биржи %.6g — пропускаю maker",
+                ticker,
+                floor_px,
+            )
+            return 0.0, 0.0, 0.0, True
         order_id = str((data.get("result") or {}).get("orderId") or "")
         if not order_id:
             return 0.0, 0.0, 0.0, True
@@ -439,27 +465,55 @@ class CryptoTradesMixin:
         else:
             if bid <= 0 or base_qty <= 0:
                 return 0.0, 0.0, 0.0
-            floor = bid * (1.0 - slip)
-            price_s = common._price_str(floor, filters["tick"], round_up=False)
+            # Sell IOC только по лучшему bid: bid−slip на тонкой книге даёт
+            # EC_ReachMarketPriceLimit (INIT 202 шт. сносили стакан).
+            last = float(book.get("last") or 0)
+            floor = bid
+            if last > 0:
+                floor = max(floor, last * (1.0 - slip))
+            # Не ниже bid: иначе снова уходим вглубь книги.
+            floor = max(floor, bid)
+            price_s = common._price_str(floor, filters["tick"], round_up=True)
             px = float(price_s)
             qty_s = _qty_str(base_qty, filters["step"])
             qty = float(qty_s or 0)
             if px <= 0 or qty <= 0 or qty * px + 1e-9 < min_amt:
                 return 0.0, 0.0, 0.0
-        data = self._signed(
-            "POST",
-            "/v5/order/create",
-            {
-                "category": "spot",
-                "symbol": self._symbol(ticker),
-                "side": side,
-                "orderType": "Limit",
-                "timeInForce": "IOC",
-                "isLeverage": 0,
-                "qty": qty_s,
-                "price": price_s,
-            },
-        )
+        body = {
+            "category": "spot",
+            "symbol": self._symbol(ticker),
+            "side": side,
+            "orderType": "Limit",
+            "timeInForce": "IOC",
+            "isLeverage": 0,
+            "qty": qty_s,
+            "price": price_s,
+        }
+        try:
+            data = self._signed("POST", "/v5/order/create", body)
+        except Exception as exc:
+            # Sell ниже пола: если пол ≤ bid — IOC на полу; если пол выше bid —
+            # лимит не скрестит книгу, пусть _place_order бьёт Market.
+            floor_px = _sell_price_floor_from_exc(exc) if side == "Sell" else None
+            if floor_px is None:
+                raise
+            if floor_px > bid + 1e-12:
+                # Биржа запрещает продажу ниже пола, а bid уже ниже — только лимитка на полу.
+                raise RuntimeError(
+                    f"пол биржи {floor_px:g} > bid {bid:g}"
+                )
+            if floor_px <= px + 1e-12:
+                raise
+            price_s = common._price_str(floor_px, filters["tick"], round_up=True)
+            px = float(price_s)
+            body = {**body, "price": price_s}
+            logger.info(
+                "[Крипта] IOC Sell %s: пол биржи %.6g — ставлю %s",
+                ticker,
+                floor_px,
+                price_s,
+            )
+            data = self._signed("POST", "/v5/order/create", body)
         order_id = str((data.get("result") or {}).get("orderId") or "")
         if not order_id:
             return 0.0, 0.0, 0.0
@@ -596,7 +650,41 @@ class CryptoTradesMixin:
 
         total_qty = maker_qty + top_qty
         total_quote = maker_quote + top_quote
+        # Крупный Market Sell → EC_ReachMarketPriceLimit. Режем IOC@bid по уровням.
+        floor_block = ""
+        if side == "Sell":
+            for _pass in range(8):
+                left = max(0.0, want_qty - total_qty)
+                if left * max(px, 1e-12) + 1e-9 < min_amt:
+                    break
+                # Первый IOC уже сделан в use_maker-ветке — не дублируем зря.
+                if use_maker and _pass == 0 and top_qty > 0:
+                    continue
+                try:
+                    s_qty, s_quote, s_fee = self._ioc_leg(
+                        ticker, "Sell", filters, base_qty=left,
+                    )
+                except Exception as exc:
+                    msg = str(exc or "")
+                    logger.info("[Крипта] IOC Sell %s добор: %s", ticker, exc)
+                    if "пол биржи" in msg.lower() or _sell_price_floor_from_exc(msg):
+                        floor_block = msg
+                    break
+                if s_qty <= 0:
+                    break
+                total_qty += s_qty
+                total_quote += s_quote
+                top_fee += s_fee
+                if _pass > 0 or not use_maker:
+                    logger.info(
+                        "[Крипта] IOC Sell %s уровень: %.6g на %.2f$",
+                        ticker,
+                        s_qty,
+                        s_quote,
+                    )
         if total_qty <= 0 or total_quote <= 0:
+            if floor_block:
+                raise RuntimeError(floor_block)
             raise RuntimeError("заявка не исполнилась")
         return self._finish_order(
             ticker,

@@ -415,6 +415,7 @@ class CryptoQuotesMixin:
         return {
             "bid": float(row.get("bid1Price") or 0),
             "ask": float(row.get("ask1Price") or 0),
+            "last": float(row.get("lastPrice") or 0),
         }
 
     def _orderbook_obi(self, ticker: str, depth: int = 5) -> float | None:
