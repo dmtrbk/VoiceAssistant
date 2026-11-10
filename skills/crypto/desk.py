@@ -199,6 +199,14 @@ class CryptoDeskMixin:
             self._desk_thread.start()
             common._desk_loop_started = True
             try:
+                from .crypto_ai_radar import CryptoAIRadar
+
+                if getattr(self, "_ai_radar", None) is None:
+                    self._ai_radar = CryptoAIRadar(self)
+                self._ai_radar.start()
+            except Exception as exc:
+                logger.warning("[Крипта] AI-радар старт: %s", exc)
+            try:
                 from crypto_probe_watch import start_probe_watch_thread
 
                 start_probe_watch_thread(notify_on_start=False)
@@ -1858,6 +1866,18 @@ class CryptoDeskMixin:
         strict = bool(self._probe_loss_guard_reason()) if probe_places_buys() else False
         turn = float(row.get("turnover") or 0)
         algo = str(setup.get("algo") or "shelf")
+        # AI-радар: мгновенный lookup. Лидер дня (пин) не режем ни на каком сетапе.
+        pin_name = str(read_probe_pin().get("ticker") or "").upper()
+        is_pinned_leader = (algo == PROBE_ALGO_PIN) or (
+            bool(pin_name) and ticker.upper() == pin_name
+        )
+        if not is_pinned_leader:
+            ai_radar = getattr(self, "_ai_radar", None)
+            if ai_radar is not None:
+                ai_veto = ai_radar.check_veto(ticker)
+                if ai_veto:
+                    self._probe_skip(f"{ticker} {algo}: вето ИИ — {ai_veto}")
+                    return False
         if not probe_setup_ok_now(
             setup,
             now=time.time(),
@@ -2186,6 +2206,12 @@ class CryptoDeskMixin:
             "strict": strict,
             "scan_lim": scan_lim,
         }
+        ai_radar = getattr(self, "_ai_radar", None)
+        if ai_radar is not None:
+            try:
+                ai_radar.offer_candidates([row for _score, row in ranked[:15]])
+            except Exception:
+                pass
         if (
             len(probe_legs()) + len(probe_arms()) >= cap
             and not paper
@@ -2313,6 +2339,12 @@ class CryptoDeskMixin:
         turn = float(meta.get("min_turn") or 0)
         if turn > 0:
             filter_bits.append(f"оборот≥${turn/1e3:.0f}k")
+        ai_radar = getattr(self, "_ai_radar", None)
+        if ai_radar is not None:
+            try:
+                filter_bits.append(ai_radar.status_bit())
+            except Exception:
+                filter_bits.append("ИИ-радар: вкл")
         stats = getattr(self, "_probe_skip_stats", None) or {}
         if stats:
             filter_bits.append(
