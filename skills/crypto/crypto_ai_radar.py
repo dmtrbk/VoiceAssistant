@@ -23,8 +23,18 @@ _SKIP_TICKERS = frozenset({"BTC", "ETH", "SOL", "USDT", "USDC", "USDE", "DAI"})
 
 
 def radar_enabled() -> bool:
-    raw = (os.getenv("CRYPTO_AI_RADAR") or "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    """Тумблер настроек + CRYPTO_AI_RADAR. Env=0 всегда гасит; иначе смотрим ai_radar_on."""
+    raw = (os.getenv("CRYPTO_AI_RADAR") or "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    try:
+        from .desk_policy import cfg
+
+        return bool(cfg().ai_radar_on)
+    except Exception:
+        return False
 
 
 @dataclass
@@ -56,7 +66,7 @@ class CryptoAIRadar:
 
     def start(self) -> None:
         if not radar_enabled():
-            logger.info("[AI-Радар] выключен (CRYPTO_AI_RADAR=0)")
+            logger.info("[AI-Радар] выключен (настройки / CRYPTO_AI_RADAR)")
             return
         if self._thread and self._thread.is_alive():
             return
@@ -72,8 +82,19 @@ class CryptoAIRadar:
     def stop(self) -> None:
         self._stop.set()
 
+    def sync_enabled(self) -> None:
+        """Подогнать поток под тумблер без рестарта всего стола."""
+        if radar_enabled():
+            self.start()
+            return
+        if self._thread and self._thread.is_alive():
+            self.stop()
+            logger.info("[AI-Радар] остановлен тумблером")
+
     def offer_candidates(self, rows: list[dict[str, Any]] | None) -> None:
         """Снимок топа из скана щупа (без REST). Копия под замком радара."""
+        if not radar_enabled():
+            return
         clean: list[dict[str, Any]] = []
         for row in rows or []:
             if not isinstance(row, dict):
@@ -127,6 +148,10 @@ class CryptoAIRadar:
 
     def _radar_loop(self) -> None:
         while not self._stop.is_set():
+            if not radar_enabled():
+                if self._stop.wait(_AI_LOOP_SEC):
+                    break
+                continue
             try:
                 self._evaluate_top()
             except Exception as exc:
@@ -135,7 +160,7 @@ class CryptoAIRadar:
                 break
 
     def _evaluate_top(self) -> None:
-        if get_client() is None:
+        if not radar_enabled() or get_client() is None:
             return
         with self._lock:
             rows = list(self._candidates)

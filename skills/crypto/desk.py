@@ -203,7 +203,7 @@ class CryptoDeskMixin:
 
                 if getattr(self, "_ai_radar", None) is None:
                     self._ai_radar = CryptoAIRadar(self)
-                self._ai_radar.start()
+                self._ai_radar.sync_enabled()
             except Exception as exc:
                 logger.warning("[Крипта] AI-радар старт: %s", exc)
             try:
@@ -2321,6 +2321,7 @@ class CryptoDeskMixin:
         ai_radar = getattr(self, "_ai_radar", None)
         if ai_radar is not None:
             try:
+                ai_radar.sync_enabled()
                 ai_radar.offer_candidates([row for _score, row in ranked[:15]])
             except Exception:
                 pass

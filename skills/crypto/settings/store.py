@@ -96,6 +96,8 @@ def status_line() -> str:
             parts.append(f"Щуп взведён {names}")
         if not held and not arms:
             parts.append("Щуп боевой")
+    if data.probe_on:
+        parts.append("ИИ-радар вкл" if data.ai_radar_on else "ИИ-радар выкл")
     return " · ".join(parts)
 
 

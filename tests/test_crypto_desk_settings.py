@@ -31,6 +31,7 @@ class TestDeskSettings(unittest.TestCase):
         self.assertEqual(data.sleeve_max_pct, DEFAULTS.sleeve_max_pct)
         self.assertTrue(data.probe_on)
         self.assertFalse(data.probe_paper)
+        self.assertFalse(data.ai_radar_on)
         self.assertTrue(policy.probe_places_buys())
         self.assertFalse(data.sleeve_on)
         self.assertFalse(data.second_on)

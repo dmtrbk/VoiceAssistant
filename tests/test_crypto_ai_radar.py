@@ -1,14 +1,23 @@
 # tests/test_crypto_ai_radar.py
 # AI-радар: Fail-Open, кэш veto, без блокировки лока.
 
+import os
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
 
-from skills.crypto.crypto_ai_radar import AIVerdict, CryptoAIRadar, _parse_json_object
+from skills.crypto.crypto_ai_radar import AIVerdict, CryptoAIRadar, _parse_json_object, radar_enabled
+from skills.crypto.settings import store as settings_store
 
 
 class TestCryptoAIRadar(unittest.TestCase):
+    def setUp(self):
+        # Боевые тесты радара — с явным вкл; по умолчанию в проде выкл.
+        self._env = patch.dict("os.environ", {"CRYPTO_AI_RADAR": "1"})
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
     def test_check_veto_fail_open_empty(self):
         radar = CryptoAIRadar()
         self.assertIsNone(radar.check_veto("CYBER"))
@@ -81,6 +90,23 @@ class TestCryptoAIRadar(unittest.TestCase):
             )
         with patch.dict("os.environ", {"CRYPTO_AI_RADAR": "0"}):
             self.assertIsNone(radar.check_veto("X"))
+
+    def test_radar_enabled_settings_and_env(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "settings.json")
+        old = settings_store._PATH
+        settings_store._PATH = path
+        settings_store.reset_cache()
+        self.addCleanup(lambda: (setattr(settings_store, "_PATH", old), settings_store.reset_cache()))
+        env = {k: v for k, v in os.environ.items() if k != "CRYPTO_AI_RADAR"}
+        with patch.dict("os.environ", env, clear=True):
+            settings_store.update(ai_radar_on=False)
+            self.assertFalse(radar_enabled())
+            settings_store.update(ai_radar_on=True)
+            self.assertTrue(radar_enabled())
+        with patch.dict("os.environ", {"CRYPTO_AI_RADAR": "0"}):
+            self.assertFalse(radar_enabled())
 
 
 if __name__ == "__main__":

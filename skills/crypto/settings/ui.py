@@ -126,6 +126,7 @@ class DeskSettingsWindow(QWidget):
         self._hints: dict[str, str] = {}
         self._probe_box: ToggleSwitch | None = None
         self._paper_box: ToggleSwitch | None = None
+        self._ai_radar_box: ToggleSwitch | None = None
         self._pocket_box: ToggleSwitch | None = None
         self._second_box: ToggleSwitch | None = None
         self._second_combo = None
@@ -271,6 +272,8 @@ QSpinBox, QDoubleSpinBox {{
                 self._probe_box.setChecked(data.probe_on)
             if self._paper_box is not None:
                 self._paper_box.setChecked(data.probe_paper)
+            if self._ai_radar_box is not None:
+                self._ai_radar_box.setChecked(data.ai_radar_on)
         finally:
             self._syncing = False
         self._refresh_alloc(data)
@@ -384,6 +387,17 @@ QSpinBox, QDoubleSpinBox {{
         paper_row.addWidget(paper_name, 1)
         paper_row.addWidget(paper, 0)
         col.addLayout(paper_row)
+        ai_row = QHBoxLayout()
+        ai_row.setContentsMargins(0, 8, 0, 0)
+        ai_name = QLabel("ИИ-радар кандидатов")
+        ai_name.setObjectName("rowTitle")
+        ai = ToggleSwitch()
+        ai.setChecked(False)
+        ai.toggled.connect(self._on_ai_radar_toggled)
+        self._ai_radar_box = ai
+        ai_row.addWidget(ai_name, 1)
+        ai_row.addWidget(ai, 0)
+        col.addLayout(ai_row)
         self._probe_fields = QFrame()
         self._probe_fields.setObjectName("cardRow")
         fields = QVBoxLayout(self._probe_fields)
@@ -590,9 +604,22 @@ QSpinBox, QDoubleSpinBox {{
             else "Боевой щуп: сканирует ленту и покупает."
         )
 
+    def _on_ai_radar_toggled(self, checked: bool) -> None:
+        if self._syncing:
+            return
+        update(ai_radar_on=checked)
+        self._status.setText(status_line())
+        self._hint.setText(
+            "ИИ-радар включён: фоновая оценка топа щупа (Groq)."
+            if checked
+            else "ИИ-радар выключен — щуп без LLM-вето."
+        )
+
     def _set_probe_enabled(self, on: bool) -> None:
         if self._paper_box is not None:
             self._paper_box.setEnabled(on)
+        if self._ai_radar_box is not None:
+            self._ai_radar_box.setEnabled(on)
         for key in (
             "probe_usd",
             "probe_max_loss_pct",
