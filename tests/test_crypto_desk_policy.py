@@ -1166,6 +1166,10 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(
             policy.probe_candle_buy_ok(1.4897, 1.490, 1.489, 1.489)
         )
+        # LIT: нулевой бар open=high=price — immature, buy_ok нет (desk ждёт, не drop tip).
+        self.assertTrue(policy.probe_candle_bar_immature(3.42, 3.42, 3.42, 3.42))
+        self.assertFalse(policy.probe_candle_buy_ok(3.42, 3.42, 3.42, 3.42))
+        self.assertFalse(policy.probe_candle_bar_immature(3.42, 3.43, 3.40, 3.40))
         # Контроль спреда и проскальзывания ask (GROVE: 0.007281 -> ask 0.007409).
         self.assertTrue(
             policy.probe_book_buy_ok(bid=0.00727, ask=0.00729, arm_px=0.007281)
@@ -1176,8 +1180,34 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_book_buy_ok(bid=0.00739, ask=0.007409, arm_px=0.007281)
         )
+        # ERA: ask +1.63% от взвода — режем (impulse раньше обходил book_buy_ok).
+        self.assertFalse(
+            policy.probe_book_buy_ok(bid=0.0920, ask=0.0935, arm_px=0.0920)
+        )
+        self.assertEqual(policy.PROBE_IMPULSE_CHASE_PCT, 0.6)
+        self.assertEqual(policy.PROBE_MAX_ASK_SLIP_PCT, 0.6)
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=100.0,
+                now=100.0,
+                price=0.092 * 1.009,
+                shelf=0.0858,
+                trend15="bull",
+                day_chg=10.0,
+                arm_px=0.092,
+                algo=policy.PROBE_ALGO_IMPULSE,
+            ),
+            "drop",
+        )
+        # Тонкий ask: $40 при глубине $200 = 20% > 15%.
+        self.assertFalse(policy.probe_depth_buy_ok(ask_depth_usd=200.0, quote_usd=40.0))
+        self.assertTrue(policy.probe_depth_buy_ok(ask_depth_usd=400.0, quote_usd=40.0))
+        self.assertTrue(policy.probe_depth_buy_ok(ask_depth_usd=None, quote_usd=40.0))
+        self.assertEqual(policy.probe_limit_tp_pct(), 4.5)
+        self.assertEqual(policy.probe_limit_tp_pct(strict=True), 2.2)
+        self.assertEqual(policy.probe_fast_be_peak_pct(), 1.2)
+        self.assertEqual(policy.probe_fast_be_peak_pct(strict=True), 0.7)
         self.assertEqual(policy.PROBE_MAX_SPREAD_PCT, 0.55)
-        self.assertEqual(policy.PROBE_MAX_ASK_SLIP_PCT, 0.65)
         self.assertTrue(
             policy.probe_book_buy_ok(bid=0.04051, ask=0.04071, arm_px=0.0405)
         )
@@ -1400,11 +1430,25 @@ class TestDeskPolicy(unittest.TestCase):
             "drop",
         )
         # CAP: impulse на neutral 15м после холда покупаем, не снимаем.
+        # Chase 0.8%: +0.95% от arm уже drop; +0.48% ещё buy.
         self.assertEqual(
             policy.probe_arm_action(
                 now=100.0 + policy.PROBE_IMPULSE_HOLD_SEC,
                 armed_ts=100.0,
                 price=1.06,
+                shelf=1.01,
+                trend15="neutral",
+                day_chg=8.0,
+                arm_px=1.05,
+                algo=policy.PROBE_ALGO_IMPULSE,
+            ),
+            "drop",
+        )
+        self.assertEqual(
+            policy.probe_arm_action(
+                now=100.0 + policy.PROBE_IMPULSE_HOLD_SEC,
+                armed_ts=100.0,
+                price=1.055,
                 shelf=1.01,
                 trend15="neutral",
                 day_chg=8.0,
@@ -2810,7 +2854,7 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertIsNone(
             crypto_journal.probe_loss_guard_reason(now=day, trades=micro, enabled=True)
         )
-        # Три полки ≤ −1% cost — серия.
+        # Три полки ≤ −1% cost, hold >3м — серия 60м (не fast-dump).
         hard = []
         for i, name in enumerate(("AAA", "BBB", "CCC")):
             t0 = day - 900 + i * 200
@@ -2828,7 +2872,7 @@ class TestJournalChurnAndDaily(unittest.TestCase):
                         "side": "sell",
                         "quote": 39.20,
                         "price": 0.98,
-                        "ts_epoch": t0 + 60,
+                        "ts_epoch": t0 + 240,
                         "reason": "полка",
                     },
                 ]
@@ -2841,6 +2885,38 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertTrue(policy.PROBE_STRICT_MODE)
         self.assertIsNotNone(
             crypto_journal.probe_loss_guard_reason(now=day, trades=shelf_trades)
+        )
+        # ERA+OPG: две полки <3м подряд → полный стоп 45м (fade-the-pump).
+        fast = []
+        for i, (name, hold) in enumerate((("ERA", 60), ("OPG", 130))):
+            t0 = day - 400 + i * 200
+            fast.extend(
+                [
+                    {
+                        "ticker": name,
+                        "side": "buy",
+                        "quote": 40.0,
+                        "price": 1.0,
+                        "ts_epoch": t0,
+                    },
+                    {
+                        "ticker": name,
+                        "side": "sell",
+                        "quote": 39.05,
+                        "price": 0.976,
+                        "ts_epoch": t0 + hold,
+                        "reason": "полка",
+                    },
+                ]
+            )
+        fast_reason = crypto_journal.probe_loss_guard_reason(
+            now=day, trades=fast, enabled=True
+        )
+        self.assertEqual(fast_reason, "серия быстрых сливов (<3м) — пауза 45м")
+        self.assertIsNone(
+            crypto_journal.probe_loss_guard_reason(
+                now=day + policy.PROBE_FAST_DUMP_PAUSE_SEC, trades=fast, enabled=True
+            )
         )
 
     def test_probe_daily_loss_reset_ignores_old_sells(self):
@@ -3478,6 +3554,27 @@ class TestManualTrap(unittest.TestCase):
         self.assertNotIn("BTC", legs)
         self.assertNotIn("PEPE", legs)  # занята активной ногой щупа
         self.assertTrue(any("DIAM" in n for n in notes))
+
+    def test_claim_manual_skips_holds(self):
+        from skills.crypto.common import read_second_pocket_legs, _write_ticker_set
+        import skills.crypto.common as crypto_common
+
+        _write_ticker_set(crypto_common._HOLD_PATH, {"BTC", "ETH", "SPCXX"})
+        self.skill._manual_holds = {"BTC", "ETH"}  # устаревший кэш — refresh подтянет SPCXX
+        with (
+            patch.object(self.skill, "_manual_entry_px", return_value=150.0),
+            patch.object(self.skill, "_spot_buy_vwap", return_value=150.0),
+        ):
+            notes = self.skill._claim_manual_trap_legs(
+                {
+                    "SPCXX": {"ticker": "SPCXX", "qty": 0.68, "price": 150.0, "value": 102.0},
+                    "TA": {"ticker": "TA", "qty": 500.0, "price": 0.11, "value": 55.0},
+                }
+            )
+        legs = {leg["ticker"]: leg for leg in read_second_pocket_legs()}
+        self.assertNotIn("SPCXX", legs)
+        self.assertIn("TA", legs)
+        self.assertFalse(any("SPCXX" in n for n in notes))
 
     def test_claim_does_not_duplicate(self):
         from skills.crypto.common import read_second_pocket_legs, upsert_second_pocket_leg

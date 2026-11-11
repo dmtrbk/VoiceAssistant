@@ -52,6 +52,9 @@ PROBE_NO_TRAP_MAX_STALE_GAIN_PCT = 0.50
 PROBE_MIN_QUOTE_FRAC = 0.85
 # Лимитный тейк на всю ногу сразу после покупки. Стоп и срез остаются маркетом.
 PROBE_LIMIT_TP_PCT = 4.5
+# Жёсткий режим (час/серия/полка): короче тейк и раньше BE — рынок в распиле.
+PROBE_STRICT_LIMIT_TP_PCT = 2.2
+PROBE_STRICT_FAST_BE_PEAK_PCT = 0.7
 # После «среза» не входить в ту же пилу сразу (TA/CARV/GROVE по 4–5 раз).
 PROBE_SCRATCH_COOLDOWN_SEC = 20 * 60
 # Парковка в карман2 ради свободного слота: свежую ногу не трогаем.
@@ -154,6 +157,11 @@ PROBE_STREAK_PAUSE_SEC = 3600.0
 PROBE_STREAK_MIN_LOSS_PCT = 1.0
 # Таймаут-срез с мизерным PnL (>$−0.25) в серию не входит, даже если % формально жёсткий на пыли.
 PROBE_STREAK_IGNORE_SCRATCH_USD = 0.25
+# Fade-the-pump: 2 полки/стопа подряд быстрее 3м → полный стоп входов на 45м.
+PROBE_FAST_DUMP_MAX_HOLD_SEC = 180.0
+PROBE_FAST_DUMP_COUNT = 2
+PROBE_FAST_DUMP_PAUSE_SEC = 45 * 60
+PROBE_FAST_DUMP_REASONS = frozenset({"полка", "стоп"})
 # После среза «полка» не перерабатывать слот в тот же чоп (ZAMA→DOOD, LA→INIT).
 PROBE_SHELF_COOLDOWN_SEC = 25 * 60
 PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
@@ -316,7 +324,11 @@ PROBE_STAIR2_VOL_MIN_MULT = 1.2
 PROBE_STAIR2_MIN_1H_POS = 0.88
 # Защита от проскальзывания по пустому стакану перед рыночной покупкой щупа (GROVE 0.007281->0.007409):
 PROBE_MAX_SPREAD_PCT = 0.55
-PROBE_MAX_ASK_SLIP_PCT = 0.65
+# ERA: arm 0.092 → ask/fill 0.0935 (+1.63%). Потолок +0.6% от взвода.
+PROBE_MAX_ASK_SLIP_PCT = 0.6
+# Топ-N ask: нога ≤ 15% глубины, иначе свой маркет сдвигает цену.
+PROBE_ASK_DEPTH_LEVELS = 3
+PROBE_ASK_DEPTH_MAX_QUOTE_FRAC = 0.15
 # Дешёвые монеты (<$0.01): тик раздувает % спреда (DEGEN 0.82% при пороге 0.55).
 PROBE_LOW_NOMINAL_PX = 0.01
 PROBE_LOW_NOMINAL_MAX_SPREAD_PCT = 1.0
@@ -340,7 +352,8 @@ PROBE_SPRINT_HOLD_SEC = 30
 PROBE_SPRINT_CHASE_PCT = 5.0
 # 8 с на выстреле — вечность: цена уходит, и вход снимает догон. Как у spark/pop — сразу.
 PROBE_IMPULSE_HOLD_SEC = 0
-PROBE_IMPULSE_CHASE_PCT = 4.0
+# Догон impulse = ask-slip (+0.6%): шире — покупаем уже на вершине выноса.
+PROBE_IMPULSE_CHASE_PCT = 0.6
 PROBE_IMPULSE_LOOKBACK = 12
 PROBE_IMPULSE_VOL_MULT = 2.5
 PROBE_IMPULSE_BREAK_MIN_PCT = 3.0
@@ -663,6 +676,48 @@ def orderbook_obi(
     if tot <= 0:
         return None
     return bid_usd / tot
+
+
+def orderbook_ask_depth_usd(asks: list[Any], *, levels: int | None = None) -> float:
+    """Сумма USD в топ-N уровнях ask (цена × размер)."""
+    cap = max(1, int(PROBE_ASK_DEPTH_LEVELS if levels is None else levels))
+    total = 0.0
+    for row in (asks or [])[:cap]:
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            try:
+                total += float(row[0]) * float(row[1])
+            except (TypeError, ValueError):
+                continue
+    return float(total)
+
+
+def probe_depth_buy_ok(
+    *,
+    ask_depth_usd: float | None,
+    quote_usd: float,
+    max_frac: float | None = None,
+) -> bool:
+    """Нога не больше max_frac топ-ask. Нет стакана — не блокируем (как OBI)."""
+    if ask_depth_usd is None:
+        return True
+    depth = float(ask_depth_usd or 0)
+    want = float(quote_usd or 0)
+    if want <= 0:
+        return True
+    if depth <= 0:
+        return False
+    frac = float(PROBE_ASK_DEPTH_MAX_QUOTE_FRAC if max_frac is None else max_frac)
+    return want <= depth * frac + 1e-9
+
+
+def probe_limit_tp_pct(*, strict: bool = False) -> float:
+    """Лимитный тейк: в жёстком режиме короче — микро-импульс до разворота распила."""
+    return float(PROBE_STRICT_LIMIT_TP_PCT if strict else PROBE_LIMIT_TP_PCT)
+
+
+def probe_fast_be_peak_pct(*, strict: bool = False) -> float:
+    """Пик для BE: в жёстком раньше (0.7% вместо 1.2%)."""
+    return float(PROBE_STRICT_FAST_BE_PEAK_PCT if strict else PROBE_FAST_BE_PEAK_PCT)
 
 
 def pocket_unwind_ready(*, price: float, bid: float = 0.0) -> bool:
@@ -1842,6 +1897,30 @@ def probe_pop_setup(
     return {"shelf": op, "price": px, "pop": 1.0}
 
 
+def probe_candle_bar_immature(
+    price: float, live_high: float, live_low: float, live_open: float
+) -> bool:
+    """Бар только открылся (open≈high≈price) — диапазона ещё нет, tip не основание снять взвод.
+
+    LIT 21:25: open=high=price → buy_ok=False и стол ронял взвод как «candle tip».
+    """
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or op <= 0:
+        return False
+    # Нет хода вверх от open — тело ещё не сформировано.
+    if hi > op * (1.0 + 1e-8):
+        return False
+    # Цена у open/high; низ не ушёл в явный слив под open.
+    if px + 1e-12 < op * (1.0 - 1e-8):
+        return False
+    if lo > 0 and lo < op * (1.0 - PROBE_CANDLE_MAX_DIP_PCT / 100.0 - 1e-12):
+        return False
+    return True
+
+
 def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
     """Перед buy candle: импульс у хая без фитиля слива (ratio) не режем tip_cap."""
     px = float(price or 0)
@@ -1849,6 +1928,9 @@ def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_op
     lo = float(live_low or 0)
     op = float(live_open or 0)
     if px <= 0 or hi <= 0 or op <= 0:
+        return False
+    # Нулевой бар / только open — не buy; desk оставит взвод, если immature.
+    if probe_candle_bar_immature(px, hi, lo, op):
         return False
     if px <= op + 1e-12:
         return False
@@ -2785,11 +2867,12 @@ def probe_exit_reason(
     now: float | None = None,
     bid: float = 0.0,
     obi: float | None = None,
+    strict: bool = False,
 ) -> str | None:
     """Стоп и защита быстрого щупа. Плюс — ловушка вершины.
 
     Подскок (candle/spark/pop): запас $0.36 и откат 0.45% (1.0% после пика +4%).
-    Убыток глубже −1.8% и BE после пика +1.2% — всегда (не зависят от PROBE_SHELF_EXIT_ON).
+    Убыток глубже −1.8% и BE после пика +1.2% (в жёстком +0.7%) — всегда.
     Пробой open/полки — только если PROBE_SHELF_EXIT_ON.
     Impulse: запас $0.48 и откат 1.50%. Медвежий стакан сжимает откат до 0.20%.
 
@@ -2838,10 +2921,11 @@ def probe_exit_reason(
         and exit_gain >= 2.0 * EXIT_FEE_SIDE * 100.0 - 1e-6
     ):
         return "вершина"
-    # После пика +1.2% возврат к entry−0.1% — BE (независимо от PROBE_SHELF_EXIT_ON).
+    # После пика +1.2% (жёсткий +0.7%) возврат к entry−0.1% — BE.
     # Не «полка»: иначе journal/reentry/cooldown карают как слом поддержки.
+    be_peak = probe_fast_be_peak_pct(strict=bool(strict))
     if (
-        peak_gain >= PROBE_FAST_BE_PEAK_PCT - 1e-9
+        peak_gain >= be_peak - 1e-9
         and px <= ent * (1.0 - PROBE_FAST_BE_BUFFER_PCT / 100.0) + 1e-12
     ):
         return "безубыток"

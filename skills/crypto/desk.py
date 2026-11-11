@@ -39,7 +39,11 @@ from .common import (
 )
 from .desk_policy import (
     PROBE_ENTRY_HOLD_SEC,
-    PROBE_LIMIT_TP_PCT,
+    PROBE_ASK_DEPTH_LEVELS,
+    PROBE_ASK_DEPTH_MAX_QUOTE_FRAC,
+    probe_limit_tp_pct,
+    probe_depth_buy_ok,
+    orderbook_ask_depth_usd,
     probe_period_sec,
     probe_scan_algo_order,
     PROBE_ARMED_PERIOD_SEC,
@@ -65,6 +69,7 @@ from .desk_policy import (
     probe_volume_surge,
     probe_exit_reason,
     probe_candle_buy_ok,
+    probe_candle_bar_immature,
     probe_spark_buy_ok,
     probe_pop_buy_ok,
     probe_hunter_count,
@@ -151,6 +156,8 @@ def _probe_pause_kind(reason: str) -> str:
         return "полка"
     if text.startswith("просадка"):
         return "час"
+    if text.startswith("серия быстрых"):
+        return "распил"
     if text.startswith("серия"):
         return "серия"
     if text.startswith("дневной"):
@@ -260,6 +267,12 @@ class CryptoDeskMixin:
                 "[Крипта] нет bought.json — %d позиций на балансе не трогаю как чужие",
                 len(held),
             )
+
+    def _refresh_manual_holds(self) -> None:
+        """Перечитать holds.json — хозяин может добавить тикер без рестарта."""
+        loaded = _read_ticker_set(common._HOLD_PATH)
+        if loaded is not None:
+            self._manual_holds = loaded
 
     def _is_owner_position(self, ticker: str) -> bool:
         ticker = ticker.upper()
@@ -539,9 +552,15 @@ class CryptoDeskMixin:
         from .trades import _sell_price_floor_from_exc
 
         phrases: list[str] = []
+        self._refresh_manual_holds()
         for leg in list(read_second_pocket_legs()):
             ticker = str(leg.get("ticker") or "")
             if not ticker or ticker in blocked:
+                continue
+            if ticker.upper() in self._manual_holds:
+                # Хозяин держит сам — убрать из карман2 без продажи.
+                drop_second_pocket_leg(ticker)
+                logger.info("[Крипта] карман2 %s: ручной hold — не продаю", ticker)
                 continue
             qty = float(leg.get("qty") or 0)
             book_entry = float(leg.get("entry") or 0)
@@ -1098,11 +1117,16 @@ class CryptoDeskMixin:
         raw = crypto_journal.probe_loss_guard_reason()
         if raw and str(raw).startswith("дневной"):
             return str(raw)
+        # Fade-the-pump: полный стоп входов на 45м (не просто жёсткий фильтр).
+        if raw and str(raw).startswith("серия быстрых сливов"):
+            return str(raw)
         return None
 
     def _probe_loss_guard_reason(self, tape: list[dict[str, Any]] | None = None) -> str | None:
         raw = crypto_journal.probe_loss_guard_reason()
-        if raw and str(raw).startswith("дневной"):
+        if raw and (
+            str(raw).startswith("дневной") or str(raw).startswith("серия быстрых сливов")
+        ):
             return None
         rows = tape
         if rows is None:
@@ -1140,7 +1164,7 @@ class CryptoDeskMixin:
             if halt:
                 self._note_probe_halt(halt)
                 return
-            if str(getattr(self, "_probe_pause_kind", "") or "") in {"рынок", "день"}:
+            if str(getattr(self, "_probe_pause_kind", "") or "") in {"рынок", "день", "распил"}:
                 self._note_probe_resume()
             pause = self._probe_loss_guard_reason(tape)
             if pause:
@@ -1268,6 +1292,7 @@ class CryptoDeskMixin:
             now=time.time(),
             bid=live_bid,
             obi=obi,
+            strict=bool(self._probe_loss_guard_reason()),
         )
         if not reason:
             return
@@ -1487,6 +1512,53 @@ class CryptoDeskMixin:
                 )
                 return
         surge = False
+        arm_px = float(state.get("arm_px") or 0)
+        bid = ask = 0.0
+        tick = 0.0
+        try:
+            book = self._book(ticker)
+            bid = float(book.get("bid") or 0)
+            ask = float(book.get("ask") or 0)
+        except Exception:
+            bid = ask = 0.0
+        try:
+            tick = float((self._filters(ticker) or {}).get("tick") or 0)
+        except Exception:
+            tick = 0.0
+        # Ask-slip vs взвод для всех алгоритмов (impulse раньше обходил — ERA +1.6%).
+        if not probe_book_buy_ok(
+            bid=bid,
+            ask=ask,
+            arm_px=arm_px,
+            strict=bool(self._probe_loss_guard_reason()),
+            tick_size=tick,
+        ):
+            write_probe(drop_arm=ticker)
+            logger.info(
+                "[Крипта] щуп %s снят (спред/ask): bid %.4g ask %.4g взвод %.4g",
+                ticker,
+                bid,
+                ask,
+                arm_px,
+            )
+            return
+        # Глубина ask: нога ≤ 15% топ-3 — иначе свой маркет сдвигает цену (пустой стакан).
+        try:
+            want_quote = float(probe_quote_for_buy())
+        except Exception:
+            want_quote = float(probe_quote())
+        depth_usd = self._ask_depth_usd(ticker)
+        if not probe_depth_buy_ok(ask_depth_usd=depth_usd, quote_usd=want_quote):
+            write_probe(drop_arm=ticker)
+            logger.info(
+                "[Крипта] щуп %s снят (тонкий ask): глубина $%.0f, нога $%.0f > %.0f%% топ-%d",
+                ticker,
+                float(depth_usd or 0),
+                want_quote,
+                PROBE_ASK_DEPTH_MAX_QUOTE_FRAC * 100.0,
+                PROBE_ASK_DEPTH_LEVELS,
+            )
+            return
         if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
             # Актуальных 5м: buy_ok мягче live_ok — иначе hold убивает вход (CPOOL).
             try:
@@ -1496,35 +1568,7 @@ class CryptoDeskMixin:
                 write_probe(drop_arm=ticker)
                 return
             live = bars5[-1] if bars5 else {}
-            arm_px = float(state.get("arm_px") or 0)
             check_px = price
-            try:
-                book = self._book(ticker)
-                bid = float(book.get("bid") or 0)
-                ask = float(book.get("ask") or 0)
-            except Exception:
-                bid = ask = 0.0
-            tick = 0.0
-            try:
-                tick = float((self._filters(ticker) or {}).get("tick") or 0)
-            except Exception:
-                tick = 0.0
-            if not probe_book_buy_ok(
-                bid=bid,
-                ask=ask,
-                arm_px=arm_px,
-                strict=bool(self._probe_loss_guard_reason()),
-                tick_size=tick,
-            ):
-                write_probe(drop_arm=ticker)
-                logger.info(
-                    "[Крипта] щуп %s снят (спред/ask): bid %.4g ask %.4g взвод %.4g",
-                    ticker,
-                    bid,
-                    ask,
-                    arm_px,
-                )
-                return
             if ask > 0 and str(algo or "") not in {PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
                 check_px = max(price, ask)
             live_hi = max(float(live.get("high") or 0), check_px)
@@ -1543,6 +1587,18 @@ class CryptoDeskMixin:
             else:
                 tip_ok = probe_candle_buy_ok(check_px, live_hi, live_lo, live_op)
             if not tip_ok:
+                # LIT: новый 5м бар open=high=price — ждём тело, не роняем взвод.
+                if str(algo or "") == PROBE_ALGO_CANDLE and probe_candle_bar_immature(
+                    check_px, live_hi, live_lo, live_op
+                ):
+                    logger.info(
+                        "[Крипта] щуп %s жду тело бара: сейчас %.4g open %.4g high %.4g",
+                        ticker,
+                        check_px,
+                        live_op,
+                        live_hi,
+                    )
+                    return
                 write_probe(drop_arm=ticker)
                 logger.info(
                     "[Крипта] щуп %s снят (%s tip): сейчас %.4g open %.4g high %.4g",
@@ -1578,8 +1634,8 @@ class CryptoDeskMixin:
             algo=algo or "shelf",
             note={
                 "obi": obi,
-                "bid": bid if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP} else None,
-                "ask": ask if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP} else None,
+                "bid": bid or None,
+                "ask": ask or None,
             },
         )
 
@@ -1659,7 +1715,12 @@ class CryptoDeskMixin:
             free_cash, held_now = self._cash_and_held()
             if free_cash * common._BUY_CASH_BUFFER >= need_usd * 0.9:
                 return free_cash
-            sec_legs = read_second_pocket_legs()
+            self._refresh_manual_holds()
+            sec_legs = [
+                leg
+                for leg in read_second_pocket_legs()
+                if str(leg.get("ticker") or "").upper() not in self._manual_holds
+            ]
             if not sec_legs:
                 break
             sec_prices: dict[str, float] = {}
@@ -1785,7 +1846,8 @@ class CryptoDeskMixin:
         tp_order = ""
         tp_px = 0.0
         if str(algo or "") != PROBE_ALGO_PIN:
-            tp_px = entry_px * (1.0 + PROBE_LIMIT_TP_PCT / 100.0)
+            tp_pct = probe_limit_tp_pct(strict=bool(self._probe_loss_guard_reason()))
+            tp_px = entry_px * (1.0 + tp_pct / 100.0)
             tp_order = self._rest_limit_sell(ticker, bought, tp_px)
         if tp_order:
             write_probe(
@@ -2595,6 +2657,7 @@ class CryptoDeskMixin:
     ) -> list[str]:
         """Любые свободные ноги на балансе (кроме BTC и активных щупа/SOL-dip) — в карман2 под ловушку вершины."""
         notes: list[str] = []
+        self._refresh_manual_holds()
         probe_qty: dict[str, float] = {}
         for leg in probe_legs():
             coin = str(leg.get("ticker") or "").upper()
@@ -2609,6 +2672,7 @@ class CryptoDeskMixin:
                 or coin in MANUAL_TRAP_SKIP
                 or coin in SLEEVE_SKIP
                 or _leveraged_base(coin)
+                or coin in self._manual_holds
             ):
                 continue
             held = float(pos.get("qty") or 0)

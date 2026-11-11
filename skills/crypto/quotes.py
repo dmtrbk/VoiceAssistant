@@ -435,6 +435,23 @@ class CryptoQuotesMixin:
         result = data.get("result") or {}
         return orderbook_obi(result.get("b") or [], result.get("a") or [], depth=depth)
 
+    def _ask_depth_usd(self, ticker: str, levels: int | None = None) -> float | None:
+        """Сумма USD в топ-N ask. None — стакан недоступен (depth-gate fail-open)."""
+        from .desk_policy import PROBE_ASK_DEPTH_LEVELS, orderbook_ask_depth_usd
+
+        ticker = ticker.upper()
+        try:
+            data = self._public_get(
+                "/v5/market/orderbook",
+                {"category": "spot", "symbol": self._symbol(ticker), "limit": "25"},
+                f"ob:{ticker}",
+                cache_sec=2.0,
+            )
+        except Exception:
+            return None
+        asks = (data.get("result") or {}).get("a") or []
+        return orderbook_ask_depth_usd(asks, levels=levels if levels is not None else PROBE_ASK_DEPTH_LEVELS)
+
     def _momentum(self, ticker: str) -> dict[str, Any]:
         data = self._public_get(
             "/v5/market/kline",

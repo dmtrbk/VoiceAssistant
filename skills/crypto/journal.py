@@ -1091,6 +1091,10 @@ def probe_loss_guard_reason(
 ) -> str | None:
     """Дневной −$6 — полный стоп покупок до конца суток. Час, серия и полка — жёсткий режим, не стоп скана."""
     from .desk_policy import (
+        PROBE_FAST_DUMP_COUNT,
+        PROBE_FAST_DUMP_MAX_HOLD_SEC,
+        PROBE_FAST_DUMP_PAUSE_SEC,
+        PROBE_FAST_DUMP_REASONS,
         PROBE_HOURLY_MAX_LOSS_USD,
         PROBE_MAX_CONSECUTIVE_LOSSES,
         PROBE_SHELF_COOLDOWN_LOSS_USD,
@@ -1119,8 +1123,8 @@ def probe_loss_guard_reason(
     rows = trades if trades is not None else _read_trades()
     lots: dict[str, dict[str, float]] = {}
     day_pnl = 0.0
-    # (epoch, pnl, cost_sold, reason)
-    closed: list[tuple[float, float, float, str]] = []
+    # (epoch, pnl, cost_sold, reason, hold_sec)
+    closed: list[tuple[float, float, float, str, float]] = []
     for entry in rows:
         ticker = str(entry.get("ticker") or "").upper()
         side = str(entry.get("side") or "").lower()
@@ -1129,8 +1133,11 @@ def probe_loss_guard_reason(
         if not ticker or price <= 0 or quote <= 0:
             continue
         qty = quote / price
-        lot = lots.setdefault(ticker, {"qty": 0.0, "cost": 0.0})
+        lot = lots.setdefault(ticker, {"qty": 0.0, "cost": 0.0, "opened_ts": 0.0})
         if side == "buy":
+            buy_ep = _entry_epoch(entry)
+            if float(lot["qty"]) <= 1e-12 and buy_ep is not None:
+                lot["opened_ts"] = float(buy_ep)
             lot["qty"] += qty
             lot["cost"] += quote
             continue
@@ -1142,18 +1149,21 @@ def probe_loss_guard_reason(
         proceeds = quote * (sell_qty / qty)
         pnl = proceeds - cost_sold
         epoch = _entry_epoch(entry)
+        opened = float(lot.get("opened_ts") or 0)
+        hold_sec = (float(epoch) - opened) if epoch is not None and opened > 0 else 9e9
         if epoch is not None and epoch <= now_ts + 1.0:
             if day_start <= epoch < day_end:
                 day_pnl += pnl
-            closed.append((epoch, pnl, cost_sold, str(entry.get("reason") or "")))
+            closed.append((epoch, pnl, cost_sold, str(entry.get("reason") or ""), hold_sec))
         lot["qty"] -= sell_qty
         lot["cost"] -= cost_sold
         if lot["qty"] < 1e-12:
             lot["qty"] = 0.0
             lot["cost"] = 0.0
+            lot["opened_ts"] = 0.0
     if probe_daily_loss_blocked(round(day_pnl, 2)):
         return f"дневной лимит убытка ({day_pnl:+.2f}$)"
-    hour_pnl = sum(pnl for ep, pnl, _cost, _reason in closed if now_ts - 3600.0 <= ep <= now_ts)
+    hour_pnl = sum(pnl for ep, pnl, _cost, _reason, _hold in closed if now_ts - 3600.0 <= ep <= now_ts)
     if hour_pnl <= -PROBE_HOURLY_MAX_LOSS_USD + 1e-9:
         if probe_hourly_lift_until() > now_ts + 1e-9:
             pass  # ручной lift: часовую просадку не считаем
@@ -1170,16 +1180,30 @@ def probe_loss_guard_reason(
         loss_pct = float(pnl) / float(cost) * 100.0
         return loss_pct <= -PROBE_STREAK_MIN_LOSS_PCT + 1e-9
 
+    def _fast_dump(pnl: float, cost: float, reason: str, hold_sec: float) -> bool:
+        """Полка/стоп быстрее 3м — ложный сквиз (ERA 60с, OPG 130с)."""
+        if str(reason or "") not in PROBE_FAST_DUMP_REASONS:
+            return False
+        if float(hold_sec) > float(PROBE_FAST_DUMP_MAX_HOLD_SEC) + 1e-9:
+            return False
+        return _streak_loss(pnl, cost, reason)
+
+    if len(closed) >= int(PROBE_FAST_DUMP_COUNT):
+        fast_tail = closed[-int(PROBE_FAST_DUMP_COUNT) :]
+        if all(_fast_dump(pnl, cost, reason, hold) for _ep, pnl, cost, reason, hold in fast_tail):
+            last_ep = fast_tail[-1][0]
+            if now_ts - last_ep < float(PROBE_FAST_DUMP_PAUSE_SEC):
+                return "серия быстрых сливов (<3м) — пауза 45м"
     if len(closed) >= PROBE_MAX_CONSECUTIVE_LOSSES:
         # Три жёстких лося подряд (≥1% cost). Скрэтч-таймаут −$0.10 хвост не банит.
         tail = closed[-PROBE_MAX_CONSECUTIVE_LOSSES:]
-        if all(_streak_loss(pnl, cost, reason) for _ep, pnl, cost, reason in tail):
+        if all(_streak_loss(pnl, cost, reason) for _ep, pnl, cost, reason, _hold in tail):
             last_ep = tail[-1][0]
             if now_ts - last_ep < PROBE_STREAK_PAUSE_SEC:
                 return f"серия из {PROBE_MAX_CONSECUTIVE_LOSSES} убытков (пауза 60м)"
     shelf_hits = [
         ep
-        for ep, pnl, _cost, _reason in closed
+        for ep, pnl, _cost, _reason, _hold in closed
         if now_ts - PROBE_SHELF_COOLDOWN_SEC <= ep <= now_ts + 1.0
         and pnl <= -PROBE_SHELF_COOLDOWN_LOSS_USD + 1e-9
     ]
