@@ -325,7 +325,10 @@ PROBE_STAIR2_MIN_1H_POS = 0.88
 # Защита от проскальзывания по пустому стакану перед рыночной покупкой щупа (GROVE 0.007281->0.007409):
 PROBE_MAX_SPREAD_PCT = 0.55
 # ERA: arm 0.092 → ask/fill 0.0935 (+1.63%). Потолок +0.6% от взвода.
-PROBE_MAX_ASK_SLIP_PCT = 0.6
+PROBE_MAX_BUY_SLIP_PCT = 0.60
+PROBE_MAX_ASK_SLIP_PCT = PROBE_MAX_BUY_SLIP_PCT  # alias: book_buy_ok / логи
+# One-candle pump на плече: если OI linear за 5м вырос >8% — спот не берём.
+PROBE_MAX_OI_SPIKE_PCT = 8.0
 # Топ-N ask: нога ≤ 15% глубины, иначе свой маркет сдвигает цену.
 PROBE_ASK_DEPTH_LEVELS = 3
 PROBE_ASK_DEPTH_MAX_QUOTE_FRAC = 0.15
@@ -2001,13 +2004,31 @@ def probe_book_buy_ok(
         return True
     spread_pct = (a - b) / b * 100.0
     max_spread = probe_max_spread_pct(bid=b, ask=a, tick_size=tick_size, strict=strict)
-    max_slip = PROBE_STRICT_MAX_ASK_SLIP_PCT if strict else PROBE_MAX_ASK_SLIP_PCT
+    max_slip = PROBE_STRICT_MAX_ASK_SLIP_PCT if strict else PROBE_MAX_BUY_SLIP_PCT
     if spread_pct > max_spread + 1e-12:
         return False
     ref = float(arm_px or 0)
     if ref > 0 and (a / ref - 1.0) * 100.0 > max_slip + 1e-12:
         return False
     return True
+
+
+def probe_oi_spike_ok(
+    oi_now: float,
+    oi_prev: float,
+    *,
+    max_spike_pct: float | None = None,
+) -> tuple[bool, str]:
+    """Рост OI за шаг > порога — ловушка плечевиков. (True, '') — вход ок."""
+    now = float(oi_now or 0)
+    prev = float(oi_prev or 0)
+    if prev <= 0 or now <= 0:
+        return True, ""
+    delta_pct = (now - prev) / prev * 100.0
+    ceiling = float(PROBE_MAX_OI_SPIKE_PCT if max_spike_pct is None else max_spike_pct)
+    if delta_pct > ceiling + 1e-12:
+        return False, f"всплеск OI фьючерса +{delta_pct:.1f}% > {ceiling:.0f}%"
+    return True, ""
 
 
 def probe_volume_surge(

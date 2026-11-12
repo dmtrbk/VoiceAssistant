@@ -41,9 +41,12 @@ from .desk_policy import (
     PROBE_ENTRY_HOLD_SEC,
     PROBE_ASK_DEPTH_LEVELS,
     PROBE_ASK_DEPTH_MAX_QUOTE_FRAC,
+    PROBE_MAX_BUY_SLIP_PCT,
+    PROBE_STRICT_MAX_ASK_SLIP_PCT,
     probe_limit_tp_pct,
     probe_depth_buy_ok,
     orderbook_ask_depth_usd,
+    probe_oi_spike_ok,
     probe_period_sec,
     probe_scan_algo_order,
     PROBE_ARMED_PERIOD_SEC,
@@ -1542,12 +1545,29 @@ class CryptoDeskMixin:
             tick = float((self._filters(ticker) or {}).get("tick") or 0)
         except Exception:
             tick = 0.0
-        # Ask-slip vs взвод для всех алгоритмов (impulse раньше обходил — ERA +1.6%).
+        # Ask-slip vs взвод (ERA +1.63%): жёсткий потолок PROBE_MAX_BUY_SLIP_PCT.
+        strict_book = bool(self._probe_loss_guard_reason())
+        max_buy_slip = (
+            float(PROBE_STRICT_MAX_ASK_SLIP_PCT) if strict_book else float(PROBE_MAX_BUY_SLIP_PCT)
+        )
+        if ask > 0 and arm_px > 0:
+            ask_slip_pct = (ask / arm_px - 1.0) * 100.0
+            if ask_slip_pct > max_buy_slip + 1e-12:
+                write_probe(drop_arm=ticker)
+                logger.info(
+                    "[Крипта] щуп %s снят (проскальзывание ask): ask %.4g > взвод %.4g (+%.2f%% > %.2f%%)",
+                    ticker,
+                    ask,
+                    arm_px,
+                    ask_slip_pct,
+                    max_buy_slip,
+                )
+                return
         if not probe_book_buy_ok(
             bid=bid,
             ask=ask,
             arm_px=arm_px,
-            strict=bool(self._probe_loss_guard_reason()),
+            strict=strict_book,
             tick_size=tick,
         ):
             write_probe(drop_arm=ticker)
@@ -2044,6 +2064,33 @@ class CryptoDeskMixin:
             entry,
         )
 
+    def _probe_oi_divergence_ok(self, ticker: str) -> tuple[bool, str]:
+        """Всплеск OI на Bybit linear за 5м — ловушка плечевиков. Fail-Open без фьючерса/API."""
+        coin = str(ticker or "").upper()
+        if not coin or coin in {"BTC", "ETH", "SOL", "USDT", "USDC"}:
+            return True, ""
+        try:
+            data = self._public_get(
+                "/v5/market/open-interest",
+                {
+                    "category": "linear",
+                    "symbol": f"{coin}USDT",
+                    "intervalTime": "5min",
+                    "limit": "2",
+                },
+                f"oi:{coin}:5m",
+                cache_sec=55.0,
+            )
+            rows = (data.get("result") or {}).get("list") or []
+            if len(rows) < 2:
+                return True, ""
+            oi_now = float(rows[0].get("openInterest") or 0)
+            oi_prev = float(rows[1].get("openInterest") or 0)
+            return probe_oi_spike_ok(oi_now, oi_prev)
+        except Exception as exc:
+            logger.debug("[Крипта] щуп %s проверка OI: %s", coin, exc)
+            return True, ""
+
     def _probe_try_arm(
         self,
         row: dict[str, Any],
@@ -2108,6 +2155,11 @@ class CryptoDeskMixin:
             self._probe_skip(
                 f"{ticker} {algo}: тренд 15м={t15} 1h={t1h} 7d={week_bit} day={day_chg:+.1f}%"
             )
+            return False
+        # Open Interest: всплеск OI на linear — ловушка плечевиков (Fail-Open).
+        oi_ok, oi_reason = self._probe_oi_divergence_ok(ticker)
+        if not oi_ok:
+            self._probe_skip(f"{ticker} {algo}: ловушка — {oi_reason}")
             return False
         # Имитация: сразу в свой журнал, без боевого взвода и без виджета.
         if paper:

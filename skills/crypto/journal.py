@@ -1201,11 +1201,13 @@ def probe_loss_guard_reason(
             last_ep = tail[-1][0]
             if now_ts - last_ep < PROBE_STREAK_PAUSE_SEC:
                 return f"серия из {PROBE_MAX_CONSECUTIVE_LOSSES} убытков (пауза 60м)"
+    # Только реальная «полка». Безубыток/вершина/срез с мелким −$ не банят стол на 25м (CAP).
     shelf_hits = [
         ep
-        for ep, pnl, _cost, _reason, _hold in closed
+        for ep, pnl, _cost, reason, _hold in closed
         if now_ts - PROBE_SHELF_COOLDOWN_SEC <= ep <= now_ts + 1.0
         and pnl <= -PROBE_SHELF_COOLDOWN_LOSS_USD + 1e-9
+        and str(reason or "") == "полка"
     ]
     if shelf_hits:
         last_ep = max(shelf_hits)

@@ -1186,6 +1186,13 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertEqual(policy.PROBE_IMPULSE_CHASE_PCT, 0.6)
         self.assertEqual(policy.PROBE_MAX_ASK_SLIP_PCT, 0.6)
+        self.assertEqual(policy.PROBE_MAX_BUY_SLIP_PCT, 0.6)
+        self.assertEqual(policy.PROBE_MAX_OI_SPIKE_PCT, 8.0)
+        self.assertTrue(policy.probe_oi_spike_ok(100.0, 100.0)[0])
+        self.assertTrue(policy.probe_oi_spike_ok(107.0, 100.0)[0])
+        oi_bad, oi_note = policy.probe_oi_spike_ok(109.0, 100.0)
+        self.assertFalse(oi_bad)
+        self.assertIn("OI", oi_note)
         self.assertEqual(
             policy.probe_arm_action(
                 armed_ts=100.0,
@@ -2809,8 +2816,30 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertIsNone(crypto_journal.probe_loss_guard_reason(now=day, trades=[]))
         shelf_trades = [
             {"ticker": "DOOD", "side": "buy", "quote": 40.0, "price": 0.002, "ts_epoch": day - 1800},
-            {"ticker": "DOOD", "side": "sell", "quote": 39.22, "price": 0.001961, "ts_epoch": day - 120},
+            {
+                "ticker": "DOOD",
+                "side": "sell",
+                "quote": 39.22,
+                "price": 0.001961,
+                "ts_epoch": day - 120,
+                "reason": "полка",
+            },
         ]
+        # CAP: выход «безубыток» с мелким −$ не включает паузу полки 25м.
+        be_trades = [
+            {"ticker": "CAP", "side": "buy", "quote": 40.0, "price": 0.10, "ts_epoch": day - 900},
+            {
+                "ticker": "CAP",
+                "side": "sell",
+                "quote": 39.70,
+                "price": 0.09925,
+                "ts_epoch": day - 60,
+                "reason": "безубыток",
+            },
+        ]
+        self.assertIsNone(
+            crypto_journal.probe_loss_guard_reason(now=day, trades=be_trades, enabled=True)
+        )
         reason = crypto_journal.probe_loss_guard_reason(
             now=day, trades=shelf_trades, enabled=True
         )
