@@ -3160,10 +3160,11 @@ def pocket_dip_pending(bars: list[dict[str, Any]], low: float) -> bool:
 
 
 def pocket_dip_held(bars: list[dict[str, Any]], low: float) -> bool:
-    """Дно уже в закрытой свече, и следующая 15м закрылась, не обновив его.
+    """Дно в закрытой свече, и хотя бы одна следующая закрытая не обновила его.
 
-    bars — от старых к новым, последняя свеча может быть открытой.
-    Тик ленты чуть ниже low свечи считается тем же дном.
+    Раньше требовали «ровно последняя закрытая» — если 15м тренд ещё bear,
+    окно сгорало и карман вечно писал «жду закрытую свечу» (SOL 05:00–05:17).
+    Открытая свеча не должна быть ≤ дна (это уже в _pocket_dip_index).
     """
     if len(bars) < 3 or float(low or 0) <= 0:
         return False
@@ -3171,10 +3172,10 @@ def pocket_dip_held(bars: list[dict[str, Any]], low: float) -> bool:
         floor = float(low)
         idx = _pocket_dip_index(bars, low)
         closed = bars[:-1]
-        # Подтверждение — именно последняя закрытая свеча. Часовой давности откат уже отыгран.
-        if idx is None or idx + 1 != len(closed) - 1:
+        # Нужна минимум одна закрытая после дна (не pending на последней закрытой).
+        if idx is None or idx >= len(closed) - 1:
             return False
-        return float(closed[idx + 1].get("low") or 0) > floor
+        return all(float(bar.get("low") or 0) > floor for bar in closed[idx + 1 :])
     except (TypeError, ValueError):
         return False
 

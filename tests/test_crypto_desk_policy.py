@@ -2201,8 +2201,9 @@ class TestDeskPolicy(unittest.TestCase):
             {"high": 1.04, "low": 1.01, "close": 1.02, "volume": 1.0},
         ]
         self.assertTrue(policy.pocket_dip_held(held, 0.99))
+        # После ещё одной закрытой выше дна — всё ещё held (тренд мог блочить вход).
         stale = held + [{"high": 1.06, "low": 1.03, "close": 1.04, "volume": 1.0}]
-        self.assertFalse(policy.pocket_dip_held(stale, 0.99))
+        self.assertTrue(policy.pocket_dip_held(stale, 0.99))
         undercut = [
             {"high": 1.05, "low": 0.99, "close": 1.00, "volume": 1.0},
             {"high": 1.02, "low": 0.98, "close": 1.00, "volume": 1.0},

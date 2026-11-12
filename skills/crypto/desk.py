@@ -145,6 +145,7 @@ logger = logging.getLogger(__name__)
 _RECONCILE_MIN_GAP_SEC = 45.0
 _PROBE_PAUSE_LOG_SEC = 300.0
 _PROBE_PIN_IDLE_LOG_SEC = 300.0
+_POCKET_WAIT_LOG_SEC = 300.0
 _PROBE_SKIP_LOG_MAX = 24
 
 
@@ -884,15 +885,21 @@ class CryptoDeskMixin:
             return phrase
         if blocked or not allow_entry:
             return None
+        # Уже в карман2 (ручная ловушка) — SOL-dip не дублируем.
+        if ticker in second_pocket_tickers():
+            arms_now = read_entry_arms()
+            if arms_now.get("pocket"):
+                write_entry_arms({}, None, sui=False)
+                logger.info("[Крипта] карман %s: уже в карман2 — взвод dip снят", ticker)
+            return None
         arms_now = read_entry_arms()
         arm = arms_now.get("pocket")
         if not pocket_bounce_ready(arm, price=price, now=time.time()):
             return None
         if not self._pocket_dip_held(ticker, float(arm["low"])):
-            logger.info(
-                "[Крипта] карман %s жду закрытую свечу после дна %.4g",
+            self._note_pocket_wait(
                 ticker,
-                float(arm["low"]),
+                f"жду закрытую свечу после дна {float(arm['low']):.4g}",
             )
             return None
         try:
@@ -905,12 +912,10 @@ class CryptoDeskMixin:
             return None
         week = self._probe_week(ticker)
         if not pocket_entry_trends_ok(trend15=trend15, trend1h=trend1h, week_chg=week):
-            logger.info(
-                "[Крипта] карман %s пропуск входа: 15m %s 1h %s 7d %s",
+            self._note_pocket_wait(
                 ticker,
-                trend15,
-                trend1h,
-                f"{week:+.1f}%" if week is not None else "нет",
+                f"пропуск входа: 15m {trend15} 1h {trend1h} 7d "
+                f"{f'{week:+.1f}%' if week is not None else 'нет'}",
             )
             return None
         budget = btc_dip_quote(equity)
@@ -1058,6 +1063,18 @@ class CryptoDeskMixin:
         stats: dict[str, int] = getattr(self, "_probe_skip_stats", None) or {}
         stats[key] = int(stats.get(key) or 0) + int(n)
         self._probe_skip_stats = stats
+
+    def _note_pocket_wait(self, ticker: str, detail: str) -> None:
+        """Жду свечу / тренд кармана — не чаще раза в 5 минут на один текст."""
+        key = f"{str(ticker or '').upper()}|{str(detail or '')}"
+        now = time.time()
+        prev = str(getattr(self, "_pocket_wait_key", "") or "")
+        last = float(getattr(self, "_pocket_wait_log_ts", 0.0) or 0.0)
+        if key == prev and now - last < _POCKET_WAIT_LOG_SEC:
+            return
+        self._pocket_wait_key = key
+        self._pocket_wait_log_ts = now
+        logger.info("[Крипта] карман %s %s", ticker, detail)
 
     def _note_probe_pause(self, reason: str) -> None:
         kind = _probe_pause_kind(reason)
