@@ -925,11 +925,13 @@ def probe_setup_ok_now(
         return False
     if not strict and not probe_night_halted(now):
         return True
+    # pin — снайпер лидера дня: в жёстком/ночном режиме тоже «сильный».
     strong = (
         float(setup.get("stair") or 0) >= 1.0 - 1e-12
         or float(setup.get("impulse") or 0) >= 1.0 - 1e-12
         or float(setup.get("spark") or 0) >= 1.0 - 1e-12
         or float(setup.get("pop") or 0) >= 1.0 - 1e-12
+        or float(setup.get("pin") or 0) >= 1.0 - 1e-12
     )
     if not strong:
         return False
@@ -2855,7 +2857,12 @@ def probe_arm_action(
         return "drop"
     if name == PROBE_ALGO_CANDLE and day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
         return "drop"
-    if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
+    # Снайпер (пин): лидер дня часто стреляет после глубокой просадки недели — −5% не роняем.
+    if (
+        name != PROBE_ALGO_PIN
+        and week_chg is not None
+        and float(week_chg) <= EXCLUDE_ENTER_CHG7
+    ):
         return "drop"
     params = probe_algo_params(algo)
     chase = float(params["chase_pct"] if chase_pct is None else chase_pct)

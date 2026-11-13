@@ -673,6 +673,14 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertTrue(
             policy.probe_setup_ok_now(night_stair, now=day_ts, turnover=1_500_000, strict=True)
         )
+        # Снайпер pin — сильный сетап в жёстком режиме (раньше срезался без stair/impulse/…).
+        night_pin = {"algo": "pin_pullback", "pin": 1.0, "shelf": 1.0, "price": 1.01}
+        self.assertTrue(
+            policy.probe_setup_ok_now(night_pin, now=day_ts, turnover=1_500_000, strict=True)
+        )
+        self.assertFalse(
+            policy.probe_setup_ok_now(night_pin, now=day_ts, turnover=200_000, strict=True)
+        )
         self.assertEqual(policy.probe_min_turnover_usd(strict=True), 800_000.0)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_SEC, 25 * 60)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_LOSS_USD, 0.25)
@@ -1511,6 +1519,35 @@ class TestDeskPolicy(unittest.TestCase):
                 algo=policy.PROBE_ALGO_PIN,
                 qty=40.0,
             )
+        )
+        # Пин не роняем недельным −5%: лидер часто стреляет после просадки 7d.
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=100.0,
+                now=100.0,
+                price=1.004,
+                shelf=0.99,
+                trend15="bull",
+                day_chg=8.0,
+                arm_px=1.0,
+                week_chg=-8.0,
+                algo=policy.PROBE_ALGO_PIN,
+            ),
+            "buy",
+        )
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=100.0,
+                now=100.0 + policy.PROBE_ENTRY_HOLD_SEC,
+                price=1.06,
+                shelf=1.01,
+                trend15="bull",
+                day_chg=8.0,
+                arm_px=1.05,
+                week_chg=-8.0,
+                algo=policy.PROBE_ALGO_CANDLE,
+            ),
+            "drop",
         )
 
         stair = []
