@@ -10,15 +10,22 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from robotics_laws import prompt_block
-from skills.groq_client import FAST_MODEL, chat_kwargs, get_client, model_chain
+from skills.groq_client import chat_kwargs, get_client
 
 logger = logging.getLogger(__name__)
 
-_AI_CACHE_TTL_SEC = 180.0
+# TTL > circuit: иначе после паузы 240с кэш 180с уже мёртв и снова 15×TPM.
+_AI_CACHE_TTL_SEC = 420.0
 _AI_MIN_PASS_SCORE = 55
-_AI_LOOP_SEC = 60.0
+_AI_LOOP_SEC = 120.0
 _AI_TOP_N = 15
+_AI_GAP_SEC = 2.5
+_AI_MISS_STREAK_LIMIT = 3
+_AI_COOLDOWN_SEC = 240.0
+_AI_WARN_THROTTLE_SEC = 45.0
+_AI_MAX_TOKENS = 300
+# Только qwen: gpt-oss + json_object + max_tokens=120 → 400 Failed to generate JSON.
+_AI_MODELS = ("qwen/qwen3.8-27b",)
 _SKIP_TICKERS = frozenset({"BTC", "ETH", "SOL", "USDT", "USDC", "USDE", "DAI"})
 
 
@@ -63,6 +70,9 @@ class CryptoAIRadar:
             "timeout": 0,
             "eval": 0,
         }
+        self._miss_streak = 0
+        self._cooldown_until = 0.0
+        self._warn_ts: dict[str, float] = {}
 
     def start(self) -> None:
         if not radar_enabled():
@@ -77,7 +87,7 @@ class CryptoAIRadar:
             daemon=True,
         )
         self._thread.start()
-        logger.info("[AI-Радар] фоновый поток на %s", FAST_MODEL)
+        logger.info("[AI-Радар] фоновый поток на %s", _AI_MODELS[0])
 
     def stop(self) -> None:
         self._stop.set()
@@ -91,10 +101,22 @@ class CryptoAIRadar:
             self.stop()
             logger.info("[AI-Радар] остановлен тумблером")
 
+    def _warn_throttled(self, key: str, msg: str, *args: Any) -> None:
+        now = time.time()
+        last = float(self._warn_ts.get(key) or 0.0)
+        if now - last < _AI_WARN_THROTTLE_SEC:
+            return
+        self._warn_ts[key] = now
+        logger.warning(msg, *args)
+
     def offer_candidates(self, rows: list[dict[str, Any]] | None) -> None:
         """Снимок топа из скана щупа (без REST). Копия под замком радара."""
         if not radar_enabled():
             return
+        try:
+            from .desk_policy import probe_scan_day_ok
+        except Exception:
+            probe_scan_day_ok = None  # type: ignore[assignment]
         clean: list[dict[str, Any]] = []
         for row in rows or []:
             if not isinstance(row, dict):
@@ -102,13 +124,21 @@ class CryptoAIRadar:
             ticker = str(row.get("ticker") or "").upper()
             if not ticker or ticker in _SKIP_TICKERS:
                 continue
+            price = float(row.get("price") or 0)
+            day_chg = float(row.get("chg") or row.get("day_chg") or 0)
+            high = float(row.get("high") or 0)
+            # Не гоняем LLM на уже отсечённых (≥45% суток / глубокий слив с хая).
+            if callable(probe_scan_day_ok) and not probe_scan_day_ok(
+                price=price, day_high=high, day_chg=day_chg
+            ):
+                continue
             clean.append(
                 {
                     "ticker": ticker,
-                    "price": float(row.get("price") or 0),
-                    "day_chg": float(row.get("chg") or row.get("day_chg") or 0),
+                    "price": price,
+                    "day_chg": day_chg,
                     "turnover_usd": float(row.get("turnover") or row.get("turnover_usd") or 0),
-                    "high": float(row.get("high") or 0),
+                    "high": high,
                     "low": float(row.get("low") or 0),
                 }
             )
@@ -162,13 +192,17 @@ class CryptoAIRadar:
     def _evaluate_top(self) -> None:
         if not radar_enabled() or get_client() is None:
             return
+        now = time.time()
+        if now < float(self._cooldown_until or 0.0):
+            return
         with self._lock:
             rows = list(self._candidates)
         if not rows:
             return
-        now = time.time()
         for metrics in rows:
             if self._stop.is_set():
+                break
+            if time.time() < float(self._cooldown_until or 0.0):
                 break
             ticker = str(metrics.get("ticker") or "").upper()
             if not ticker:
@@ -179,10 +213,25 @@ class CryptoAIRadar:
                     continue
             verdict = self._call_llm(metrics)
             if verdict is None:
+                self._miss_streak += 1
+                if self._miss_streak >= _AI_MISS_STREAK_LIMIT:
+                    self._cooldown_until = time.time() + _AI_COOLDOWN_SEC
+                    self._warn_throttled(
+                        "circuit",
+                        "[AI-Радар] circuit: %d miss подряд — пауза %.0fс",
+                        self._miss_streak,
+                        _AI_COOLDOWN_SEC,
+                    )
+                    break
+                if self._stop.wait(_AI_GAP_SEC):
+                    break
                 continue
+            self._miss_streak = 0
             with self._lock:
                 self._cache[ticker] = verdict
                 self._stats["eval"] += 1
+            if self._stop.wait(_AI_GAP_SEC):
+                break
 
     def _call_llm(self, metrics: dict[str, Any]) -> AIVerdict | None:
         ticker = str(metrics.get("ticker") or "").upper()
@@ -191,18 +240,19 @@ class CryptoAIRadar:
         dist = 0.0
         if high > 1e-12 and price > 0:
             dist = (high - price) / high * 100.0
+        # Короткий промпт без robotics_laws: TPM Groq и ложные вето на $0.5–1.5M.
         system = (
-            f"{prompt_block()}\n\n"
-            "Ты — квантовый риск-офицер алготрейдингового щупа.\n"
-            "Цель: отсечь токсичные манипулятивные пампы перед входом на 5–20 минут.\n"
-            "Вето (pass_trade=false):\n"
-            "1) сутки > +45% при обороте < $1.5M (излёт);\n"
-            "2) очевидный one-candle pump без объёма;\n"
-            "3) неликвид / риск делистинга.\n"
-            "Органичный импульс с объёмом — pass_trade=true.\n"
-            "Ответь СТРОГО JSON без markdown: "
-            '{"pass_trade": true, "score": 85, "reason": "OK"}'
+            "Risk officer for a 5-20 min crypto spot probe. Reply STRICT JSON only.\n"
+            "Veto (pass_trade=false) ONLY if:\n"
+            "1) day_change_pct > 45 AND turnover_usd < 1500000 (blow-off);\n"
+            "2) clear one-candle pump with tiny volume;\n"
+            "3) delisting / obvious scam liquidity.\n"
+            "NOT a veto: turnover 500000..1500000 with day_change_pct < 35 "
+            "(organic lead — pass_trade=true).\n"
+            "NOT a veto: day_change_pct below 45 alone.\n"
+            'Format: {"pass_trade": true, "score": 85, "reason": "OK"}'
         )
+
         user = json.dumps(
             {
                 "ticker": ticker,
@@ -252,10 +302,24 @@ class CryptoAIRadar:
             with self._lock:
                 if "timeout" in err or "timed out" in err:
                     self._stats["timeout"] += 1
-                    logger.warning("[AI-Радар] таймаут Groq для %s", ticker)
+                    self._warn_throttled(
+                        f"to:{ticker}",
+                        "[AI-Радар] таймаут Groq для %s: %s",
+                        ticker,
+                        exc,
+                    )
                 else:
                     self._stats["miss"] += 1
-                    logger.debug("[AI-Радар] сбой %s: %s", ticker, exc)
+                    # Короткая выжимка причины (429 / json_validate / 404) — раньше уходила в debug.
+                    snippet = str(exc).replace("\n", " ").strip()
+                    if len(snippet) > 180:
+                        snippet = snippet[:177] + "..."
+                    self._warn_throttled(
+                        f"miss:{snippet[:48]}",
+                        "[AI-Радар] сбой %s: %s",
+                        ticker,
+                        snippet,
+                    )
             return None
 
     def _complete_json(self, messages: list[dict[str, str]]) -> str:
@@ -263,13 +327,13 @@ class CryptoAIRadar:
         if client is None:
             raise RuntimeError("Groq client unavailable")
         last_err: Exception | None = None
-        for model_name in model_chain(FAST_MODEL):
+        for model_name in _AI_MODELS:
             try:
                 kwargs = chat_kwargs(
                     messages,
                     model_name,
                     temperature=0.1,
-                    max_tokens=120,
+                    max_tokens=_AI_MAX_TOKENS,
                 )
                 kwargs["response_format"] = {"type": "json_object"}
                 response = client.chat.completions.create(**kwargs)
@@ -279,7 +343,15 @@ class CryptoAIRadar:
                 from skills.groq_client import is_retriable_model_error
 
                 if is_retriable_model_error(exc):
-                    logger.warning("[AI-Радар] модель %s недоступна, fallback", model_name)
+                    snippet = str(exc).replace("\n", " ").strip()
+                    if len(snippet) > 120:
+                        snippet = snippet[:117] + "..."
+                    self._warn_throttled(
+                        f"model:{model_name}",
+                        "[AI-Радар] модель %s недоступна (%s)",
+                        model_name,
+                        snippet,
+                    )
                     continue
                 raise
         if last_err:

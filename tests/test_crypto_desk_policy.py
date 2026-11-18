@@ -681,7 +681,7 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(
             policy.probe_setup_ok_now(night_pin, now=day_ts, turnover=200_000, strict=True)
         )
-        self.assertEqual(policy.probe_min_turnover_usd(strict=True), 800_000.0)
+        self.assertEqual(policy.probe_min_turnover_usd(strict=True), 650_000.0)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_SEC, 25 * 60)
         self.assertEqual(policy.PROBE_SHELF_COOLDOWN_LOSS_USD, 0.25)
         self.assertTrue(policy.PROBE_MARKET_FALL_ON)
@@ -988,8 +988,8 @@ class TestDeskPolicy(unittest.TestCase):
                 rising["close"], rising["high"], rising["low"], rising["open"]
             )
         )
-        # Тело 0.8% — candle. Пробой полки (4%) к телу свечи больше не привязан.
-        self.assertIsNotNone(policy.probe_candle_setup(base5 + [rising]))
+        # Одиночная 5м свеча выключена — только stair/flag.
+        self.assertIsNone(policy.probe_candle_setup(base5 + [rising]))
         spark_early = {
             **rising,
             "ts": 1000.0,
@@ -1119,12 +1119,12 @@ class TestDeskPolicy(unittest.TestCase):
                 at_high["close"], at_high["high"], at_high["low"], at_high["open"]
             )
         )
-        # Перегрев 30м не режет тело внутри 0.6–2%. Выше 2% — уже не candle и не spark.
+        # Перегрев 30м (>8%) режет candle даже при теле в диапазоне; одиночная свеча выкл.
         heat = [
             {"open": 1.0, "high": 1.002, "low": 0.998, "close": 1.0, "volume": 10.0}
             for _ in range(8)
         ] + [
-            {"open": 0.980, "high": 0.982, "low": 0.978, "close": 0.980, "volume": 10.0}
+            {"open": 0.920, "high": 0.922, "low": 0.918, "close": 0.920, "volume": 10.0}
             for _ in range(6)
         ]
         heat_bar = {
@@ -1135,7 +1135,8 @@ class TestDeskPolicy(unittest.TestCase):
             "volume": 25.0,
             "ts": 1000.0,
         }
-        self.assertIsNotNone(policy.probe_candle_setup(heat + [heat_bar], now=1060.0))
+        # +9.8% за 30м от 0.920 → отсев; одиночная всё равно None.
+        self.assertIsNone(policy.probe_candle_setup(heat + [heat_bar], now=1060.0))
         self.assertIsNotNone(policy.probe_spark_setup(heat + [heat_bar], now=1060.0))
         heat_break = {**heat_bar, "close": 1.045, "high": 1.050}
         self.assertIsNone(policy.probe_candle_setup(heat + [heat_break], now=1060.0))
@@ -1143,7 +1144,7 @@ class TestDeskPolicy(unittest.TestCase):
         collapsed_wick = {**rising, "close": 1.006, "high": 1.020}
         self.assertIsNone(policy.probe_candle_setup(base5 + [collapsed_wick]))
         tip_candle = {**rising, "close": 1.011, "high": 1.012}
-        self.assertIsNotNone(policy.probe_candle_setup(base5 + [tip_candle]))
+        self.assertIsNone(policy.probe_candle_setup(base5 + [tip_candle]))
         late_body = {**rising, "close": 1.022, "high": 1.023}
         self.assertIsNone(policy.probe_candle_setup(base5 + [late_body]))
         early_bar = {**rising, "ts": 1000.0, "volume": 4.0}
@@ -1218,6 +1219,17 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertFalse(policy.probe_depth_buy_ok(ask_depth_usd=200.0, quote_usd=40.0))
         self.assertTrue(policy.probe_depth_buy_ok(ask_depth_usd=400.0, quote_usd=40.0))
         self.assertTrue(policy.probe_depth_buy_ok(ask_depth_usd=None, quote_usd=40.0))
+        # Глубина в пределах +0.4% ask, не жёсткие 3 тика.
+        asks_wide = [
+            ["0.01000", "1000"],  # $10
+            ["0.01002", "2000"],  # +0.2%
+            ["0.01003", "3000"],  # +0.3%
+            ["0.01005", "5000"],  # +0.5% — за slip 0.4%
+        ]
+        depth = policy.orderbook_ask_depth_usd(asks_wide, max_slip_pct=0.40)
+        self.assertGreater(depth, 50.0)
+        self.assertLess(depth, 10 + 20.04 + 30.09 + 1.0)  # без 5-го уровня
+        self.assertEqual(policy.PROBE_ASK_DEPTH_SLIP_PCT, 0.40)
         self.assertEqual(policy.probe_limit_tp_pct(), 4.5)
         self.assertEqual(policy.probe_limit_tp_pct(strict=True), 2.2)
         self.assertEqual(policy.probe_fast_be_peak_pct(), 1.2)
@@ -1269,7 +1281,7 @@ class TestDeskPolicy(unittest.TestCase):
                 day_high=1.015,
             )
         )
-        self.assertLessEqual(policy.PROBE_CANDLE_HOLD_SEC, 2)
+        self.assertEqual(policy.PROBE_CANDLE_HOLD_SEC, 0)
         stair2_bars = base5[:-2] + [
             {"open": 1.001, "high": 1.001, "low": 0.999, "close": 1.000, "volume": 10.0},
             {"open": 1.000, "high": 1.005, "low": 1.000, "close": 1.0045, "volume": 20.0},
@@ -1408,6 +1420,20 @@ class TestDeskPolicy(unittest.TestCase):
             ),
             "drop",
         )
+        # BASED-пинг-понг: +1.42% от shelf stair, но у arm_px — buy (chase от arm_px).
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=100.0,
+                now=100.0,
+                price=0.04153,
+                shelf=0.04095,
+                trend15="bull",
+                day_chg=8.0,
+                arm_px=0.04153,
+                algo=policy.PROBE_ALGO_CANDLE,
+            ),
+            "buy",
+        )
         late_day = policy.probe_pick_setup(
             [],
             quiet5 + [boom, live5],
@@ -1520,7 +1546,7 @@ class TestDeskPolicy(unittest.TestCase):
                 qty=40.0,
             )
         )
-        # Пин не роняем недельным −5%: лидер часто стреляет после просадки 7d.
+        # Пин/ракеты не роняем недельным −5% (как probe_trends_ok); candle — да.
         self.assertEqual(
             policy.probe_arm_action(
                 armed_ts=100.0,
@@ -1532,6 +1558,34 @@ class TestDeskPolicy(unittest.TestCase):
                 arm_px=1.0,
                 week_chg=-8.0,
                 algo=policy.PROBE_ALGO_PIN,
+            ),
+            "buy",
+        )
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=100.0,
+                now=100.0,
+                price=1.004,
+                shelf=0.99,
+                trend15="bull",
+                day_chg=8.0,
+                arm_px=1.0,
+                week_chg=-13.0,
+                algo=policy.PROBE_ALGO_SPARK,
+            ),
+            "buy",
+        )
+        self.assertEqual(
+            policy.probe_arm_action(
+                armed_ts=100.0,
+                now=100.0,
+                price=1.004,
+                shelf=0.99,
+                trend15="bull",
+                day_chg=8.0,
+                arm_px=1.0,
+                week_chg=-13.0,
+                algo=policy.PROBE_ALGO_POP,
             ),
             "buy",
         )
@@ -2118,12 +2172,12 @@ class TestDeskPolicy(unittest.TestCase):
             policy._candle_upper_wick_ratio(1.0, 1.0, 1.0, 1.0),
             0.0,
         )
-        # Candle chase от полки, не от цены взвода.
+        # Candle chase от arm_px (stair/flag уже +1%+ от shelf).
         self.assertEqual(
             policy.probe_arm_action(
                 armed_ts=1000.0,
                 now=1001.0,
-                price=1.013,
+                price=1.025,
                 shelf=1.0,
                 trend15="bull",
                 day_chg=5.0,
@@ -2138,7 +2192,7 @@ class TestDeskPolicy(unittest.TestCase):
             policy.probe_arm_action(
                 armed_ts=1000.0,
                 now=1001.0,
-                price=1.011,
+                price=1.013,
                 shelf=1.0,
                 trend15="bull",
                 day_chg=5.0,
@@ -2607,6 +2661,17 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertFalse(
             policy.probe_pin_row_ok(
                 {"ticker": "TOP", "chg": 10.0, "turnover": 2_000_000, "price": 1.012, "high": 1.0}
+            )
+        )
+        # Мажоры и слабый день не кандидаты пина.
+        self.assertFalse(
+            policy.probe_pin_row_ok(
+                {"ticker": "BTC", "chg": 12.0, "turnover": 5e9, "price": 90_000, "high": 91_000}
+            )
+        )
+        self.assertFalse(
+            policy.probe_pin_row_ok(
+                {"ticker": "ALT", "chg": 3.0, "turnover": 2_000_000, "price": 1.0, "high": 1.05}
             )
         )
         picked = policy.probe_choose_pin(

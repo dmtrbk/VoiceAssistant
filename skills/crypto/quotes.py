@@ -435,9 +435,18 @@ class CryptoQuotesMixin:
         result = data.get("result") or {}
         return orderbook_obi(result.get("b") or [], result.get("a") or [], depth=depth)
 
-    def _ask_depth_usd(self, ticker: str, levels: int | None = None) -> float | None:
-        """Сумма USD в топ-N ask. None — стакан недоступен (depth-gate fail-open)."""
-        from .desk_policy import PROBE_ASK_DEPTH_LEVELS, orderbook_ask_depth_usd
+    def _ask_depth_usd(
+        self,
+        ticker: str,
+        levels: int | None = None,
+        max_slip_pct: float | None = None,
+    ) -> float | None:
+        """Сумма USD ask в пределах slip от best. None — стакан недоступен (fail-open)."""
+        from .desk_policy import (
+            PROBE_ASK_DEPTH_LEVELS,
+            PROBE_ASK_DEPTH_SLIP_PCT,
+            orderbook_ask_depth_usd,
+        )
 
         ticker = ticker.upper()
         try:
@@ -450,7 +459,11 @@ class CryptoQuotesMixin:
         except Exception:
             return None
         asks = (data.get("result") or {}).get("a") or []
-        return orderbook_ask_depth_usd(asks, levels=levels if levels is not None else PROBE_ASK_DEPTH_LEVELS)
+        return orderbook_ask_depth_usd(
+            asks,
+            levels=levels if levels is not None else PROBE_ASK_DEPTH_LEVELS,
+            max_slip_pct=PROBE_ASK_DEPTH_SLIP_PCT if max_slip_pct is None else max_slip_pct,
+        )
 
     def _momentum(self, ticker: str) -> dict[str, Any]:
         data = self._public_get(

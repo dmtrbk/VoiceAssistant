@@ -137,7 +137,9 @@ PROBE_USD = 40.0
 # Жёсткий режим после убытков — ≥ $800k. $1.5M вырезал ракеты из сканера.
 PROBE_MIN_TURNOVER_USD = 500_000.0
 PROBE_NIGHT_MIN_TURNOVER_USD = 500_000.0
-PROBE_STRICT_MIN_TURNOVER_USD = 800_000.0
+# Жёсткий режим ≥ $650k (раньше $800k резал LA/MOCA на разгоне).
+PROBE_STRICT_MIN_TURNOVER_USD = 650_000.0
+
 PROBE_NIGHT_START_HOUR_YEKT = 23
 PROBE_NIGHT_END_HOUR_YEKT = 6
 # Защита от падающего рынка: сутки BTC / flash 15м / ширина рынка.
@@ -165,7 +167,7 @@ PROBE_FAST_DUMP_REASONS = frozenset({"полка", "стоп"})
 # После среза «полка» не перерабатывать слот в тот же чоп (ZAMA→DOOD, LA→INIT).
 PROBE_SHELF_COOLDOWN_SEC = 25 * 60
 PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
-# Жёсткий режим (оборот $800k, OBI 0.60) только на свои локальные убытки.
+# Жёсткий режим (оборот $650k, OBI 0.60) только на свои локальные убытки.
 # Дневной −$6 — полный стоп входов. Падающий рынок — PROBE_MARKET_FALL_ON.
 PROBE_STRICT_MODE = True
 PROBE_RISING_BTC_MIN_PCT = 0.0
@@ -213,8 +215,16 @@ PROBE_REENTRY_BREAKOUT_PCT = 2.5
 # Мягкий автопин: смотрит имя первым, слот не занимает.
 PROBE_PIN_ON = True
 PROBE_PIN_MIN_TURNOVER_USD = 600_000.0
+# ≥+7% суток: ранний MOCA (+2.6%→+14%) поймаем позже; без порога — шум мажоров/дна.
 PROBE_PIN_MIN_DAY_PCT = 7.0
 PROBE_PIN_MAX_DAY_PCT = 35.0
+# Мажоры почти никогда не дают +1.5%/10м — занимали все 16 слотов хода пина.
+PROBE_PIN_MAJOR_SKIP = frozenset({
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "SUI",
+    "BNB", "DOT", "TRX", "MATIC", "LTC", "BCH", "NEAR", "APT", "TON",
+    "ATOM", "UNI", "AAVE", "MNT",
+})
+
 # Перехай суток — нормальный сетап. Глубже −0.5% от записанного хая уже догон.
 PROBE_PIN_MIN_ROOM_PCT = -0.5
 PROBE_PIN_MAX_ROOM_PCT = 12.0
@@ -284,9 +294,10 @@ PROBE_OBI_SURGE_MIN_ELAPSED_FRAC = 0.15
 PROBE_CANDLE_SHELF_BREAK_PCT = 0.4
 PROBE_CANDLE_VOL_MULT = 1.5
 PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 5.0
-# 5с hold = CPOOL вечный tip-drop: хай уезжает, bar_pos убивает buy.
-PROBE_CANDLE_HOLD_SEC = 1
+# Hold 0: как spark/pop — buy сразу в _probe_try_arm, без Earn-пинг-понга на 20–50с.
+PROBE_CANDLE_HOLD_SEC = 0
 PROBE_CANDLE_CHASE_PCT = 1.2
+
 # Запас хода до хая суток ≥ 1% (режет BR/PORTAL под самым пиком, пускает BLUR/BEAM/BIRB/EDGE), без перегрева ≥45%.
 PROBE_CANDLE_MAX_DAY_PCT = 45.0
 PROBE_CANDLE_MIN_DAY_ROOM_PCT = 1.0
@@ -329,9 +340,11 @@ PROBE_MAX_BUY_SLIP_PCT = 0.60
 PROBE_MAX_ASK_SLIP_PCT = PROBE_MAX_BUY_SLIP_PCT  # alias: book_buy_ok / логи
 # One-candle pump на плече: если OI linear за 5м вырос >8% — спот не берём.
 PROBE_MAX_OI_SPIKE_PCT = 8.0
-# Топ-N ask: нога ≤ 15% глубины, иначе свой маркет сдвигает цену.
-PROBE_ASK_DEPTH_LEVELS = 3
+# Глубина ask в пределах проскальзывания (не жёсткие 3 тика на дешёвых монетах).
+PROBE_ASK_DEPTH_LEVELS = 25
+PROBE_ASK_DEPTH_SLIP_PCT = 0.40
 PROBE_ASK_DEPTH_MAX_QUOTE_FRAC = 0.15
+
 # Дешёвые монеты (<$0.01): тик раздувает % спреда (DEGEN 0.82% при пороге 0.55).
 PROBE_LOW_NOMINAL_PX = 0.01
 PROBE_LOW_NOMINAL_MAX_SPREAD_PCT = 1.0
@@ -681,16 +694,37 @@ def orderbook_obi(
     return bid_usd / tot
 
 
-def orderbook_ask_depth_usd(asks: list[Any], *, levels: int | None = None) -> float:
-    """Сумма USD в топ-N уровнях ask (цена × размер)."""
+def orderbook_ask_depth_usd(
+    asks: list[Any],
+    *,
+    levels: int | None = None,
+    max_slip_pct: float | None = None,
+) -> float:
+    """Сумма USD ask в пределах max_slip_pct от best ask (иначе топ-N уровней)."""
+    rows = list(asks or [])
+    if not rows:
+        return 0.0
+    slip = float(PROBE_ASK_DEPTH_SLIP_PCT if max_slip_pct is None else max_slip_pct)
     cap = max(1, int(PROBE_ASK_DEPTH_LEVELS if levels is None else levels))
+    try:
+        best = float(rows[0][0])
+    except (TypeError, ValueError, IndexError):
+        return 0.0
+    if best <= 0:
+        return 0.0
+    ceiling = best * (1.0 + max(0.0, slip) / 100.0) if slip > 0 else None
     total = 0.0
-    for row in (asks or [])[:cap]:
-        if isinstance(row, (list, tuple)) and len(row) >= 2:
-            try:
-                total += float(row[0]) * float(row[1])
-            except (TypeError, ValueError):
-                continue
+    for row in rows[:cap]:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        try:
+            px = float(row[0])
+            qty = float(row[1])
+        except (TypeError, ValueError):
+            continue
+        if ceiling is not None and px > ceiling + 1e-12:
+            break
+        total += px * qty
     return float(total)
 
 
@@ -944,7 +978,7 @@ def probe_setup_ok_now(
 
 
 def probe_min_turnover_usd(now: float | None = None, *, strict: bool = False) -> float:
-    """Порог оборота: день и ночь $500k, жёсткий режим $800k."""
+    """Порог оборота: день и ночь $500k, жёсткий режим $650k."""
     if strict:
         return float(PROBE_STRICT_MIN_TURNOVER_USD)
     if now is not None and probe_night_halted(now):
@@ -1178,13 +1212,18 @@ def probe_scan_ranked_rows(
             continue
         valid_rows.append((score, row))
     leaders = sorted(valid_rows, key=lambda item: item[0], reverse=True)
+    # Донные слоты — по отскоку от low, не по обороту (иначе BTC/ETH вместо ракет).
     bottom_movers = [
         item
         for item in valid_rows
         if PROBE_DAY_MIN_PCT <= item[0] <= 2.0
-        and float(item[1].get("turnover") or 0) >= floor_turn
+        and probe_scan_bounce_rank(item[1], min_turnover=floor_turn) > float("-inf")
     ]
-    bottom_movers.sort(key=lambda item: float(item[1].get("turnover") or 0), reverse=True)
+    bottom_movers.sort(
+        key=lambda item: probe_scan_bounce_rank(item[1], min_turnover=floor_turn),
+        reverse=True,
+    )
+
     rocket_slots = int(PROBE_ROCKET_SCAN_SLOTS)
     if cap <= rocket_slots:
         return leaders[:cap]
@@ -1238,11 +1277,16 @@ def probe_day_ranks(rows: list[dict[str, Any]] | None) -> dict[str, int]:
 
 
 def probe_pin_row_ok(row: dict[str, Any] | None) -> bool:
-    """Фильтр пина: оборот и не парабола. Перехай суток пускаем, слив глубже 12% — нет."""
+    """Фильтр пина: оборот, день ≥ MIN_DAY, не мажор, не парабола."""
     if not isinstance(row, dict):
         return False
     ticker = str(row.get("ticker") or "").upper()
-    if not ticker or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+    if (
+        not ticker
+        or ticker in SLEEVE_SKIP
+        or ticker in PROBE_PIN_MAJOR_SKIP
+        or _leveraged_base(ticker)
+    ):
         return False
     try:
         chg = float(row.get("chg") or 0)
@@ -1251,6 +1295,8 @@ def probe_pin_row_ok(row: dict[str, Any] | None) -> bool:
     except (TypeError, ValueError):
         return False
     if price <= 0 or turn < PROBE_PIN_MIN_TURNOVER_USD - 1e-9:
+        return False
+    if chg < PROBE_PIN_MIN_DAY_PCT - 1e-12:
         return False
     if chg > PROBE_PIN_MAX_DAY_PCT + 1e-12:
         return False
@@ -2327,17 +2373,15 @@ def probe_candle_setup(
             )
         except (TypeError, ValueError, KeyError):
             flag_cooled = False
-    # Отсечение перегрева за последние 30 минут (> +2.20%), если не было 15-минутной полки охлаждения.
+    # Перегрев за 30м: раньше тело < min_body делало фильтр мёртвым (ниже in_break и так None).
     if not flag_cooled and len(window) >= 6:
         try:
             ref_30m = float(window[-6].get("close") or 0)
         except (TypeError, ValueError):
             ref_30m = 0.0
-        body_now = (price / op - 1.0) * 100.0 if op > 0 else 0.0
         if (
             ref_30m > 0
             and (price / ref_30m - 1.0) * 100.0 > PROBE_CANDLE_MAX_30M_CHG_PCT + 1e-12
-            and body_now < probe_candle_min_body_pct() - 1e-12
         ):
             return None
     # Отсечение длинных верхних фитилей продавца (> 0.85%) на 3 предыдущих 5м свечах.
@@ -2370,6 +2414,8 @@ def probe_candle_setup(
     body = (price / op - 1.0) * 100.0 if op > 0 else 0.0
     min_body = probe_candle_min_body_pct()
     max_body = probe_candle_max_body_pct()
+    # in_break ≥ candle_min_body (0.60%): STAIR_MIN_BODY 0.20/0.25 намеренно ниже —
+    # вялый бар 0.20–0.59% ступенькой не берём, даже если staircase_setup нашёл.
     in_break = min_body - 1e-12 <= body <= max_body + 1e-12
     stair = _probe_staircase_setup(
         bars, typical_vol=typical, elapsed_frac=elapsed_frac
@@ -2381,13 +2427,8 @@ def probe_candle_setup(
     flag = _probe_flag_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
     if flag and in_break:
         return flag
-    if not in_break:
-        return None
-    if vol < typical * PROBE_CANDLE_VOL_MULT * elapsed_frac:
-        return None
-    if not probe_spark_live_ok(price, hi, lo, op):
-        return None
-    return {"shelf": op, "price": price}
+    # Одиночная 5м свеча выключена: главный поставщик ложных полок (FHE/SENT).
+    return None
 
 
 def probe_scan_day_ok(
@@ -2857,9 +2898,9 @@ def probe_arm_action(
         return "drop"
     if name == PROBE_ALGO_CANDLE and day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
         return "drop"
-    # Снайпер (пин): лидер дня часто стреляет после глубокой просадки недели — −5% не роняем.
+    # Ракеты + пин: как probe_trends_ok — week −5% не роняем (STABLE/CC/H иначе arm→drop).
     if (
-        name != PROBE_ALGO_PIN
+        name not in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP, PROBE_ALGO_PIN}
         and week_chg is not None
         and float(week_chg) <= EXCLUDE_ENTER_CHG7
     ):
@@ -2867,12 +2908,9 @@ def probe_arm_action(
     params = probe_algo_params(algo)
     chase = float(params["chase_pct"] if chase_pct is None else chase_pct)
     hold = float(params["hold_sec"] if hold_sec is None else hold_sec)
-    # Candle: догон от полки пробоя, не от хая/цены взвода (slip на кончике).
-    # Spark/pop: shelf=open — отсчёт от arm_px, иначе тело 1–2% сразу «догон».
-    if name == PROBE_ALGO_CANDLE and float(shelf or 0) > 0:
-        chase_ref = float(shelf)
-    else:
-        chase_ref = float(arm_px or 0) or float(shelf or 0)
+    # Candle stair/flag: полка = open ступени, ход уже +1.2..2.4% — chase от shelf
+    # ронял BASED в пинг-понг. Как spark/pop: догон от arm_px.
+    chase_ref = float(arm_px or 0) or float(shelf or 0)
     if chase_ref > 0 and price > chase_ref * (1.0 + chase / 100.0):
         return "drop"
     if float(now) - float(armed_ts) < hold:

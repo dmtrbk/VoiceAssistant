@@ -24,6 +24,8 @@ _FREE_BUFFER_FLOOR = 105.0
 _FREE_TOPUP_MIN = 10.0
 _FREE_TOPUP_CHUNK = 25.0
 _POSITION_CACHE_SEC = 20.0
+# Bybit Earn Internal error / Server Timeout — не долбить API каждый тик.
+_EARN_FAIL_COOLDOWN_SEC = 180.0
 
 
 def _earn_tx_id(row: dict[str, Any]) -> str:
@@ -66,11 +68,33 @@ class CryptoEarnMixin:
     def _earn_enabled(self) -> bool:
         return bool(self._api_key) and common._earn_enabled()
 
+    def _earn_fail_cooled(self) -> bool:
+        return time.time() < float(getattr(self, "_earn_fail_until", 0.0) or 0.0)
+
+    def _earn_mark_fail(self, exc: BaseException) -> None:
+        msg = str(exc).lower()
+        if not any(
+            mark in msg
+            for mark in ("internal", "timeout", "timed out", "server", "503", "502", "504")
+        ):
+            return
+        until = time.time() + _EARN_FAIL_COOLDOWN_SEC
+        prev = float(getattr(self, "_earn_fail_until", 0.0) or 0.0)
+        if until > prev + 1.0:
+            logger.info(
+                "[Крипта] Earn: пауза %.0fс (%s)",
+                _EARN_FAIL_COOLDOWN_SEC,
+                str(exc).replace("\n", " ")[:120],
+            )
+        self._earn_fail_until = until
+
     def _earn_staked(self, *, fresh: bool = False) -> float:
         """Сколько USDT лежит под процентами. 0 — выключено, нет прав или ошибка."""
         if not self._earn_enabled():
             return 0.0
         hit = self._cache.get("earn:pos")
+        if self._earn_fail_cooled():
+            return float(hit[1]) if hit else 0.0
         if not fresh and hit and time.time() - hit[0] < _POSITION_CACHE_SEC:
             return float(hit[1])
         try:
@@ -78,8 +102,10 @@ class CryptoEarnMixin:
                 "GET", "/v5/earn/position", {"category": _CATEGORY, "coin": "USDT"}
             )
         except Exception as exc:
-            logger.info("[Крипта] Earn: позиция недоступна (%s)", exc)
-            return 0.0
+            self._earn_mark_fail(exc)
+            if not self._earn_fail_cooled():
+                logger.info("[Крипта] Earn: позиция недоступна (%s)", exc)
+            return float(hit[1]) if hit else 0.0
         total = 0.0
         for row in (data.get("result") or {}).get("list") or []:
             total += float(row.get("amount") or 0)
@@ -87,6 +113,8 @@ class CryptoEarnMixin:
         return total
 
     def _earn_order(self, order_type: str, amount: float) -> bool:
+        if self._earn_fail_cooled():
+            return False
         body: dict[str, Any] = {
             "category": _CATEGORY,
             "orderType": order_type,
@@ -99,6 +127,7 @@ class CryptoEarnMixin:
         try:
             self._signed("POST", "/v5/earn/place-order", body)
         except Exception as exc:
+            self._earn_mark_fail(exc)
             logger.info("[Крипта] Earn %s %.2f$: %s", order_type.lower(), amount, exc)
             return False
         self._cache.pop("earn:pos", None)
@@ -107,7 +136,7 @@ class CryptoEarnMixin:
 
     def _earn_free_cash(self, need: float) -> None:
         """Вернуть со процентов столько, чтобы на споте хватило на need долларов."""
-        if not self._earn_enabled() or need <= 0:
+        if not self._earn_enabled() or need <= 0 or self._earn_fail_cooled():
             return
         staked = self._earn_staked(fresh=True)
         if staked <= 0:
@@ -178,7 +207,7 @@ class CryptoEarnMixin:
 
     def _earn_park_idle(self) -> None:
         """Сверх буфера — в Earn. Долив только при free < пола, траншем ≥ $10."""
-        if not self._earn_enabled():
+        if not self._earn_enabled() or self._earn_fail_cooled():
             return
         try:
             free, _positions = self._wallet(with_earn=False)

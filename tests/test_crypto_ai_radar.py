@@ -66,12 +66,15 @@ class TestCryptoAIRadar(unittest.TestCase):
                 {"ticker": "btc", "price": 1, "chg": 1, "turnover": 1e9},
                 {"ticker": "CYBER", "price": 0.3, "chg": 12.0, "turnover": 2e6, "high": 0.31},
                 {"ticker": "DOGS", "price": 0.001, "chg": 55.0, "turnover": 400_000, "high": 0.0012},
+                {"ticker": "BREV", "price": 0.05, "chg": 70.0, "turnover": 2e6, "high": 0.06},
             ]
         )
         with radar._lock:
             names = [row["ticker"] for row in radar._candidates]
         self.assertNotIn("BTC", names)
-        self.assertEqual(names, ["CYBER", "DOGS"])
+        self.assertNotIn("BREV", names)  # сутки ≥45% — probe_scan_day_ok
+        self.assertNotIn("DOGS", names)  # 55% суток
+        self.assertEqual(names, ["CYBER"])
 
     def test_parse_json_object_strips_noise(self):
         data = _parse_json_object('тут текст {"pass_trade": false, "score": 20, "reason": "памп"} хвост')
