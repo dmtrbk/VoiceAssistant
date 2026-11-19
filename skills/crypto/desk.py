@@ -599,6 +599,7 @@ class CryptoDeskMixin:
                 ):
                     fill_px = done_quote / done_qty if done_qty > 0 else float(leg.get("sell_px") or price)
                     self._pending_exit_reason = "вершина"
+                    self._pending_trade_book = "pocket2"
                     try:
                         from .trades import _cum_exec_fee_usdt
 
@@ -720,12 +721,14 @@ class CryptoDeskMixin:
                 obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12
             )
             self._pending_exit_reason = str(reason or "")
+            self._pending_trade_book = "pocket2"
             try:
                 phrase = self._place_order(
                     ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker
                 )
             except Exception as exc:
                 self._pending_exit_reason = ""
+                self._pending_trade_book = ""
                 msg = str(exc or "")
                 floor_px = _sell_price_floor_from_exc(msg)
                 if floor_px is None:
@@ -863,10 +866,12 @@ class CryptoDeskMixin:
                 return None
             seen = getattr(self, "_last_fill", None)
             self._pending_exit_reason = str(reason or "")
+            self._pending_trade_book = "dip"
             try:
                 phrase = self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
             except Exception as exc:
                 self._pending_exit_reason = ""
+                self._pending_trade_book = ""
                 logger.info("[Крипта] карман %s продажа не прошла: %s", ticker, exc)
                 return None
             fill = getattr(self, "_last_fill", None)
@@ -1221,6 +1226,7 @@ class CryptoDeskMixin:
     def _probe_journal_limit(self, ticker: str, qty: float, quote: float, fee: float) -> None:
         """Исполненная лимитка — продажа «вершина», не стоп."""
         self._pending_exit_reason = "вершина"
+        self._pending_trade_book = "probe"
         self._journal_trade(ticker, "Sell", quote, quote / qty, ticker, fee_usd=fee)
         logger.info("[Крипта] щуп %s: лимитный тейк %.6g по %.4g", ticker, qty, quote / qty)
 
@@ -1428,10 +1434,12 @@ class CryptoDeskMixin:
             and not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
         )
         self._pending_exit_reason = str(reason or "")
+        self._pending_trade_book = "probe"
         try:
             self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker)
         except Exception as exc:
             self._pending_exit_reason = ""
+            self._pending_trade_book = ""
             logger.info("[Крипта] щуп %s продажа не прошла: %s", ticker, exc)
             return
         fill = getattr(self, "_last_fill", None)
@@ -1916,6 +1924,7 @@ class CryptoDeskMixin:
             except Exception:
                 ask_px = 0.0
         cap_px = float(arm_px or price or 0)
+        limit_px = 0.0
         if use_ioc and ask_px > 0:
             limit_px = probe_buy_ioc_cap_px(
                 ask=ask_px,
@@ -1931,6 +1940,17 @@ class CryptoDeskMixin:
                 ioc_slip,
                 PROBE_BUY_IOC_ASK_PAD_PCT,
             )
+            # Не ходим в _place_order, если ask уже выше потолка (экономия 1–2с REST).
+            if limit_px > 0 and limit_px + 1e-12 < ask_px:
+                write_probe(drop_arm=ticker)
+                logger.info(
+                    "[Крипта] щуп %s: ask %.6g > потолок %.6g — пропуск до ордера",
+                    ticker,
+                    ask_px,
+                    limit_px,
+                )
+                return
+        self._pending_trade_book = "probe"
         try:
             self._place_order(
                 ticker,
@@ -1943,6 +1963,7 @@ class CryptoDeskMixin:
                 max_slip_pct=ioc_slip if use_ioc else None,
             )
         except Exception as exc:
+            self._pending_trade_book = ""
             write_probe(drop_arm=ticker)
             logger.info("[Крипта] щуп %s покупка не прошла: %s", ticker, exc)
             return

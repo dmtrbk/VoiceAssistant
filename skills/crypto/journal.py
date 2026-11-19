@@ -514,6 +514,8 @@ class CryptoJournalMixin:
         price: float,
         spoken: str,
         fee_usd: float = 0.0,
+        *,
+        book: str = "",
     ) -> None:
         now = datetime.now(_MSK)
         side_norm = "buy" if side == "Buy" else "sell"
@@ -523,6 +525,8 @@ class CryptoJournalMixin:
         pending = str(getattr(self, "_pending_exit_reason", "") or "")
         self._pending_exit_reason = ""
         note = str(pending or "")
+        pending_book = str(book or getattr(self, "_pending_trade_book", "") or "").strip().lower()
+        self._pending_trade_book = ""
         trades = _read_trades()
         entry: dict[str, Any] = {
             "ts": now.strftime("%d.%m %H:%M"),
@@ -536,6 +540,8 @@ class CryptoJournalMixin:
         }
         if note:
             entry["reason"] = note
+        if pending_book:
+            entry["book"] = pending_book
         if side_norm == "sell":
             pnl = realized_pnl_for_sell(
                 trades, ticker=ticker, quote=quote_usd, price=px, fee_usd=fee
@@ -1082,6 +1088,21 @@ def lift_probe_hourly(
     return until
 
 
+def _probe_guard_counts_trade(entry: dict[str, Any]) -> bool:
+    """Жёсткий режим щупа: только сделки book=probe. Ручные/карман2/dip не зажимают сканер.
+
+    Legacy без book: sell без reason — ручной/синк биржи (ICNT/SENT), не считаем;
+    sell с reason или buy — как раньше (тесты и старый журнал щупа).
+    """
+    book = str(entry.get("book") or "").strip().lower()
+    if book:
+        return book == "probe"
+    side = str(entry.get("side") or "").lower()
+    if side == "sell" and not str(entry.get("reason") or "").strip():
+        return False
+    return True
+
+
 def probe_loss_guard_reason(
     *,
     now: float | None = None,
@@ -1151,7 +1172,7 @@ def probe_loss_guard_reason(
         epoch = _entry_epoch(entry)
         opened = float(lot.get("opened_ts") or 0)
         hold_sec = (float(epoch) - opened) if epoch is not None and opened > 0 else 9e9
-        if epoch is not None and epoch <= now_ts + 1.0:
+        if epoch is not None and epoch <= now_ts + 1.0 and _probe_guard_counts_trade(entry):
             if day_start <= epoch < day_end:
                 day_pnl += pnl
             closed.append((epoch, pnl, cost_sold, str(entry.get("reason") or ""), hold_sec))

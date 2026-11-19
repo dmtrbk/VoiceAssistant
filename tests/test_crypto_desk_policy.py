@@ -1900,6 +1900,28 @@ class TestDeskPolicy(unittest.TestCase):
                 now=1000.0 + 30.0,
             )
         )
+        # MON: impulse вошёл при non-bull — soft «тренд» не режет через 4с на −0.25%.
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.01411,
+                entry=0.0142,
+                shelf=0.01393,
+                trend15="neutral",
+                peak=0.0142,
+                algo=policy.PROBE_ALGO_IMPULSE,
+                qty=2810.9,
+            )
+        )
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.99,
+                entry=1.0,
+                shelf=0.95,
+                trend15="bear",
+                peak=1.0,
+                algo=policy.PROBE_ALGO_PIN,
+            )
+        )
         with patch.object(policy, "PROBE_SHELF_EXIT_ON", True):
             self.assertEqual(
                 policy.probe_exit_reason(
@@ -2918,6 +2940,53 @@ class TestJournalChurnAndDaily(unittest.TestCase):
         self.assertNotIn(
             "FOGO",
             crypto_journal.shelf_reentry_tickers(shelf, now=now + 40 * 60),
+        )
+
+    def test_probe_loss_guard_ignores_manual_and_pocket2(self):
+        from datetime import datetime, timedelta, timezone
+
+        yekt = timezone(timedelta(hours=5))
+        day = datetime(2026, 11, 19, 16, 30, tzinfo=yekt).timestamp()
+        # Ручной ICNT −$2.74 без reason + карман2 SENT book=pocket2 — не жёсткий режим.
+        tape = [
+            {"ticker": "BMT", "side": "buy", "quote": 40.0, "price": 0.0222, "ts_epoch": day - 2000, "book": "probe"},
+            {
+                "ticker": "BMT",
+                "side": "sell",
+                "quote": 40.58,
+                "price": 0.02263,
+                "ts_epoch": day - 1800,
+                "reason": "вершина",
+                "book": "probe",
+            },
+            {"ticker": "ICNT", "side": "buy", "quote": 100.0, "price": 0.45, "ts_epoch": day - 900},
+            {
+                "ticker": "ICNT",
+                "side": "sell",
+                "quote": 97.26,
+                "price": 0.4188,
+                "ts_epoch": day - 120,
+            },
+            {
+                "ticker": "SENT",
+                "side": "buy",
+                "quote": 50.0,
+                "price": 0.025,
+                "ts_epoch": day - 800,
+                "book": "pocket2",
+            },
+            {
+                "ticker": "SENT",
+                "side": "sell",
+                "quote": 46.45,
+                "price": 0.0218,
+                "ts_epoch": day - 60,
+                "reason": "вершина",
+                "book": "pocket2",
+            },
+        ]
+        self.assertIsNone(
+            crypto_journal.probe_loss_guard_reason(now=day, trades=tape, enabled=True)
         )
 
     def test_probe_loss_guard_night_and_shelf_cooldown(self):

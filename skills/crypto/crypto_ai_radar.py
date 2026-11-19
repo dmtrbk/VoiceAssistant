@@ -19,7 +19,8 @@ _AI_CACHE_TTL_SEC = 420.0
 _AI_MIN_PASS_SCORE = 55
 _AI_LOOP_SEC = 120.0
 _AI_TOP_N = 15
-_AI_GAP_SEC = 2.5
+# Пауза между тикерами: иначе 3×qwen подряд → 429 TPM и circuit 240с.
+_AI_GAP_SEC = 2.0
 _AI_MISS_STREAK_LIMIT = 3
 _AI_COOLDOWN_SEC = 240.0
 _AI_WARN_THROTTLE_SEC = 45.0

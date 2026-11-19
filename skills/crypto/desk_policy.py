@@ -3076,6 +3076,7 @@ def probe_exit_reason(
         PROBE_ALGO_IMPULSE,
         PROBE_ALGO_SPARK,
         PROBE_ALGO_POP,
+        PROBE_ALGO_PIN,
         PROBE_ALGO_SPRINT,
         PROBE_ALGO_GRIND,
     }
@@ -3085,9 +3086,16 @@ def probe_exit_reason(
         scratch = float(arm_px or 0) or ent
         if scratch > 0 and px <= scratch:
             return "ожидание"
-    # candle/grind: купить рост → ждать ловушку → продать. Soft «тренд» не режем
-    # (BLEND: −0.3% bear → handoff → потом +20%). Только полка / стоп / вершина.
-    if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP, PROBE_ALGO_GRIND}:
+    # candle/impulse/spark/pop/pin/grind: вход разрешён и без bull 15м —
+    # soft «тренд» не режем (MON: impulse + neutral → sell через 4с). Только полка/стоп/вершина.
+    if name in {
+        PROBE_ALGO_CANDLE,
+        PROBE_ALGO_IMPULSE,
+        PROBE_ALGO_SPARK,
+        PROBE_ALGO_POP,
+        PROBE_ALGO_PIN,
+        PROBE_ALGO_GRIND,
+    }:
         return None
     if run and trend15 == "bear":
         return "тренд"
