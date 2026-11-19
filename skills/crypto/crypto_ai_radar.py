@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -19,16 +20,30 @@ _AI_CACHE_TTL_SEC = 420.0
 _AI_MIN_PASS_SCORE = 55
 _AI_LOOP_SEC = 120.0
 _AI_TOP_N = 15
-# Пауза между тикерами: иначе 3×qwen подряд → 429 TPM и circuit 240с.
-_AI_GAP_SEC = 2.0
+# Пауза между тикерами + лимит за цикл: не выжигать минутный TPM пачкой.
+_AI_GAP_SEC = 3.0
+_AI_MAX_EVAL_PER_LOOP = 5
 _AI_MISS_STREAK_LIMIT = 3
 _AI_COOLDOWN_SEC = 240.0
+_AI_TPM_COOLDOWN_SEC = 35.0
 _AI_WARN_THROTTLE_SEC = 45.0
-# Короткий JSON-ответ; 300 сжигал TPM Groq на 3–4 монетах/мин.
-_AI_MAX_TOKENS = 80
+# Запас под reason/скобки: 48 иногда резал JSON → miss; короткий ответ всё равно ~25–35 tok.
+_AI_MAX_TOKENS = 96
 # Только qwen: gpt-oss + json_object + max_tokens=120 → 400 Failed to generate JSON.
 _AI_MODELS = ("qwen/qwen3.8-27b",)
 _SKIP_TICKERS = frozenset({"BTC", "ETH", "SOL", "USDT", "USDC", "USDE", "DAI"})
+
+
+def _tpm_retry_sec(exc: BaseException) -> float | None:
+    """Секунды паузы при 429 TPM/RPM; None — не rate-limit."""
+    text = str(exc or "")
+    low = text.lower()
+    if "429" not in low and "rate limit" not in low and "tokens per" not in low:
+        return None
+    match = re.search(r"try again in\s+([0-9]+(?:\.[0-9]+)?)\s*s", low)
+    if match:
+        return max(8.0, min(90.0, float(match.group(1)) + 1.5))
+    return float(_AI_TPM_COOLDOWN_SEC)
 
 
 def radar_enabled() -> bool:
@@ -202,10 +217,13 @@ class CryptoAIRadar:
             rows = list(self._candidates)
         if not rows:
             return
+        evaluated = 0
         for metrics in rows:
             if self._stop.is_set():
                 break
             if time.time() < float(self._cooldown_until or 0.0):
+                break
+            if evaluated >= int(_AI_MAX_EVAL_PER_LOOP):
                 break
             ticker = str(metrics.get("ticker") or "").upper()
             if not ticker:
@@ -215,7 +233,11 @@ class CryptoAIRadar:
                 if existing and (now - float(existing.eval_ts)) < _AI_CACHE_TTL_SEC * 0.7:
                     continue
             verdict = self._call_llm(metrics)
+            evaluated += 1
             if verdict is None:
+                # TPM 429 уже выставил короткий cooldown — не жжём ещё 2 запроса → circuit 240с.
+                if time.time() < float(self._cooldown_until or 0.0):
+                    break
                 self._miss_streak += 1
                 if self._miss_streak >= _AI_MISS_STREAK_LIMIT:
                     self._cooldown_until = time.time() + _AI_COOLDOWN_SEC
@@ -296,8 +318,21 @@ class CryptoAIRadar:
             )
         except Exception as exc:
             err = str(exc).lower()
+            tpm_wait = _tpm_retry_sec(exc)
             with self._lock:
-                if "timeout" in err or "timed out" in err:
+                if tpm_wait is not None:
+                    self._stats["miss"] += 1
+                    self._cooldown_until = max(
+                        float(self._cooldown_until or 0.0),
+                        time.time() + float(tpm_wait),
+                    )
+                    self._warn_throttled(
+                        "tpm",
+                        "[AI-Радар] TPM/RPM 429 на %s — пауза %.0fс (без circuit 240с)",
+                        ticker,
+                        tpm_wait,
+                    )
+                elif "timeout" in err or "timed out" in err:
                     self._stats["timeout"] += 1
                     self._warn_throttled(
                         f"to:{ticker}",
@@ -307,7 +342,7 @@ class CryptoAIRadar:
                     )
                 else:
                     self._stats["miss"] += 1
-                    # Короткая выжимка причины (429 / json_validate / 404) — раньше уходила в debug.
+                    # Короткая выжимка причины (json_validate / 404) — раньше уходила в debug.
                     snippet = str(exc).replace("\n", " ").strip()
                     if len(snippet) > 180:
                         snippet = snippet[:177] + "..."
