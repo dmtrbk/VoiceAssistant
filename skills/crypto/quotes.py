@@ -418,22 +418,39 @@ class CryptoQuotesMixin:
             "last": float(row.get("lastPrice") or 0),
         }
 
-    def _orderbook_obi(self, ticker: str, depth: int = 5) -> float | None:
-        """Дисбаланс стакана L2 (0..1): доля bid-объёма в топ-depth уровнях."""
-        from .desk_policy import orderbook_obi
-
+    def _orderbook_l2(self, ticker: str, *, cache_sec: float = 2.0) -> dict[str, Any] | None:
+        """Один REST orderbook limit=25: bids/asks + best bid/ask. Кэш 1–2с."""
         ticker = ticker.upper()
         try:
             data = self._public_get(
                 "/v5/market/orderbook",
                 {"category": "spot", "symbol": self._symbol(ticker), "limit": "25"},
                 f"ob:{ticker}",
-                cache_sec=2.0,
+                cache_sec=cache_sec,
             )
         except Exception:
             return None
         result = data.get("result") or {}
-        return orderbook_obi(result.get("b") or [], result.get("a") or [], depth=depth)
+        bids = result.get("b") or []
+        asks = result.get("a") or []
+        bid = ask = 0.0
+        try:
+            if bids and isinstance(bids[0], (list, tuple)) and len(bids[0]) >= 1:
+                bid = float(bids[0][0])
+            if asks and isinstance(asks[0], (list, tuple)) and len(asks[0]) >= 1:
+                ask = float(asks[0][0])
+        except (TypeError, ValueError, IndexError):
+            bid = ask = 0.0
+        return {"bids": bids, "asks": asks, "bid": bid, "ask": ask}
+
+    def _orderbook_obi(self, ticker: str, depth: int = 5) -> float | None:
+        """Дисбаланс стакана L2 (0..1): доля bid-объёма в топ-depth уровнях."""
+        from .desk_policy import orderbook_obi
+
+        snap = self._orderbook_l2(ticker)
+        if not snap:
+            return None
+        return orderbook_obi(snap.get("bids") or [], snap.get("asks") or [], depth=depth)
 
     def _ask_depth_usd(
         self,
@@ -448,19 +465,11 @@ class CryptoQuotesMixin:
             orderbook_ask_depth_usd,
         )
 
-        ticker = ticker.upper()
-        try:
-            data = self._public_get(
-                "/v5/market/orderbook",
-                {"category": "spot", "symbol": self._symbol(ticker), "limit": "25"},
-                f"ob:{ticker}",
-                cache_sec=2.0,
-            )
-        except Exception:
+        snap = self._orderbook_l2(ticker)
+        if not snap:
             return None
-        asks = (data.get("result") or {}).get("a") or []
         return orderbook_ask_depth_usd(
-            asks,
+            snap.get("asks") or [],
             levels=levels if levels is not None else PROBE_ASK_DEPTH_LEVELS,
             max_slip_pct=PROBE_ASK_DEPTH_SLIP_PCT if max_slip_pct is None else max_slip_pct,
         )

@@ -1196,6 +1196,18 @@ class TestDeskPolicy(unittest.TestCase):
         self.assertEqual(policy.PROBE_IMPULSE_CHASE_PCT, 0.6)
         self.assertEqual(policy.PROBE_MAX_ASK_SLIP_PCT, 0.6)
         self.assertEqual(policy.PROBE_MAX_BUY_SLIP_PCT, 0.6)
+        self.assertEqual(policy.PROBE_BUY_IOC_ASK_PAD_PCT, 0.20)
+        self.assertEqual(policy.PROBE_BUY_IOC_SLIP_PCT, 0.40)
+        self.assertAlmostEqual(
+            policy.probe_buy_ioc_cap_px(ask=1.0, arm_px=1.0),
+            1.002,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            policy.probe_buy_ioc_cap_px(ask=1.01, arm_px=1.0),
+            1.004,
+            places=6,
+        )
         self.assertEqual(policy.PROBE_MAX_OI_SPIKE_PCT, 8.0)
         self.assertTrue(policy.probe_oi_spike_ok(100.0, 100.0)[0])
         self.assertTrue(policy.probe_oi_spike_ok(107.0, 100.0)[0])

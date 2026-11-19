@@ -338,6 +338,13 @@ PROBE_MAX_SPREAD_PCT = 0.55
 # ERA: arm 0.092 → ask/fill 0.0935 (+1.63%). Потолок +0.6% от взвода.
 PROBE_MAX_BUY_SLIP_PCT = 0.60
 PROBE_MAX_ASK_SLIP_PCT = PROBE_MAX_BUY_SLIP_PCT  # alias: book_buy_ok / логи
+# Ракеты: Limit IOC вместо Market — потолок min(ask×1.002, arm×(1+slip)).
+PROBE_BUY_IOC_ASK_PAD_PCT = 0.20
+PROBE_BUY_IOC_SLIP_PCT = 0.40
+PROBE_BUY_IOC_STRICT_SLIP_PCT = 0.22
+PROBE_BUY_IOC_ALGOS = frozenset({
+    "candle", "spark", "pop", "impulse", "pin_pullback",
+})
 # One-candle pump на плече: если OI linear за 5м вырос >8% — спот не берём.
 PROBE_MAX_OI_SPIKE_PCT = 8.0
 # Глубина ask в пределах проскальзывания (не жёсткие 3 тика на дешёвых монетах).
@@ -726,6 +733,34 @@ def orderbook_ask_depth_usd(
             break
         total += px * qty
     return float(total)
+
+
+def probe_buy_ioc_cap_px(
+    *,
+    ask: float,
+    arm_px: float = 0.0,
+    strict: bool = False,
+    ask_pad_pct: float | None = None,
+    max_slip_pct: float | None = None,
+) -> float:
+    """Потолок Limit IOC: min(ask×(1+pad), arm×(1+slip)). 0 — нельзя ставить."""
+    ask_px = float(ask or 0)
+    if ask_px <= 0:
+        return 0.0
+    pad = float(PROBE_BUY_IOC_ASK_PAD_PCT if ask_pad_pct is None else ask_pad_pct) / 100.0
+    if max_slip_pct is None:
+        slip = (
+            float(PROBE_BUY_IOC_STRICT_SLIP_PCT)
+            if strict
+            else float(PROBE_BUY_IOC_SLIP_PCT)
+        ) / 100.0
+    else:
+        slip = float(max_slip_pct) / 100.0
+    from_ask = ask_px * (1.0 + pad)
+    signal = float(arm_px or 0)
+    if signal <= 0:
+        return from_ask
+    return min(from_ask, signal * (1.0 + slip))
 
 
 def probe_depth_buy_ok(

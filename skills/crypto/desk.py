@@ -41,12 +41,18 @@ from .desk_policy import (
     PROBE_ENTRY_HOLD_SEC,
     PROBE_ASK_DEPTH_MAX_QUOTE_FRAC,
     PROBE_ASK_DEPTH_SLIP_PCT,
+    PROBE_BUY_IOC_ALGOS,
+    PROBE_BUY_IOC_ASK_PAD_PCT,
+    PROBE_BUY_IOC_SLIP_PCT,
+    PROBE_BUY_IOC_STRICT_SLIP_PCT,
     PROBE_MAX_BUY_SLIP_PCT,
     PROBE_PIN_MIN_DAY_PCT,
     PROBE_STRICT_MAX_ASK_SLIP_PCT,
+    probe_buy_ioc_cap_px,
     probe_limit_tp_pct,
     probe_depth_buy_ok,
     orderbook_ask_depth_usd,
+    orderbook_obi,
     probe_oi_spike_ok,
     probe_period_sec,
     probe_scan_algo_order,
@@ -1462,22 +1468,39 @@ class CryptoDeskMixin:
     def _probe_arm(self, state: dict[str, Any]) -> None:
         ticker = str(state.get("arm_ticker") or "")
         shelf = float(state.get("arm_shelf") or 0)
+        algo = str(state.get("arm_algo") or "")
+        params = probe_algo_params(algo)
+        # hold=0: week/trend уже есть из _probe_try_arm — не долбим REST заново.
+        week = state.get("week_chg")
+        if week is not None:
+            try:
+                week = float(week)
+            except (TypeError, ValueError):
+                week = None
+        trend = str(state.get("trend15") or "")
+        day = state.get("day_chg")
+        bars = state.get("bars15")
+        if not isinstance(bars, list):
+            bars = None
         try:
             px = self._ticker(ticker)
             price = float(px.get("price") or 0)
-            day = float(px.get("chg") or 0)
+            if day is None:
+                day = float(px.get("chg") or 0)
+            else:
+                day = float(day)
         except Exception as exc:
             logger.info("[Крипта] щуп %s цена: %s", ticker, exc)
             return
-        try:
-            bars = self._probe_bars(ticker, "15", 80)
-            trend = ma_trend([bar["close"] for bar in bars])
-        except Exception as exc:
-            logger.info("[Крипта] щуп %s тренд: %s", ticker, exc)
-            return
-        week = self._probe_week(ticker)
-        algo = str(state.get("arm_algo") or "")
-        params = probe_algo_params(algo)
+        if not trend or bars is None:
+            try:
+                bars = self._probe_bars(ticker, "15", 80, cache_sec=30.0)
+                trend = ma_trend([bar["close"] for bar in bars])
+            except Exception as exc:
+                logger.info("[Крипта] щуп %s тренд: %s", ticker, exc)
+                return
+        if week is None:
+            week = self._probe_week(ticker)
         # Реальный day_chg всегда: иначе pin-лидер обходит POP/SPARK MAX_DAY на охотничьем pop.
         action = probe_arm_action(
             armed_ts=float(state.get("arm_ts") or 0),
@@ -1543,12 +1566,27 @@ class CryptoDeskMixin:
         arm_px = float(state.get("arm_px") or 0)
         bid = ask = 0.0
         tick = 0.0
-        try:
-            book = self._book(ticker)
-            bid = float(book.get("bid") or 0)
-            ask = float(book.get("ask") or 0)
-        except Exception:
-            bid = ask = 0.0
+        depth_usd: float | None = None
+        obi: float | None = None
+        # Один L2 limit=25 → bid/ask + глубина + OBI (без 3 отдельных REST).
+        l2_fn = getattr(self, "_orderbook_l2", None)
+        snap = l2_fn(ticker) if callable(l2_fn) else None
+        if snap:
+            bid = float(snap.get("bid") or 0)
+            ask = float(snap.get("ask") or 0)
+            depth_usd = orderbook_ask_depth_usd(snap.get("asks") or [])
+            obi = orderbook_obi(snap.get("bids") or [], snap.get("asks") or [])
+        else:
+            try:
+                book = self._book(ticker)
+                bid = float(book.get("bid") or 0)
+                ask = float(book.get("ask") or 0)
+            except Exception:
+                bid = ask = 0.0
+            depth_usd = self._ask_depth_usd(ticker)
+            obi_fn = getattr(self, "_orderbook_obi", None)
+            if callable(obi_fn):
+                obi = obi_fn(ticker)
         try:
             tick = float((self._filters(ticker) or {}).get("tick") or 0)
         except Exception:
@@ -1592,7 +1630,6 @@ class CryptoDeskMixin:
             want_quote = float(probe_quote_for_buy())
         except Exception:
             want_quote = float(probe_quote())
-        depth_usd = self._ask_depth_usd(ticker)
         if not probe_depth_buy_ok(ask_depth_usd=depth_usd, quote_usd=want_quote):
             write_probe(drop_arm=ticker)
             logger.info(
@@ -1655,10 +1692,6 @@ class CryptoDeskMixin:
                 )
                 return
             surge = probe_volume_surge(bars5, now=time.time())
-        obi = None
-        obi_fn = getattr(self, "_orderbook_obi", None)
-        if callable(obi_fn):
-            obi = obi_fn(ticker)
         strict = bool(self._probe_loss_guard_reason())
         if not probe_entry_obi_ok(obi, strict=strict, volume_surge=surge):
             write_probe(drop_arm=ticker)
@@ -1682,6 +1715,8 @@ class CryptoDeskMixin:
                 "bid": bid or None,
                 "ask": ask or None,
             },
+            ask=ask,
+            strict=strict,
         )
 
     def _probe_park_in_pocket2(self, leg: dict[str, Any], *, reason: str) -> bool:
@@ -1821,6 +1856,9 @@ class CryptoDeskMixin:
         entry_low: float = 0.0,
         algo: str = "",
         note: dict[str, Any] | None = None,
+        *,
+        ask: float = 0.0,
+        strict: bool = False,
     ) -> None:
         if probe_is_paper():
             self._probe_paper_fill(
@@ -1851,7 +1889,8 @@ class CryptoDeskMixin:
                     write_probe(drop_arm=ticker)
                     return
             legs = probe_legs()
-        want = probe_quote_for_buy(legs=legs, prices=self._probe_leg_prices(legs))
+        prices = self._probe_leg_prices(legs) if legs else {}
+        want = probe_quote_for_buy(legs=legs, prices=prices)
         min_frac = float(PROBE_MIN_QUOTE_FRAC)
         quote = min(want, free_cash * common._BUY_CASH_BUFFER)
         if quote < want * min_frac:
@@ -1863,9 +1902,50 @@ class CryptoDeskMixin:
             return
         before = float((held_now.get(ticker) or {}).get("qty") or 0)
         seen_fill = getattr(self, "_last_fill", None)
-        # Свеча/подножка: market — иначе разгон уходит, пока maker висит.
-        maker = str(algo or "") in {"", "shelf"}
-        self._place_order(ticker, "Buy", quote_usdt=quote, price=price, maker=maker)
+        name = str(algo or "").strip().lower()
+        # shelf — maker; ракеты — Limit IOC с потолком (не Market и не PostOnly).
+        maker = name in {"", "shelf"}
+        use_ioc = (not maker) and name in PROBE_BUY_IOC_ALGOS
+        ioc_slip = (
+            float(PROBE_BUY_IOC_STRICT_SLIP_PCT) if strict else float(PROBE_BUY_IOC_SLIP_PCT)
+        )
+        ask_px = float(ask or 0)
+        if ask_px <= 0 and use_ioc:
+            try:
+                ask_px = float(self._book(ticker).get("ask") or 0)
+            except Exception:
+                ask_px = 0.0
+        cap_px = float(arm_px or price or 0)
+        if use_ioc and ask_px > 0:
+            limit_px = probe_buy_ioc_cap_px(
+                ask=ask_px,
+                arm_px=cap_px,
+                strict=strict,
+            )
+            logger.info(
+                "[Крипта] щуп %s IOC Buy: ask %.6g потолок %.6g (arm %.6g slip %.2f%% pad %.2f%%)",
+                ticker,
+                ask_px,
+                limit_px,
+                cap_px,
+                ioc_slip,
+                PROBE_BUY_IOC_ASK_PAD_PCT,
+            )
+        try:
+            self._place_order(
+                ticker,
+                "Buy",
+                quote_usdt=quote,
+                price=price,
+                maker=maker,
+                ioc=use_ioc,
+                cap_px=cap_px if use_ioc else 0.0,
+                max_slip_pct=ioc_slip if use_ioc else None,
+            )
+        except Exception as exc:
+            write_probe(drop_arm=ticker)
+            logger.info("[Крипта] щуп %s покупка не прошла: %s", ticker, exc)
+            return
         fill = getattr(self, "_last_fill", None)
         spent_quote = (
             float(fill.get("quote") or 0)
@@ -2211,6 +2291,10 @@ class CryptoDeskMixin:
                     "arm_ts": arm_ts,
                     "arm_px": float(setup["price"]),
                     "arm_algo": algo,
+                    "week_chg": week,
+                    "trend15": t15,
+                    "day_chg": day_chg,
+                    "bars15": bars15,
                 }
             )
         return True

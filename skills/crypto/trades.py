@@ -443,18 +443,49 @@ class CryptoTradesMixin:
         *,
         quote_usdt: float = 0.0,
         base_qty: float = 0.0,
+        cap_px: float = 0.0,
+        max_slip_pct: float | None = None,
+        ask_pad_pct: float | None = None,
     ) -> tuple[float, float, float]:
-        """Добор Limit IOC с потолком ask/bid ± slip. Без слепого Market."""
+        """Limit IOC: Buy с потолком min(ask×pad, arm×slip); Sell по bid. Без слепого Market."""
         min_amt = max(filters["min_amt"], _MIN_QUOTE)
         book = self._book(ticker)
         ask = float(book.get("ask") or 0)
         bid = float(book.get("bid") or 0)
-        slip = common._IOC_MAX_SLIP_PCT / 100.0
+        slip_pct = float(
+            common._IOC_MAX_SLIP_PCT if max_slip_pct is None else max_slip_pct
+        )
+        slip = slip_pct / 100.0
         if side == "Buy":
             if ask <= 0 or quote_usdt <= 0:
                 return 0.0, 0.0, 0.0
-            cap = ask * (1.0 + slip)
+            signal = float(cap_px or 0)
+            if signal > 0 or ask_pad_pct is not None:
+                # Ракеты щупа: min(ask×pad, arm×slip).
+                from .desk_policy import probe_buy_ioc_cap_px
+
+                cap = probe_buy_ioc_cap_px(
+                    ask=ask,
+                    arm_px=signal,
+                    ask_pad_pct=ask_pad_pct,
+                    max_slip_pct=slip_pct,
+                )
+            else:
+                # Добор после maker: прежний потолок ask×(1+_IOC_MAX_SLIP_PCT).
+                cap = ask * (1.0 + slip)
+            if cap <= 0:
+                return 0.0, 0.0, 0.0
+            # Потолок ниже ask — IOC не скрестит книгу, не гоним Market.
+            if cap + 1e-12 < ask:
+                logger.info(
+                    "[Крипта] IOC Buy %s: потолок %.6g < ask %.6g — пропуск",
+                    ticker,
+                    cap,
+                    ask,
+                )
+                return 0.0, 0.0, 0.0
             price_s = common._price_str(cap, filters["tick"], round_up=True)
+
             px = float(price_s)
             if px <= 0:
                 return 0.0, 0.0, 0.0
@@ -540,6 +571,10 @@ class CryptoTradesMixin:
         base_qty: float | None = None,
         price: float = 0.0,
         maker: bool = False,
+        *,
+        ioc: bool = False,
+        cap_px: float = 0.0,
+        max_slip_pct: float | None = None,
     ) -> str:
         ticker = ticker.upper()
         filters = self._filters(ticker)
@@ -559,6 +594,8 @@ class CryptoTradesMixin:
         maker_qty = maker_quote = maker_fee = 0.0
         can_top_up = True
         use_maker = bool(maker and common._maker_orders_enabled())
+        # Ракеты щупа: Limit IOC с потолком, не PostOnly и не голый Market.
+        use_ioc = bool(ioc) and not use_maker
         if use_maker:
             try:
                 maker_qty, maker_quote, maker_fee, can_top_up = self._maker_leg(
@@ -603,7 +640,7 @@ class CryptoTradesMixin:
             )
 
         top_qty = top_quote = top_fee = 0.0
-        if use_maker:
+        if use_maker or use_ioc:
             try:
                 top_qty, top_quote, top_fee = self._ioc_leg(
                     ticker,
@@ -611,9 +648,13 @@ class CryptoTradesMixin:
                     filters,
                     quote_usdt=rem_quote,
                     base_qty=rem_qty,
+                    cap_px=float(cap_px or 0),
+                    max_slip_pct=max_slip_pct,
                 )
             except Exception as exc:
                 logger.info("[Крипта] IOC %s %s не прошёл: %s", side, ticker, exc)
+                if use_ioc and not use_maker:
+                    raise
         else:
             body: dict[str, Any] = {
                 "category": "spot",
