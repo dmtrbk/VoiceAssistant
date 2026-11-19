@@ -24,7 +24,8 @@ _AI_GAP_SEC = 2.0
 _AI_MISS_STREAK_LIMIT = 3
 _AI_COOLDOWN_SEC = 240.0
 _AI_WARN_THROTTLE_SEC = 45.0
-_AI_MAX_TOKENS = 300
+# Короткий JSON-ответ; 300 сжигал TPM Groq на 3–4 монетах/мин.
+_AI_MAX_TOKENS = 80
 # Только qwen: gpt-oss + json_object + max_tokens=120 → 400 Failed to generate JSON.
 _AI_MODELS = ("qwen/qwen3.8-27b",)
 _SKIP_TICKERS = frozenset({"BTC", "ETH", "SOL", "USDT", "USDC", "USDE", "DAI"})
@@ -115,15 +116,16 @@ class CryptoAIRadar:
         if not radar_enabled():
             return
         try:
-            from .desk_policy import probe_scan_day_ok
+            from .desk_policy import SLEEVE_SKIP, probe_scan_day_ok
         except Exception:
+            SLEEVE_SKIP = frozenset()  # type: ignore[assignment]
             probe_scan_day_ok = None  # type: ignore[assignment]
         clean: list[dict[str, Any]] = []
         for row in rows or []:
             if not isinstance(row, dict):
                 continue
             ticker = str(row.get("ticker") or "").upper()
-            if not ticker or ticker in _SKIP_TICKERS:
+            if not ticker or ticker in _SKIP_TICKERS or ticker in SLEEVE_SKIP:
                 continue
             price = float(row.get("price") or 0)
             day_chg = float(row.get("chg") or row.get("day_chg") or 0)
@@ -241,17 +243,11 @@ class CryptoAIRadar:
         dist = 0.0
         if high > 1e-12 and price > 0:
             dist = (high - price) / high * 100.0
-        # Короткий промпт без robotics_laws: TPM Groq и ложные вето на $0.5–1.5M.
+        # Без robotics_laws / длинного RU: иначе ~1.5–2k tok/монета → 429 TPM на 3-й.
         system = (
-            "Risk officer for a 5-20 min crypto spot probe. Reply STRICT JSON only.\n"
-            "Veto (pass_trade=false) ONLY if:\n"
-            "1) day_change_pct > 45 AND turnover_usd < 1500000 (blow-off);\n"
-            "2) clear one-candle pump with tiny volume;\n"
-            "3) delisting / obvious scam liquidity.\n"
-            "NOT a veto: turnover 500000..1500000 with day_change_pct < 35 "
-            "(organic lead — pass_trade=true).\n"
-            "NOT a veto: day_change_pct below 45 alone.\n"
-            'Format: {"pass_trade": true, "score": 85, "reason": "OK"}'
+            "Crypto spot probe risk check. JSON only.\n"
+            "Veto only: day>45% with turnover<1.5M, one-candle pump, or scam/delist.\n"
+            "Else pass. Format: {\"pass_trade\":true,\"score\":85,\"reason\":\"OK\"}"
         )
 
         user = json.dumps(

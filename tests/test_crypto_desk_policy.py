@@ -2006,9 +2006,25 @@ class TestDeskPolicy(unittest.TestCase):
         )
         self.assertAlmostEqual(
             policy.exit_trap_arm_pct(cost_usd=40.0, extra_usd=policy.PROBE_FAST_TRAP_EXTRA_USD),
-            0.99,
+            1.31,
             places=2,
         )
+        self.assertEqual(policy.PROBE_TRAP_MIN_EXIT_PCT, 0.60)
+        # APEX: пик чуть выше взвода, выход +0.34% — не «вершина» в ноль.
+        self.assertIsNone(
+            policy.probe_exit_reason(
+                price=0.1483,
+                entry=0.1478,
+                shelf=0.14,
+                trend15="bull",
+                peak=0.1495,
+                algo=policy.PROBE_ALGO_POP,
+                qty=40.0 / 0.1478,
+            )
+        )
+        self.assertIn("CRCLX", policy.SLEEVE_SKIP)
+        self.assertIn("AMZNX", policy.SLEEVE_SKIP)
+        self.assertIn("HOODX", policy.SLEEVE_SKIP)
         self.assertEqual(
             policy.probe_exit_reason(
                 price=0.982,
@@ -2941,6 +2957,32 @@ class TestJournalChurnAndDaily(unittest.TestCase):
             "FOGO",
             crypto_journal.shelf_reentry_tickers(shelf, now=now + 40 * 60),
         )
+
+    def test_journal_book_explicit_empty_ignores_pending_probe(self):
+        """book='' не должен подхватить забытый _pending_trade_book=probe (ручная дописка)."""
+        skill = type("S", (), {})()
+        skill._pending_exit_reason = ""
+        skill._pending_trade_book = "probe"
+        recorded: list[dict] = []
+
+        def _fake_read():
+            return []
+
+        def _fake_write(rows):
+            recorded.extend(rows)
+
+        with (
+            patch.object(crypto_journal, "_read_trades", _fake_read),
+            patch.object(crypto_journal, "_write_trades", _fake_write),
+            patch.object(crypto_journal, "realized_pnl_for_sell", return_value=None),
+            patch.object(crypto_journal, "recompute_lifetime_pnl"),
+        ):
+            crypto_journal.CryptoJournalMixin._journal_trade(
+                skill, "ICNT", "Buy", 50.0, 0.4, "ICNT", book=""
+            )
+        self.assertEqual(len(recorded), 1)
+        self.assertNotIn("book", recorded[0])
+        self.assertEqual(skill._pending_trade_book, "")
 
     def test_probe_loss_guard_ignores_manual_and_pocket2(self):
         from datetime import datetime, timedelta, timezone

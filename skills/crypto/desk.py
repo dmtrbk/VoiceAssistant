@@ -1941,6 +1941,7 @@ class CryptoDeskMixin:
                 PROBE_BUY_IOC_ASK_PAD_PCT,
             )
             # Не ходим в _place_order, если ask уже выше потолка (экономия 1–2с REST).
+            # drop_arm обязателен: иначе при hold=0 взвод останется и _probe_arm повторит тикер.
             if limit_px > 0 and limit_px + 1e-12 < ask_px:
                 write_probe(drop_arm=ticker)
                 logger.info(
@@ -2802,7 +2803,8 @@ class CryptoDeskMixin:
         missing = amount - have
         if missing * px < max(_MIN_QUOTE, ALT_HELD_MIN_USD) * 0.5:
             return
-        self._journal_trade(coin, "Buy", missing * px, px, coin)
+        # Ручная дописка в дневник — без book=probe (иначе strict съест карман2/ручные).
+        self._journal_trade(coin, "Buy", missing * px, px, coin, book="")
 
     def _claim_manual_trap_legs(
         self,

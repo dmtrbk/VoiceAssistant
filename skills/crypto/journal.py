@@ -515,7 +515,7 @@ class CryptoJournalMixin:
         spoken: str,
         fee_usd: float = 0.0,
         *,
-        book: str = "",
+        book: str | None = None,
     ) -> None:
         now = datetime.now(_MSK)
         side_norm = "buy" if side == "Buy" else "sell"
@@ -525,7 +525,11 @@ class CryptoJournalMixin:
         pending = str(getattr(self, "_pending_exit_reason", "") or "")
         self._pending_exit_reason = ""
         note = str(pending or "")
-        pending_book = str(book or getattr(self, "_pending_trade_book", "") or "").strip().lower()
+        # book=None → взять _pending_trade_book; book="" → явно без тега (ручной/синк).
+        if book is None:
+            pending_book = str(getattr(self, "_pending_trade_book", "") or "").strip().lower()
+        else:
+            pending_book = str(book or "").strip().lower()
         self._pending_trade_book = ""
         trades = _read_trades()
         entry: dict[str, Any] = {

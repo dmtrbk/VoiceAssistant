@@ -100,7 +100,7 @@ MIN_TURNOVER_USD = 5_000_000.0
 # Суточный потолок +25% остался только у impulse: уже разогнанную свечу не догоняем.
 # Ловушка кармана/рукава: круг комиссий (taker 0,18% × 2) + $0.12 сверх (на $40 ~+0.66%).
 # Щуп impulse/grind: взвод ~+1.56% на $40 и откат 1.50% — первый выдох тренда не продаём.
-# Candle/spark/pop: запас $0.36. На ноге $30 взвод ~+1.56% (чистыми около +1.2% после круга 0.36%).
+# Candle/spark/pop: запас $0.38 → взвод ~+1.31% на $40; выход «вершина» ≥ +0.60%.
 # Откат 0.45%, иначе мелкий пик после отката не покрывает комиссию.
 # Пик от +4% — откат 1.0%. Убыток глубже −1.4% режем сразу, не ждём полку свечи.
 # После пика +1.2% полка не ниже входа: возврат к entry−0.2% закрываем.
@@ -109,11 +109,14 @@ EXIT_FEE_SIDE = 0.0018
 EXIT_TRAP_EXTRA_USD = 0.12
 PROBE_TRAP_EXTRA_USD = 0.48
 PROBE_TRAP_PULLBACK_PCT = 1.50
-# Раньше $0.36 → взвод ~+1.56% на $40; $0.25 ловит быстрые +1.0…+1.2% до разворота.
-PROBE_FAST_TRAP_EXTRA_USD = 0.25
+# Раньше $0.25 → взвод ~+0.99% на $40 → «вершина» в 0.00$ (APEX). $0.38 → ~+1.31%.
+PROBE_FAST_TRAP_EXTRA_USD = 0.38
 PROBE_FAST_TRAP_PULLBACK_PCT = 0.45
 PROBE_FAST_TRAP_RUN_PCT = 4.0
 PROBE_FAST_TRAP_RUN_PULLBACK_PCT = 1.0
+# Минимум net% на выходе «вершина»: 2×taker=0.36% оставлял ноль после спреда; 0.60% — запас.
+PROBE_TRAP_MIN_EXIT_PCT = 0.60
+
 # Жёсткий короткий стоп и BE: не зависят от PROBE_SHELF_EXIT_ON (пробой open выкл.).
 # Ракеты: −1.4% ловит шум; глубже −1.8% режем всегда (не зависит от PROBE_SHELF_EXIT_ON).
 PROBE_FAST_LOSS_CAP_PCT = 1.8
@@ -129,6 +132,9 @@ EXIT_TRAP_DEFAULT_COST_USD = 100.0
 SLEEVE_SKIP = frozenset({
     "USDT", "USDC", "DAI", "FDUSD", "USDE", "USDS", "USD1", "RLUSD",
     "TUSD", "USDD", "PYUSD", "USDY", "USDP", "GUSD", "EURC", "EUR", "USD",
+    # Bybit xStocks (токены акций) — не крипто-импульс щупа (CRCLX срез −0.13$).
+    "AAPLX", "AMZNX", "COINX", "CRCLX", "GOOGLX", "HOODX",
+    "MCDX", "METAX", "NVDAX", "SPCXX", "TSLAX",
 })
 _live_extra: set[str] = set()
 # Щуп: 40$ на пробой тихой полки / свечи. Не слот рукава и не карман.
@@ -593,7 +599,7 @@ _PROBE_FAST_TRAP = frozenset({PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_PO
 
 
 def probe_trap_extra_usd(algo: str) -> float:
-    """Ранний взвод у подскока ($0.25). Impulse и лестница — $0.48."""
+    """Ранний взвод у подскока ($0.38). Impulse и лестница — $0.48."""
     if str(algo or "").strip().lower() in _PROBE_FAST_TRAP:
         return float(PROBE_FAST_TRAP_EXTRA_USD)
     return float(PROBE_TRAP_EXTRA_USD)
@@ -3019,7 +3025,7 @@ def probe_exit_reason(
     if (
         peak_gain >= arm_pct - 1e-6
         and exit_px <= high * (1.0 - pullback_pct / 100.0) + 1e-12
-        and exit_gain >= 2.0 * EXIT_FEE_SIDE * 100.0 - 1e-6
+        and exit_gain >= float(PROBE_TRAP_MIN_EXIT_PCT) - 1e-6
     ):
         return "вершина"
     # После пика +1.2% (жёсткий +0.7%) возврат к entry−0.1% — BE.
