@@ -269,15 +269,13 @@ def _voice_trade_enabled() -> bool:
 
 
 def _auto_trade_enabled() -> bool:
-    try:
-        from skill_settings import is_crypto_auto_trade_enabled
-        return is_crypto_auto_trade_enabled()
-    except Exception:
-        pass
-    raw = (os.getenv("CRYPTO_AUTO_TRADE") or os.getenv("BYBIT_AUTO_TRADE") or "").strip().lower()
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    return True
+    """Автоалго спот-стола выключены (2026-11-24).
+
+    Сняты: щуп / карманы / ребаланс-стратегия.
+    Базовый слой остаётся: WS-лента, Limit IOC / post-only обёртки,
+    reconcile, журналы, Earn-парковка. Архив алго: `_archive/spot_desk_20261124/`.
+    """
+    return False
 
 def _normalize_ticker(raw: str) -> str:
     token = (raw or "").strip().upper()

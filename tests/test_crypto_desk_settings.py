@@ -1,5 +1,5 @@
 # tests/test_crypto_desk_settings.py
-# Пороги стола: диск, пределы, живое чтение политикой.
+# Пороги стола: диск, пределы, живое чтение политикой. Linear + спот-архив.
 
 import os
 import tempfile
@@ -7,6 +7,7 @@ import unittest
 
 from skills.crypto import desk_policy as policy
 from skills.crypto import desk_policy_legacy as policy_legacy
+from skills.crypto.linear import settings_store as linear_store
 from skills.crypto.settings import store as settings_store
 from skills.crypto.settings.schema import DEFAULTS, from_payload, merge_settings
 
@@ -29,10 +30,10 @@ class TestDeskSettings(unittest.TestCase):
         data = settings_store.current()
         self.assertEqual(data.pocket_pct, DEFAULTS.pocket_pct)
         self.assertEqual(data.sleeve_max_pct, DEFAULTS.sleeve_max_pct)
-        self.assertTrue(data.probe_on)
+        self.assertFalse(data.probe_on)
         self.assertFalse(data.probe_paper)
         self.assertFalse(data.ai_radar_on)
-        self.assertTrue(policy.probe_places_buys())
+        self.assertFalse(policy.probe_places_buys())
         self.assertFalse(data.sleeve_on)
         self.assertFalse(data.second_on)
         self.assertEqual(data.second_ticker, "AVA")
@@ -99,33 +100,17 @@ class TestDeskSettings(unittest.TestCase):
         self.assertEqual(from_payload({"sui": {"ticker": "DOGE", "on": True}}).second_ticker, "AVA")
         self.assertTrue(from_payload({"sui": {"ticker": "SUI", "on": True}}).second_on)
 
-    def test_probe_paper_blocks_buys_not_scan_flag(self):
+    def test_probe_buys_always_off(self):
         from skills.crypto.settings import store as settings_status
 
-        settings_store.update(probe_paper=True)
-        data = settings_store.current()
-        self.assertTrue(data.probe_on)
-        self.assertTrue(data.probe_paper)
-        self.assertTrue(policy.probe_is_paper())
+        settings_store.update(probe_on=True, probe_paper=False)
         self.assertFalse(policy.probe_places_buys())
         self.assertEqual(policy.probe_reserve_quote(open_legs=0), 0.0)
-        # Имитация снимает боевой потолок скана; бой возвращает Топ-10.
-        self.assertEqual(
-            policy.probe_scan_limits(),
-            (
-                policy.PROBE_SCAN_LIMIT_PAPER,
-                policy.PROBE_SCAN_CLASSIC_LIMIT_PAPER,
-                policy.PROBE_SCAN_MANDATORY_TOP_PAPER,
-            ),
-        )
+        settings_store.update(probe_paper=True)
+        self.assertTrue(policy.probe_is_paper())
+        self.assertFalse(policy.probe_places_buys())
         line = settings_status.status_line()
-        self.assertIn("Щуп имитация", line)
-        self.assertNotIn("держит", line)
-        settings_store.update(probe_paper=False)
-        self.assertTrue(policy.probe_places_buys())
-        self.assertGreater(policy.probe_reserve_quote(open_legs=0), 0.0)
-        self.assertEqual(policy.probe_scan_limits(), (10, 10, 10))
-        self.assertIn("Щуп боевой", settings_status.status_line())
+        self.assertIn("Спот архив", line)
 
     def test_probe_paper_journal(self):
         from skills.crypto import journal as crypto_journal
@@ -167,3 +152,46 @@ class TestDeskSettings(unittest.TestCase):
         data = merge_settings(DEFAULTS, sleeve_max_pct=80)
         self.assertEqual(data.sleeve_max_pct, 80.0)
         self.assertEqual(data.pocket_pct, 20.0)
+
+
+class TestLinearSettings(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "linear.json")
+        self._old = linear_store._PATH
+        linear_store._PATH = self.path
+        linear_store.reset_cache()
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        linear_store._PATH = self._old
+        linear_store.reset_cache()
+
+    def test_defaults_and_update(self):
+        data = linear_store.current()
+        self.assertTrue(data.paper)
+        self.assertTrue(data.desk_enabled)
+        self.assertEqual(data.symbols, "ZECUSDT,HYPEUSDT")
+        self.assertEqual(data.sizing_mode, "fixed")
+        self.assertEqual(data.leg_usd, 40.0)
+        tuned = linear_store.update(leg_usd=55, sizing_mode="risk_clamp", paper=False)
+        self.assertEqual(tuned.leg_usd, 55.0)
+        self.assertEqual(tuned.sizing_mode, "risk_clamp")
+        self.assertFalse(tuned.paper)
+        linear_store.reset_cache()
+        loaded = linear_store.current()
+        self.assertEqual(loaded.leg_usd, 55.0)
+        self.assertIn("LIVE", linear_store.status_line())
+
+    def test_to_linear_config(self):
+        linear_store.update(symbols="ZECUSDT", shadow_on=False, kill_daily_loss_usd=10)
+        cfg = linear_store.to_linear_config()
+        self.assertEqual(cfg.symbols, ("ZECUSDT",))
+        self.assertFalse(cfg.shadow_enabled)
+        self.assertEqual(cfg.kill_daily_loss_usd, 10.0)
+
+    def test_clamp(self):
+        data = linear_store.update(leg_usd=999, postonly_policy="nope")
+        self.assertEqual(data.leg_usd, 100.0)
+        self.assertEqual(data.postonly_policy, "reprice_1tick")

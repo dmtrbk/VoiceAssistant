@@ -26,7 +26,6 @@ from skill_settings import (
     get_stt_mode,
     grouped_skills,
     is_auto_trade_enabled,
-    is_crypto_auto_trade_enabled,
     is_crypto_voice_trade_enabled,
     is_cursor_running,
     is_cursor_telegram_enabled,
@@ -644,13 +643,15 @@ class SettingsWindow(QWidget):
 
         self._add_divider(col)
 
-        auto_box = self._make_toggle(is_crypto_auto_trade_enabled())
-        auto_box.toggled.connect(set_crypto_auto_trade)
+        from skills.crypto.linear import settings_store as linear_store
+
+        linear_box = self._make_toggle(linear_store.current().desk_enabled)
+        linear_box.toggled.connect(self._on_linear_desk_toggled)
         self._add_text_toggle(
             col,
-            "Автоторговля",
-            "Фон: стол ~6 ч, дозор ~12 мин (трейл / TP / риск-офф / добор ядра). «Посоветуй» — отдельно через ИИ.",
-            auto_box,
+            "Linear-контур",
+            "USDT Perps paper/live (Core-2). Спот-алго в архиве; фон WS/reconcile/Earn живой.",
+            linear_box,
         )
 
         self._add_divider(col)
@@ -662,10 +663,17 @@ class SettingsWindow(QWidget):
         col.addWidget(desk_btn)
 
         self._crypto_voice_box = voice_box
-        self._crypto_auto_box = auto_box
+        self._crypto_auto_box = linear_box  # Linear desk_enabled (раньше — спот автоторговля)
         self._crypto_menu = menu
         parent.addWidget(menu)
         self._sync_crypto_menu(crypto_on)
+
+    def _on_linear_desk_toggled(self, checked: bool) -> None:
+        from skills.crypto.linear import settings_store as linear_store
+
+        linear_store.update(desk_enabled=bool(checked))
+        # Фон навыка крипты (мониторинг спота + linear runner при наличии).
+        set_crypto_auto_trade(bool(checked))
 
     def _open_desk_settings(self) -> None:
         from skills.crypto.settings.ui import DeskSettingsWindow
@@ -683,12 +691,14 @@ class SettingsWindow(QWidget):
             or self._crypto_menu is None
         ):
             return
+        from skills.crypto.linear import settings_store as linear_store
+
         self._crypto_voice_box.blockSignals(True)
         self._crypto_voice_box.setChecked(is_crypto_voice_trade_enabled())
         self._crypto_voice_box.setEnabled(crypto_on)
         self._crypto_voice_box.blockSignals(False)
         self._crypto_auto_box.blockSignals(True)
-        self._crypto_auto_box.setChecked(is_crypto_auto_trade_enabled())
+        self._crypto_auto_box.setChecked(linear_store.current().desk_enabled)
         self._crypto_auto_box.setEnabled(crypto_on)
         self._crypto_auto_box.blockSignals(False)
         self._crypto_menu.setVisible(crypto_on)

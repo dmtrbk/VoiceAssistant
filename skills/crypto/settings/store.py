@@ -59,45 +59,20 @@ def reset() -> DeskSettings:
 
 
 def status_line() -> str:
-    from skills.crypto.common import (
-        probe_arms,
-        probe_legs,
-        read_btc_dip,
-        read_probe,
-        read_second_pocket_legs,
-    )
+    """Спот — архив/мониторинг. Основной контур — linear (см. linear.status_line)."""
+    from skills.crypto.common import read_btc_dip, read_second_pocket_legs
 
     data = current()
+    parts = ["Спот архив"]
     pocket = read_btc_dip()
+    if float(pocket.get("qty") or 0) > 0:
+        parts.append("SOL открыт")
     second_legs = read_second_pocket_legs()
-    probe = read_probe()
-    if not data.pocket_on:
-        parts = ["Карман SOL выкл"]
-    else:
-        parts = ["Карман открыт" if float(pocket.get("qty") or 0) > 0 else "Карман закрыт"]
     if second_legs:
         names = ", ".join(str(leg["ticker"]) for leg in second_legs)
-        parts.append(f"Карман2 {names}")
-    elif not data.second_on:
-        parts.append("Карман2 выкл")
-    if not data.probe_on:
-        parts.append("Щуп выключен")
-    elif data.probe_paper:
-        # Виджет только про бой. Имитация — в jarvis_crypto_probe_paper.json и логах.
-        parts.append("Щуп имитация")
-    else:
-        held = probe_legs(probe)
-        arms = probe_arms(probe)
-        if held:
-            names = ", ".join(str(leg["ticker"]) for leg in held)
-            parts.append(f"Щуп боевой держит {names}")
-        if arms:
-            names = ", ".join(str(arm["ticker"]) for arm in arms)
-            parts.append(f"Щуп взведён {names}")
-        if not held and not arms:
-            parts.append("Щуп боевой")
-    if data.probe_on:
-        parts.append("ИИ-радар вкл" if data.ai_radar_on else "ИИ-радар выкл")
+        parts.append(f"хвосты {names}")
+    if data.pocket_on:
+        parts.append("выход SOL вкл")
     return " · ".join(parts)
 
 

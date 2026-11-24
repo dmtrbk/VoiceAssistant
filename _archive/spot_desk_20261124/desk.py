@@ -1,0 +1,3043 @@
+# skills/crypto/desk.py
+# Автостол: только щуп и карман (SOL + ноги с handoff щупа).
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from typing import Any
+
+from . import common
+from .common import (
+    _ADVICE_HINTS,
+    _DESK_PERIOD_SEC,
+    _MIN_QUOTE,
+    _read_ticker_set,
+    _write_ticker_set,
+    read_anchors,
+    read_blacklist,
+    read_btc_dip,
+    read_entry_arms,
+    probe_legs,
+    probe_arms,
+    probe_tickers,
+    read_probe,
+    read_probe_pin,
+    write_probe_pin,
+    read_second_pocket_legs,
+    drop_second_pocket_leg,
+    second_pocket_qty,
+    second_pocket_tickers,
+    update_second_pocket_leg,
+    upsert_second_pocket_leg,
+    write_second_pocket_legs,
+    write_anchors,
+    write_btc_dip,
+    write_entry_arms,
+    write_probe,
+)
+from .desk_policy import (
+    PROBE_ENTRY_HOLD_SEC,
+    PROBE_ASK_DEPTH_MAX_QUOTE_FRAC,
+    PROBE_ASK_DEPTH_SLIP_PCT,
+    PROBE_BUY_IOC_ALGOS,
+    PROBE_BUY_IOC_ASK_PAD_PCT,
+    PROBE_BUY_IOC_SLIP_PCT,
+    PROBE_BUY_IOC_STRICT_SLIP_PCT,
+    PROBE_MAX_BUY_SLIP_PCT,
+    PROBE_PIN_MIN_DAY_PCT,
+    PROBE_STRICT_MAX_ASK_SLIP_PCT,
+    probe_buy_ioc_cap_px,
+    probe_limit_tp_pct,
+    probe_depth_buy_ok,
+    orderbook_ask_depth_usd,
+    orderbook_obi,
+    probe_oi_spike_ok,
+    probe_period_sec,
+    probe_scan_algo_order,
+    PROBE_ARMED_PERIOD_SEC,
+    probe_scan_limits,
+    PROBE_ALGO_ORDER,
+    PROBE_ALGO_PIN,
+    PROBE_HUNTER_MAX_LEGS,
+    PROBE_SNIPER_MAX_LEGS,
+    SLEEVE_SKIP,
+    _leveraged_base,
+    BTC_DIP_TICKER,
+    EXIT_TRAP_BEAR_OBI,
+    POCKET_EXIT_DEEP_PULLBACK_PCT,
+    PROBE_CANDLE_SHELF_BREAK_PCT,
+    btc_dip_quote,
+    pick_probe_leg_for_room,
+    pick_second_pocket_leg_for_funding,
+    probe_algo_params,
+    probe_arm_action,
+    probe_book_buy_ok,
+    probe_entry_obi_ok,
+    probe_entry_obi_floor,
+    probe_volume_surge,
+    probe_exit_reason,
+    probe_candle_buy_ok,
+    probe_candle_bar_immature,
+    probe_spark_buy_ok,
+    probe_pop_buy_ok,
+    probe_hunter_count,
+    probe_sniper_count,
+    probe_candle_day_ok,
+    probe_scan_day_ok,
+    probe_daily_loss_blocked,
+    probe_btc_flash_pct,
+    probe_market_regime_pause_reason,
+    probe_grind_live_ok,
+    probe_should_handoff,
+    PROBE_ALGO_CANDLE,
+    PROBE_ALGO_IMPULSE,
+    PROBE_ALGO_SPARK,
+    PROBE_ALGO_POP,
+    PROBE_ALGO_GRIND,
+    probe_max_legs,
+    probe_setup_ok_now,
+    probe_min_turnover_usd,
+    probe_night_halted,
+    probe_night_lift_until,
+    probe_strict_reason,
+    tape_btc_day_chg,
+    PROBE_REENTRY_HOURS,
+    PROBE_REENTRY_BREAKOUT_PCT,
+    pocket_from_probe_max,
+    probe_pick_setup,
+    probe_is_paper,
+    probe_places_buys,
+    probe_quote,
+    probe_quote_for_buy,
+    PROBE_BOOST_USD,
+    PROBE_MIN_QUOTE_FRAC,
+    probe_scan_rank,
+    probe_scan_ranked_rows,
+    probe_choose_pin,
+    probe_pin_move,
+    probe_pin_row_ok,
+    probe_setup_hold_sec,
+    PROBE_PIN_ON,
+    probe_trends_ok,
+    pocket_dip_held,
+    pocket_dip_pending,
+    pocket_swing,
+    update_pocket_swing_arm,
+    POCKET_SWING_BARS,
+    ma_trend,
+    position_basis,
+    btc_dip_exit_reason,
+    pocket_unwind_ready,
+    update_pocket_exit_arm,
+    exit_trap_arm_pct,
+    pocket_bounce_ready,
+    pocket_entry_trends_ok,
+    cfg,
+    ALT_HELD_MIN_USD,
+    MANUAL_TRAP_SKIP,
+    MANUAL_TRAP_MAX_LEGS,
+    manual_trap_free_qty,
+)
+from . import journal as crypto_journal
+from .reconcile import (
+    ORPHAN_ORDER_AGE_SEC,
+    orphan_open_orders,
+    reconcile_pocket_qty,
+    reconcile_second_pocket_legs,
+    wallet_qty_map,
+    wallet_value_map,
+)
+
+logger = logging.getLogger(__name__)
+
+_RECONCILE_MIN_GAP_SEC = 45.0
+_PROBE_PAUSE_LOG_SEC = 300.0
+_PROBE_PIN_IDLE_LOG_SEC = 300.0
+_POCKET_WAIT_LOG_SEC = 300.0
+_PROBE_SKIP_LOG_MAX = 24
+
+
+def _probe_pause_kind(reason: str) -> str:
+    text = str(reason or "")
+    if text.startswith("ночь"):
+        return "ночь"
+    if text.startswith("после полки"):
+        return "полка"
+    if text.startswith("просадка"):
+        return "час"
+    if text.startswith("серия быстрых"):
+        return "распил"
+    if text.startswith("серия"):
+        return "серия"
+    if text.startswith("дневной"):
+        return "день"
+    if text.startswith("падающий"):
+        return "рынок"
+    if text.startswith("рынок растёт"):
+        return "рост"
+    return text or "пауза"
+
+
+def _wants_advice(text: str) -> bool:
+    return any(hint in text for hint in _ADVICE_HINTS)
+
+
+def _exit_trigger(arm: dict[str, float]) -> float:
+    """Цена, с которой откат уже считается сработавшим. Выше — ближе к продаже."""
+    high = float(arm.get("high") or 0)
+    pullback = float(arm.get("pullback") or 0)
+    return high * (1.0 - pullback / 100.0)
+
+
+def _cycle_error_kind(exc: BaseException) -> str:
+    text = str(exc).lower()
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "502" in text or "503" in text or "504" in text:
+        return "bybit 5xx"
+    if "bad json" in text or "json" in text:
+        return "json"
+    if "transient" in text:
+        return "сеть"
+    return "ошибка"
+
+
+class CryptoDeskMixin:
+    def _ensure_desk_loop(self) -> None:
+        with common._desk_init_lock:
+            if common._desk_loop_started:
+                return
+            self._desk_thread = threading.Thread(
+                target=self._desk_loop,
+                name="crypto-desk",
+                daemon=True,
+            )
+            self._desk_thread.start()
+            common._desk_loop_started = True
+            try:
+                from .crypto_ai_radar import CryptoAIRadar
+
+                if getattr(self, "_ai_radar", None) is None:
+                    self._ai_radar = CryptoAIRadar(self)
+                self._ai_radar.sync_enabled()
+            except Exception as exc:
+                logger.warning("[Крипта] AI-радар старт: %s", exc)
+            try:
+                from crypto_probe_watch import start_probe_watch_thread
+
+                start_probe_watch_thread(notify_on_start=False)
+            except Exception:
+                pass
+
+    def on_disabled(self) -> None:
+        self._desk_enabled.clear()
+
+    def on_enabled(self) -> None:
+        self._desk_enabled.set()
+        self.start_background()
+
+    def start_background(self) -> None:
+        self._ensure_desk_loop()
+
+    def _run_advisor(self, channel: str = "voice") -> str:
+        import crypto_advisor
+
+        send_tg = common.telegram_configured() and channel != "telegram"
+        text = crypto_advisor.run(skill=self, to_telegram=send_tg, to_stdout=False)
+        if channel == "telegram":
+            return text
+        if common.telegram_configured():
+            return "Отправил совет по крипте в телеграм."
+        return text
+
+    def _bust_private_cache(self) -> None:
+        self._cache = {
+            key: value
+            for key, value in self._cache.items()
+            if not key.startswith("px:")
+        }
+
+    def _mark_desk_bought(self, ticker: str) -> None:
+        ticker = ticker.upper()
+        self._desk_bought.add(ticker)
+        self._desk_bought_ready = True
+        _write_ticker_set(common._BOUGHT_PATH, self._desk_bought)
+
+    def _ensure_desk_bought(self, held: set[str]) -> None:
+        """Если bought.json нет — не зачисляем держанное в стол (иначе продадим ручное)."""
+        if self._desk_bought_ready:
+            return
+        # Пустой список стола: всё на балансе считается чужим, пока стол сам не купит.
+        self._desk_bought = set()
+        self._desk_bought_ready = True
+        _write_ticker_set(common._BOUGHT_PATH, self._desk_bought)
+        if held:
+            logger.info(
+                "[Крипта] нет bought.json — %d позиций на балансе не трогаю как чужие",
+                len(held),
+            )
+
+    def _refresh_manual_holds(self) -> None:
+        """Перечитать holds.json — хозяин может добавить тикер без рестарта."""
+        loaded = _read_ticker_set(common._HOLD_PATH)
+        if loaded is not None:
+            self._manual_holds = loaded
+
+    def _is_owner_position(self, ticker: str) -> bool:
+        ticker = ticker.upper()
+        if ticker in self._manual_holds:
+            return True
+        return self._desk_bought_ready and ticker not in self._desk_bought
+
+    def desk_candidates(self) -> list[dict[str, Any]]:
+        """Лента для советника (без автопортфеля)."""
+        try:
+            return list(self._tape()[:40])
+        except Exception:
+            return []
+
+    def _reconcile_desk_state(self, *, force: bool = False) -> list[str]:
+        """Сверить карман/рукав с биржей. Щуп не читаем на запись и не отменяем его заявки."""
+        if not self._api_key:
+            return []
+        now = time.time()
+        last = float(getattr(self, "_reconcile_ts", 0) or 0)
+        if not force and last > 0 and now - last < _RECONCILE_MIN_GAP_SEC:
+            return []
+        self._reconcile_ts = now
+        notes: list[str] = []
+        try:
+            _cash, positions = self._wallet(with_earn=False)
+        except Exception as exc:
+            logger.warning("[Крипта] reconcile кошелёк: %s", exc)
+            return notes
+        qtys = wallet_qty_map(positions)
+        values = wallet_value_map(positions)
+        prices = {
+            str(item.get("ticker") or "").upper(): float(item.get("price") or 0)
+            for item in positions
+            if item.get("ticker")
+        }
+        # Карман SOL — qty файла не больше живого баланса.
+        dip = read_btc_dip()
+        local_qty = float(dip.get("qty") or 0)
+        if local_qty > 0:
+            fixed = reconcile_pocket_qty(
+                local_qty=local_qty,
+                wallet_qty=float(qtys.get(BTC_DIP_TICKER) or 0),
+                price=float(prices.get(BTC_DIP_TICKER) or 0),
+            )
+            if abs(fixed - local_qty) > 1e-12:
+                if fixed <= 0:
+                    write_btc_dip(0, 0)
+                    self._drop_anchor(BTC_DIP_TICKER)
+                    notes.append("SOL сброшен (нет на балансе)")
+                else:
+                    write_btc_dip(
+                        fixed,
+                        float(dip.get("entry") or 0),
+                        exit_high=float(dip.get("exit_high") or 0),
+                        exit_ts=float(dip.get("exit_ts") or 0),
+                        low=float(dip.get("low") or 0),
+                    )
+                    notes.append(f"SOL qty {local_qty:.6g}→{fixed:.6g}")
+
+        # Второй карман (ноги с щупа) — по тикеру.
+        before_second = read_second_pocket_legs()
+        cleaned_second, second_notes = reconcile_second_pocket_legs(
+            before_second,
+            wallet_qtys=qtys,
+            prices=prices,
+        )
+        if cleaned_second != before_second:
+            write_second_pocket_legs(cleaned_second)
+            for coin in {str(leg["ticker"]) for leg in before_second} - {
+                str(leg["ticker"]) for leg in cleaned_second
+            }:
+                self._drop_anchor(coin)
+        notes.extend(second_notes)
+
+        probe_skip = set(probe_tickers()) | second_pocket_tickers()
+
+        # Зависшие лимитки по карманам и щупу.
+        try:
+            open_rows = self._open_spot_orders()
+        except Exception as exc:
+            logger.info("[Крипта] reconcile заявки: %s", exc)
+            open_rows = []
+        managed = {BTC_DIP_TICKER} | second_pocket_tickers() | probe_skip
+        orphans = orphan_open_orders(
+            open_rows,
+            now=now,
+            skip_tickers=probe_skip,
+            only_tickers=managed,
+            max_age_sec=ORPHAN_ORDER_AGE_SEC,
+        )
+        for item in orphans:
+            self._cancel_order(item["ticker"], item["order_id"])
+            notes.append(f"отмена {item['ticker']}")
+        try:
+            notes.extend(self._journal_sync_exchange(qtys, min_lot_usd=ALT_HELD_MIN_USD))
+        except Exception as exc:
+            logger.info("[Крипта] журнал сверка: %s", exc)
+        if notes:
+            logger.info("[Крипта] reconcile: %s", "; ".join(notes))
+        return notes
+
+    def _ensure_tape(self) -> None:
+        tape = getattr(self, "_bybit_tape", None)
+        if tape is not None:
+            return
+        from .stream import BybitPublicTape
+
+        tape = BybitPublicTape()
+        self._bybit_tape = tape
+        seed = {BTC_DIP_TICKER} | second_pocket_tickers()
+        probe = read_probe()
+        seed |= probe_tickers(probe)
+        for arm in probe_arms(probe):
+            seed.add(str(arm["ticker"]))
+        tape.set_symbols(seed)
+        tape.start()
+
+    def _sync_tape_symbols(self) -> None:
+        """Лента: символы щупа и карманов."""
+        tape = getattr(self, "_bybit_tape", None)
+        if tape is None:
+            return
+        symbols = {BTC_DIP_TICKER} | second_pocket_tickers()
+        probe = read_probe()
+        symbols |= probe_tickers(probe)
+        for arm in probe_arms(probe):
+            symbols.add(str(arm["ticker"]))
+        for leg in probe_legs(probe):
+            symbols.add(str(leg.get("ticker") or ""))
+        arms = read_entry_arms()
+        triggers: dict[str, dict[str, float]] = {}
+        pocket_arm = arms.get("pocket")
+        if pocket_arm:
+            triggers[BTC_DIP_TICKER] = {
+                "low": float(pocket_arm["low"]),
+                "bounce": cfg().pocket_bounce_pct,
+                "hold": float(cfg().pocket_hold_sec),
+                "ts": float(pocket_arm.get("ts") or 0),
+            }
+        exits: dict[str, dict[str, float]] = {}
+        dip = read_btc_dip()
+        exit_high = float(dip.get("exit_high") or 0)
+        if float(dip.get("qty") or 0) > 0 and exit_high > 0:
+            exits[BTC_DIP_TICKER] = {
+                "high": exit_high,
+                "pullback": cfg().pocket_exit_pullback_pct,
+                "deep_pullback": POCKET_EXIT_DEEP_PULLBACK_PCT,
+                "hold": float(cfg().pocket_exit_hold_sec),
+                "ts": float(dip.get("exit_ts") or 0),
+            }
+        for pocket_leg in read_second_pocket_legs():
+            coin = str(pocket_leg["ticker"])
+            high = float(pocket_leg.get("exit_high") or 0)
+            if high <= 0:
+                continue
+            symbols.add(coin)
+            row = {
+                "high": high,
+                "pullback": cfg().pocket_exit_pullback_pct,
+                "deep_pullback": POCKET_EXIT_DEEP_PULLBACK_PCT,
+                "hold": float(cfg().pocket_exit_hold_sec),
+                "ts": float(pocket_leg.get("exit_ts") or 0),
+            }
+            prev = exits.get(coin)
+            if prev is None or _exit_trigger(row) >= _exit_trigger(prev):
+                exits[coin] = row
+        tape.set_symbols({s for s in symbols if s})
+        tape.set_entry_arms(triggers)
+        tape.set_exit_arms(exits)
+
+    def _open_pocket_qty(self, ticker: str) -> float:
+        qty = 0.0
+        if ticker == BTC_DIP_TICKER:
+            qty += float(read_btc_dip().get("qty") or 0)
+        qty += second_pocket_qty(ticker)
+        for leg in probe_legs():
+            if ticker == str(leg.get("ticker") or ""):
+                qty += float(leg.get("qty") or 0)
+        return qty
+
+    def _second_ticker(self) -> str | None:
+        """Устарело: второй карман — мульти-ноги с щупа. Для старых вызовов — первая нога."""
+        legs = read_second_pocket_legs()
+        if legs:
+            return str(legs[0]["ticker"])
+        return None
+
+    def _drop_anchor(self, ticker: str) -> None:
+        anchors = read_anchors()
+        if ticker not in anchors:
+            return
+        anchors.pop(ticker, None)
+        write_anchors(anchors)
+
+    def _prune_anchors(self, held: set[str]) -> None:
+        anchors = read_anchors()
+        kept = {ticker: price for ticker, price in anchors.items() if ticker in held}
+        if len(kept) != len(anchors):
+            write_anchors(kept)
+
+    def _tape_quote(self, ticker: str) -> dict[str, float] | None:
+        tape = getattr(self, "_bybit_tape", None)
+        if tape is None:
+            return None
+        return tape.quote(ticker)
+
+    def _pocket_swing_low(self, ticker: str, day_chg: float | None) -> tuple[bool, float | None]:
+        """(False, None) — свечей нет, дно не трогаем. (True, low|None) — откат известен."""
+        del day_chg
+        try:
+            bars = self._probe_bars(ticker, "15", POCKET_SWING_BARS + 2)
+        except Exception as exc:
+            logger.info("[Крипта] карман %s свечи: %s", ticker, exc)
+            return False, None
+        if len(bars) < 4:
+            return False, None
+        return True, pocket_swing(bars)
+
+    def _pocket_dip_held(self, ticker: str, low: float) -> bool:
+        try:
+            bars = self._probe_bars(ticker, "15", POCKET_SWING_BARS + 2)
+        except Exception as exc:
+            logger.info("[Крипта] карман %s свечи: %s", ticker, exc)
+            return False
+        return pocket_dip_held(bars, low)
+
+    def _swing_pocket_arm(
+        self,
+        ticker: str,
+        state: dict[str, Any] | None,
+        *,
+        price: float,
+        day_chg: float | None,
+        now: float,
+        taped: dict[str, float],
+    ) -> dict[str, float] | None:
+        known, swing_low = self._pocket_swing_low(ticker, day_chg)
+        if not known:
+            return state
+        if state and taped.get(ticker):
+            taped_low = float(taped[ticker])
+            if taped_low < float(state["low"]) - 1e-12:
+                state = {**state, "low": taped_low, "ts": now}
+        keep = False
+        if state and float(state.get("low") or 0) > 0:
+            try:
+                bars = self._probe_bars(ticker, "15", POCKET_SWING_BARS + 2)
+                keep = pocket_dip_pending(bars, float(state["low"]))
+            except Exception:
+                keep = False
+        updated = update_pocket_swing_arm(
+            state, price=price, swing_low=swing_low, now=now, keep=keep
+        )
+        fresh = state is None or (
+            updated is not None and float(updated["low"]) < float(state.get("low") or 0) - 1e-12
+        )
+        if updated and fresh:
+            logger.info(
+                "[Крипта] карман %s откат от верха — жду отскок %.1f%% от %.4g",
+                ticker,
+                cfg().pocket_bounce_pct,
+                updated["low"],
+            )
+        return updated
+
+    def _trade_second_pocket_legs(
+        self,
+        *,
+        positions: dict[str, dict[str, Any]],
+        prices: dict[str, float],
+        blocked: set[str],
+    ) -> list[str]:
+        """Выход по ногам второго кармана (переданы с щупа). Покупок здесь нет."""
+        import re
+
+        from .trades import _sell_price_floor_from_exc
+
+        phrases: list[str] = []
+        self._refresh_manual_holds()
+        for leg in list(read_second_pocket_legs()):
+            ticker = str(leg.get("ticker") or "")
+            if not ticker or ticker in blocked:
+                continue
+            if ticker.upper() in self._manual_holds:
+                # Хозяин держит сам — убрать из карман2 без продажи.
+                drop_second_pocket_leg(ticker)
+                logger.info("[Крипта] карман2 %s: ручной hold — не продаю", ticker)
+                continue
+            qty = float(leg.get("qty") or 0)
+            book_entry = float(leg.get("entry") or 0)
+            if qty <= 0 or book_entry <= 0:
+                continue
+            price = float(prices.get(ticker) or 0)
+            live = self._tape_quote(ticker)
+            if live and float(live.get("price") or 0) > 0:
+                price = float(live["price"])
+            live_bid = float((live or {}).get("bid") or 0)
+            entry = position_basis(book_entry, read_anchors().get(ticker))
+            now = time.time()
+            # Уже висит лимитка на биржевом полу — ждём fill, не дублируем Sell.
+            sell_order = str(leg.get("sell_order") or "")
+            if sell_order:
+                row = self._order_state(ticker, sell_order)
+                status = str(row.get("orderStatus") or "")
+                try:
+                    done_qty = float(row.get("cumExecQty") or 0)
+                    done_quote = float(row.get("cumExecValue") or 0)
+                except (TypeError, ValueError):
+                    done_qty = done_quote = 0.0
+                if status == "Filled" or (
+                    done_qty > 0 and status in {"Cancelled", "PartiallyFilledCanceled"}
+                ):
+                    fill_px = done_quote / done_qty if done_qty > 0 else float(leg.get("sell_px") or price)
+                    self._pending_exit_reason = "вершина"
+                    self._pending_trade_book = "pocket2"
+                    try:
+                        from .trades import _cum_exec_fee_usdt
+
+                        self._journal_trade(
+                            ticker,
+                            "Sell",
+                            done_quote,
+                            fill_px,
+                            ticker,
+                            fee_usd=_cum_exec_fee_usdt(row, ticker, "Sell"),
+                        )
+                    except Exception as exc:
+                        logger.info("[Крипта] карман2 %s журнал пола: %s", ticker, exc)
+                    remain = max(0.0, qty - done_qty)
+                    if remain * max(fill_px, price, 1e-12) < _MIN_QUOTE:
+                        drop_second_pocket_leg(ticker)
+                        self._drop_anchor(ticker)
+                    else:
+                        update_second_pocket_leg(
+                            ticker,
+                            qty=remain,
+                            entry=book_entry,
+                            low=float(leg.get("low") or 0),
+                            exit_high=float(leg.get("exit_high") or 0),
+                            exit_ts=float(leg.get("exit_ts") or 0),
+                            sell_order="",
+                        )
+                    logger.info(
+                        "[Крипта] карман2 %s: выход (пол биржи) %.6g по %.4g",
+                        ticker,
+                        done_qty,
+                        fill_px,
+                    )
+                    continue
+                if status in {"Cancelled", "Rejected", "Deactivated"}:
+                    update_second_pocket_leg(ticker, sell_order="")
+                    logger.info(
+                        "[Крипта] карман2 %s: лимитка пола снята (%s) — пробую снова",
+                        ticker,
+                        status,
+                    )
+                else:
+                    logger.info(
+                        "[Крипта] карман2 %s жду пол биржи: заявка %s px %.4g сейчас %.4g",
+                        ticker,
+                        sell_order,
+                        float(leg.get("sell_px") or 0),
+                        price,
+                    )
+                    continue
+            exit_state = None
+            if float(leg.get("exit_high") or 0) > 0:
+                exit_state = {
+                    "high": float(leg["exit_high"]),
+                    "ts": float(leg.get("exit_ts") or 0),
+                }
+            tape = getattr(self, "_bybit_tape", None)
+            taped_high = float((tape.exit_highs() if tape is not None else {}).get(ticker) or 0)
+            if exit_state and taped_high > float(exit_state["high"]) + 1e-12:
+                exit_state = {"high": taped_high, "ts": now}
+            exit_state = update_pocket_exit_arm(
+                exit_state, price=price, entry=entry, now=now, qty=qty
+            )
+            obi: float | None = None
+            if exit_state:
+                update_second_pocket_leg(
+                    ticker,
+                    qty=qty,
+                    entry=book_entry,
+                    low=float(leg.get("low") or 0),
+                    exit_high=float(exit_state["high"]),
+                    exit_ts=float(exit_state["ts"]),
+                )
+                obi_fn = getattr(self, "_orderbook_obi", None)
+                if callable(obi_fn):
+                    obi = obi_fn(ticker)
+            unwind = bool(leg.get("unwind"))
+            if unwind:
+                reason = "срез" if pocket_unwind_ready(price=price, bid=live_bid) else None
+                if reason is None and price > 0:
+                    logger.info(
+                        "[Крипта] карман2 %s жду стакан для среза: цена %.4g bid %.4g",
+                        ticker,
+                        price,
+                        live_bid,
+                    )
+            else:
+                reason = btc_dip_exit_reason(
+                    price=price,
+                    entry=entry,
+                    exit_arm=exit_state,
+                    now=now,
+                    swing_low=float(leg.get("low") or 0),
+                    scratch=bool(leg.get("scratch")),
+                    bid=live_bid,
+                    obi=obi,
+                )
+            if not reason or price <= 0:
+                if exit_state and price > 0:
+                    need = float(exit_state["high"]) * (
+                        1.0 - cfg().pocket_exit_pullback_pct / 100.0
+                    )
+                    logger.info(
+                        "[Крипта] карман2 %s жду откат: верх %.4g сейчас %.4g нужно %.4g",
+                        ticker,
+                        float(exit_state["high"]),
+                        price,
+                        need,
+                    )
+                continue
+            held = float((positions.get(ticker) or {}).get("qty") or 0)
+            sell_qty = min(qty, held)
+            if sell_qty <= 0:
+                drop_second_pocket_leg(ticker)
+                self._drop_anchor(ticker)
+                continue
+            seen = getattr(self, "_last_fill", None)
+            use_maker = (not unwind) and not (
+                obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12
+            )
+            self._pending_exit_reason = str(reason or "")
+            self._pending_trade_book = "pocket2"
+            try:
+                phrase = self._place_order(
+                    ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker
+                )
+            except Exception as exc:
+                self._pending_exit_reason = ""
+                self._pending_trade_book = ""
+                msg = str(exc or "")
+                floor_px = _sell_price_floor_from_exc(msg)
+                if floor_px is None:
+                    match = re.search(
+                        r"пол биржи\s+([0-9]+(?:\.[0-9]+)?)",
+                        msg,
+                        flags=re.IGNORECASE,
+                    )
+                    if match:
+                        try:
+                            floor_px = float(match.group(1))
+                        except ValueError:
+                            floor_px = None
+                if floor_px and floor_px > 0:
+                    order_id = self._rest_limit_sell(ticker, sell_qty, floor_px)
+                    if order_id:
+                        update_second_pocket_leg(
+                            ticker,
+                            sell_order=order_id,
+                            sell_px=floor_px,
+                        )
+                        logger.info(
+                            "[Крипта] карман2 %s: пол биржи %.6g > рынок — лимитка %s",
+                            ticker,
+                            floor_px,
+                            order_id,
+                        )
+                        continue
+                logger.info("[Крипта] карман2 %s продажа не прошла: %s", ticker, exc)
+                continue
+            fill = getattr(self, "_last_fill", None)
+            sold = (
+                float(fill.get("qty") or 0)
+                if fill is not seen and isinstance(fill, dict)
+                else sell_qty
+            )
+            remain = max(0.0, qty - sold)
+            if remain * price < _MIN_QUOTE:
+                drop_second_pocket_leg(ticker)
+                self._drop_anchor(ticker)
+            else:
+                update_second_pocket_leg(
+                    ticker,
+                    qty=remain,
+                    entry=book_entry,
+                    low=float(leg.get("low") or 0),
+                    exit_high=float(leg.get("exit_high") or 0),
+                    exit_ts=float(leg.get("exit_ts") or 0),
+                )
+                logger.info(
+                    "[Крипта] карман2 %s ещё %.6g монет после неполной продажи",
+                    ticker,
+                    remain,
+                )
+            fill_px = float(fill.get("price") or 0) if isinstance(fill, dict) else 0.0
+            logger.info(
+                "[Крипта] карман2 %s: выход (%s) %.6g по %.4g",
+                ticker,
+                reason,
+                sold,
+                fill_px or price,
+            )
+            phrases.append(phrase)
+        return phrases
+
+    def _trade_btc_dip(
+        self,
+        *,
+        day_chg: float | None,
+        positions: dict[str, dict[str, Any]],
+        price: float,
+        blocked: bool,
+        equity: float = 0.0,
+        allow_entry: bool = True,
+        ticker: str | None = None,
+    ) -> str | None:
+        """Карман SOL на долю счёта. Уже открытый не добираем."""
+        del day_chg
+        ticker = ticker or BTC_DIP_TICKER
+        if ticker != BTC_DIP_TICKER:
+            # AVA/SUI больше не покупаем во второй карман — только handoff с щупа.
+            return None
+        if ticker in read_blacklist():
+            allow_entry = False
+        dip = read_btc_dip()
+        qty = float(dip.get("qty") or 0)
+        if qty > 0:
+            book_entry = float(dip.get("entry") or 0)
+            entry = position_basis(book_entry, read_anchors().get(ticker))
+            live = self._tape_quote(ticker)
+            if live and float(live.get("price") or 0) > 0:
+                price = float(live["price"])
+            now = time.time()
+            exit_state = None
+            if float(dip.get("exit_high") or 0) > 0:
+                exit_state = {"high": float(dip["exit_high"]), "ts": float(dip.get("exit_ts") or 0)}
+            tape = getattr(self, "_bybit_tape", None)
+            taped_high = float((tape.exit_highs() if tape is not None else {}).get(ticker) or 0)
+            if exit_state and taped_high > float(exit_state["high"]) + 1e-12:
+                exit_state = {"high": taped_high, "ts": now}
+            exit_state = update_pocket_exit_arm(
+                exit_state, price=price, entry=entry, now=now, qty=qty
+            )
+            if exit_state:
+                write_btc_dip(
+                    qty,
+                    book_entry,
+                    exit_high=float(exit_state["high"]),
+                    exit_ts=float(exit_state["ts"]),
+                    low=float(dip.get("low") or 0),
+                )
+            reason = btc_dip_exit_reason(
+                price=price,
+                entry=entry,
+                exit_arm=exit_state,
+                now=now,
+                swing_low=float(dip.get("low") or 0),
+            )
+            if not reason or price <= 0:
+                if exit_state and price > 0:
+                    need = float(exit_state["high"]) * (1.0 - cfg().pocket_exit_pullback_pct / 100.0)
+                    logger.info(
+                        "[Крипта] карман %s жду откат: верх %.4g сейчас %.4g нужно %.4g",
+                        ticker,
+                        float(exit_state["high"]),
+                        price,
+                        need,
+                    )
+                return None
+            held = float((positions.get(ticker) or {}).get("qty") or 0)
+            sell_qty = min(qty, held)
+            if sell_qty <= 0:
+                write_btc_dip(0, 0)
+                self._drop_anchor(ticker)
+                return None
+            seen = getattr(self, "_last_fill", None)
+            self._pending_exit_reason = str(reason or "")
+            self._pending_trade_book = "dip"
+            try:
+                phrase = self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=True)
+            except Exception as exc:
+                self._pending_exit_reason = ""
+                self._pending_trade_book = ""
+                logger.info("[Крипта] карман %s продажа не прошла: %s", ticker, exc)
+                return None
+            fill = getattr(self, "_last_fill", None)
+            sold = float(fill.get("qty") or 0) if fill is not seen and isinstance(fill, dict) else sell_qty
+            remain = max(0.0, qty - sold)
+            if remain * price < _MIN_QUOTE:
+                write_btc_dip(0, 0)
+                self._drop_anchor(ticker)
+            else:
+                write_btc_dip(
+                    remain,
+                    book_entry,
+                    exit_high=float(dip.get("exit_high") or 0),
+                    exit_ts=float(dip.get("exit_ts") or 0),
+                    low=float(dip.get("low") or 0),
+                )
+                logger.info("[Крипта] карман %s ещё %.6g монет после неполной продажи", ticker, remain)
+            fill_px = float(fill.get("price") or 0) if isinstance(fill, dict) else 0.0
+            logger.info(
+                "[Крипта] карман %s: выход (%s) %.6g по %.4g",
+                ticker,
+                reason,
+                sold,
+                fill_px or price,
+            )
+            return phrase
+        if blocked or not allow_entry:
+            return None
+        # Уже в карман2 (ручная ловушка) — SOL-dip не дублируем.
+        if ticker in second_pocket_tickers():
+            arms_now = read_entry_arms()
+            if arms_now.get("pocket"):
+                write_entry_arms({}, None, sui=False)
+                logger.info("[Крипта] карман %s: уже в карман2 — взвод dip снят", ticker)
+            return None
+        arms_now = read_entry_arms()
+        arm = arms_now.get("pocket")
+        if not pocket_bounce_ready(arm, price=price, now=time.time()):
+            return None
+        if not self._pocket_dip_held(ticker, float(arm["low"])):
+            self._note_pocket_wait(
+                ticker,
+                f"жду закрытую свечу после дна {float(arm['low']):.4g}",
+            )
+            return None
+        try:
+            bars15 = self._probe_bars(ticker, "15", 80)
+            bars1h = self._probe_bars(ticker, "60", 80)
+            trend15 = ma_trend([bar["close"] for bar in bars15]) if bars15 else "neutral"
+            trend1h = ma_trend([bar["close"] for bar in bars1h]) if bars1h else "neutral"
+        except Exception as exc:
+            logger.info("[Крипта] карман %s тренд: %s", ticker, exc)
+            return None
+        week = self._probe_week(ticker)
+        if not pocket_entry_trends_ok(trend15=trend15, trend1h=trend1h, week_chg=week):
+            self._note_pocket_wait(
+                ticker,
+                f"пропуск входа: 15m {trend15} 1h {trend1h} 7d "
+                f"{f'{week:+.1f}%' if week is not None else 'нет'}",
+            )
+            return None
+        budget = btc_dip_quote(equity)
+        free_cash, _held_now = self._cash_and_held()
+        quote = min(budget, free_cash * common._BUY_CASH_BUFFER)
+        if budget < _MIN_QUOTE or quote < budget * 0.9:
+            return None
+        before = float((positions.get(ticker) or {}).get("qty") or 0)
+        phrase = self._place_order(ticker, "Buy", quote_usdt=quote, maker=True)
+        _cash, held = self._cash_and_held()
+        after = float((held.get(ticker) or {}).get("qty") or 0)
+        bought = after - before
+        if bought > 0:
+            write_btc_dip(bought, quote / bought, low=float(arm["low"]))
+            arms_now = read_entry_arms()
+            write_entry_arms({}, None)
+            logger.info("[Крипта] карман %s: купил на %.0f$ на отскоке от дна", ticker, quote)
+        return phrase
+
+    def _desk_ready(self) -> bool:
+        if not self._desk_enabled.is_set():
+            return False
+        if not common._auto_trade_enabled():
+            return False
+        try:
+            from skill_settings import is_skill_enabled
+            if not is_skill_enabled(self):
+                self._desk_enabled.clear()
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _probe_bars(
+        self,
+        ticker: str,
+        interval: str,
+        limit: int,
+        *,
+        cache_sec: float | None = None,
+    ) -> list[dict[str, float]]:
+        if cache_sec is None:
+            cache_sec = 8.0 if str(interval) == "5" else None
+        data = self._public_get(
+            "/v5/market/kline",
+            {
+                "category": "spot",
+                "symbol": self._symbol(ticker),
+                "interval": interval,
+                "limit": str(limit),
+            },
+            f"kl:{ticker}:{interval}:probe",
+            cache_sec=cache_sec,
+        )
+        rows = (data.get("result") or {}).get("list") or []
+        bars: list[dict[str, float]] = []
+        for row in reversed(rows):
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                continue
+            try:
+                raw_ts = float(row[0])
+                ts_sec = raw_ts / 1000.0 if raw_ts > 1e11 else raw_ts
+                bars.append({
+                    "ts": ts_sec,
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]),
+                })
+            except (TypeError, ValueError):
+                continue
+        return bars
+
+    def _probe_blocked(self) -> set[str]:
+        """Карманы, уже занятые слоты и любые живые позиции щуп не трогает."""
+        blocked = {BTC_DIP_TICKER} | second_pocket_tickers()
+        # Боевые блоки журнала (cooldown / полка / reentry) — только в бою.
+        # Имитация смотрит рынок без этих ворот; журнал paper отдельный.
+        if probe_places_buys():
+            blocked |= set(crypto_journal.cooldown_tickers(cfg().cooldown_hours))
+            blocked |= set(crypto_journal.shelf_reentry_tickers())
+            blocked |= set(crypto_journal.scratch_reentry_tickers())
+            recent = set(crypto_journal.recently_sold(PROBE_REENTRY_HOURS))
+            if recent:
+                try:
+                    tape = {str(r.get("ticker") or "").upper(): r for r in self._tape()}
+                except Exception:
+                    tape = {}
+                for ticker in list(recent):
+                    sell_px = crypto_journal.last_sell_price(ticker)
+                    live = float((tape.get(ticker) or {}).get("price") or 0)
+                    if (
+                        sell_px
+                        and live > 0
+                        and live >= sell_px * (1.0 + PROBE_REENTRY_BREAKOUT_PCT / 100.0)
+                    ):
+                        recent.discard(ticker)
+                pin = str(read_probe_pin().get("ticker") or "").upper()
+                if pin:
+                    recent.discard(pin)
+                blocked |= recent
+        try:
+            _cash, positions = self._wallet()
+        except Exception as exc:
+            logger.info("[Крипта] щуп кошелёк: %s", exc)
+            return blocked | read_blacklist()
+        for item in positions:
+            if float(item.get("value") or 0) >= ALT_HELD_MIN_USD:
+                blocked.add(str(item["ticker"]))
+        return blocked | read_blacklist()
+
+    def _probe_week(self, ticker: str) -> float | None:
+        try:
+            mom = self._momentum(ticker)
+        except Exception as exc:
+            logger.info("[Крипта] щуп %s неделя: %s", ticker, exc)
+            return None
+        chg = mom.get("chg_7") if isinstance(mom, dict) else None
+        if chg is None:
+            return None
+        try:
+            return float(chg)
+        except (TypeError, ValueError):
+            return None
+
+    def _probe_cycle(self) -> None:
+        with common._TRADE_LOCK:
+            try:
+                self._probe_locked()
+            finally:
+                self._earn_park_idle()
+
+    def _probe_skip(self, msg: str) -> None:
+        """Копится до бита: почему топ не взяли. Без спама на каждый тихий тикер."""
+        bag: list[str] | None = getattr(self, "_probe_skip_notes", None)
+        if bag is None:
+            self._probe_skip_notes = bag = []
+        text = str(msg or "").strip()
+        if not text or text in bag or len(bag) >= _PROBE_SKIP_LOG_MAX:
+            return
+        bag.append(text)
+
+    def _probe_skip_bump(self, key: str, n: int = 1) -> None:
+        stats: dict[str, int] = getattr(self, "_probe_skip_stats", None) or {}
+        stats[key] = int(stats.get(key) or 0) + int(n)
+        self._probe_skip_stats = stats
+
+    def _note_pocket_wait(self, ticker: str, detail: str) -> None:
+        """Жду свечу / тренд кармана — не чаще раза в 5 минут на один текст."""
+        key = f"{str(ticker or '').upper()}|{str(detail or '')}"
+        now = time.time()
+        prev = str(getattr(self, "_pocket_wait_key", "") or "")
+        last = float(getattr(self, "_pocket_wait_log_ts", 0.0) or 0.0)
+        if key == prev and now - last < _POCKET_WAIT_LOG_SEC:
+            return
+        self._pocket_wait_key = key
+        self._pocket_wait_log_ts = now
+        logger.info("[Крипта] карман %s %s", ticker, detail)
+
+    def _note_probe_pause(self, reason: str) -> None:
+        kind = _probe_pause_kind(reason)
+        prev = str(getattr(self, "_probe_pause_kind", "") or "")
+        now = time.time()
+        last_log = float(getattr(self, "_probe_pause_log_ts", 0.0) or 0.0)
+        if kind == prev and now - last_log < _PROBE_PAUSE_LOG_SEC:
+            return
+        self._probe_pause_kind = kind
+        self._probe_pause_log_ts = now
+        logger.info("[Крипта] щуп жёстче: %s", reason)
+        if kind != prev and common.telegram_configured() and probe_places_buys():
+            common.send_telegram_notification(f"Крипта: щуп жёстче — {reason}", background=True)
+
+    def _note_probe_resume(self) -> None:
+        prev = str(getattr(self, "_probe_pause_kind", "") or "")
+        if not prev:
+            return
+        self._probe_pause_kind = ""
+        self._probe_pause_log_ts = 0.0
+        logger.info("[Крипта] щуп обычный фильтр")
+        if common.telegram_configured() and probe_places_buys():
+            common.send_telegram_notification("Крипта: щуп снова обычный фильтр", background=True)
+
+    def _note_probe_halt(self, reason: str) -> None:
+        """Полный стоп новых входов: падающий рынок или дневной лимит. Скан не идёт."""
+        kind = _probe_pause_kind(reason)
+        prev = str(getattr(self, "_probe_pause_kind", "") or "")
+        now = time.time()
+        last_log = float(getattr(self, "_probe_pause_log_ts", 0.0) or 0.0)
+        if kind == prev and now - last_log < _PROBE_PAUSE_LOG_SEC:
+            return
+        self._probe_pause_kind = kind
+        self._probe_pause_log_ts = now
+        logger.info("[Крипта] щуп стоп: %s", reason)
+        if kind != prev and common.telegram_configured() and probe_places_buys():
+            common.send_telegram_notification(f"Крипта: щуп стоп — {reason}", background=True)
+
+    def _probe_entry_halt_reason(self, tape: list[dict[str, Any]] | None) -> str | None:
+        """Дневной −$6 (и падающий рынок, если PROBE_MARKET_FALL_ON). Выходы не трогает."""
+        rows = list(tape or [])
+        flash: float | None = None
+        try:
+            bars = self._probe_bars("BTC", "5", 8, cache_sec=30.0)
+            flash = probe_btc_flash_pct(bars)
+        except Exception as exc:
+            logger.info("[Крипта] щуп BTC 15м: %s", exc)
+        reason, until = probe_market_regime_pause_reason(
+            rows,
+            now=time.time(),
+            pause_until=float(getattr(self, "_probe_market_pause_until", 0.0) or 0.0),
+            btc_flash_pct=flash,
+        )
+        self._probe_market_pause_until = float(until or 0.0)
+        if reason:
+            return reason
+        raw = crypto_journal.probe_loss_guard_reason()
+        if raw and str(raw).startswith("дневной"):
+            return str(raw)
+        # Fade-the-pump: полный стоп входов на 45м (не просто жёсткий фильтр).
+        if raw and str(raw).startswith("серия быстрых сливов"):
+            return str(raw)
+        return None
+
+    def _probe_loss_guard_reason(self, tape: list[dict[str, Any]] | None = None) -> str | None:
+        raw = crypto_journal.probe_loss_guard_reason()
+        if raw and (
+            str(raw).startswith("дневной") or str(raw).startswith("серия быстрых сливов")
+        ):
+            return None
+        rows = tape
+        if rows is None:
+            try:
+                rows = self._tape()
+            except Exception:
+                rows = []
+        flash: float | None = None
+        try:
+            bars = self._probe_bars("BTC", "5", 8, cache_sec=30.0)
+            flash = probe_btc_flash_pct(bars)
+        except Exception:
+            flash = None
+        return probe_strict_reason(raw, rows, btc_flash_pct=flash)
+
+    def _probe_locked(self) -> None:
+        self._probe_check_exits()
+        paper = probe_is_paper()
+        if paper:
+            self._probe_paper_tick()
+            # Имитация не держит взвод в боевом jarvis_crypto_probe.json.
+            state = read_probe()
+            for arm in probe_arms(state):
+                write_probe(drop_arm=str(arm.get("ticker") or ""))
+        if not cfg().probe_on:
+            return
+        try:
+            tape = self._tape()
+        except Exception as exc:
+            logger.info("[Крипта] щуп лента: %s", exc)
+            tape = []
+        # Падающий рынок / дневной −$6 — только бой. Имитация сканирует без стопа.
+        if probe_places_buys():
+            halt = self._probe_entry_halt_reason(tape)
+            if halt:
+                self._note_probe_halt(halt)
+                return
+            if str(getattr(self, "_probe_pause_kind", "") or "") in {"рынок", "день", "распил"}:
+                self._note_probe_resume()
+            pause = self._probe_loss_guard_reason(tape)
+            if pause:
+                self._note_probe_pause(pause)
+            elif str(getattr(self, "_probe_pause_kind", "") or "") != "рост":
+                self._note_probe_resume()
+        elif str(getattr(self, "_probe_pause_kind", "") or ""):
+            self._note_probe_resume()
+        if not paper:
+            state = read_probe()
+            for arm in probe_arms(state):
+                self._probe_arm({
+                    "arm_ticker": arm["ticker"],
+                    "arm_shelf": arm["shelf"],
+                    "arm_ts": arm["ts"],
+                    "arm_px": arm["px"],
+                    "arm_algo": arm["algo"],
+                })
+        state = read_probe()
+        cap = self._probe_cap()
+        held = len(probe_legs(state)) + len(probe_arms(state))
+        if paper or held < cap or (cfg().second_on and not paper):
+            self._probe_scan()
+            # Скан 25–45с держит замок: сразу после — догнать вершину/BE, что пропустили.
+            self._probe_check_exits()
+
+    def _probe_journal_limit(self, ticker: str, qty: float, quote: float, fee: float) -> None:
+        """Исполненная лимитка — продажа «вершина», не стоп."""
+        self._pending_exit_reason = "вершина"
+        self._pending_trade_book = "probe"
+        self._journal_trade(ticker, "Sell", quote, quote / qty, ticker, fee_usd=fee)
+        logger.info("[Крипта] щуп %s: лимитный тейк %.6g по %.4g", ticker, qty, quote / qty)
+
+    def _probe_limit_filled(self, state: dict[str, Any]) -> bool:
+        """Лимитка уже забрана целиком — ногу закрываем без маркета."""
+        order_id = str(state.get("tp_order") or "")
+        ticker = str(state.get("ticker") or "")
+        if not order_id or not ticker:
+            return False
+        row = self._order_state(ticker, order_id)
+        if str(row.get("orderStatus") or "") != "Filled":
+            return False
+        try:
+            done_qty = float(row.get("cumExecQty") or 0)
+            done_quote = float(row.get("cumExecValue") or 0)
+        except (TypeError, ValueError):
+            return False
+        if done_qty <= 0 or done_quote <= 0:
+            return False
+        from .trades import _cum_exec_fee_usdt
+
+        self._probe_journal_limit(
+            ticker, done_qty, done_quote, _cum_exec_fee_usdt(row, ticker, "Sell"),
+        )
+        write_probe(drop=ticker)
+        return True
+
+    def _probe_check_exits(self) -> None:
+        """Продать/передать открытые ноги. Зовут часто: до/после скана, в скане, по WS."""
+        state = read_probe()
+        for leg in probe_legs(state):
+            self._probe_exit(leg)
+
+    def _probe_exits_tick(self) -> None:
+        """WS/таймер вне полного цикла щупа: только выходы, без тяжёлого скана."""
+        if not probe_legs():
+            return
+        with common._TRADE_LOCK:
+            self._probe_check_exits()
+
+    def _probe_exit(self, state: dict[str, Any]) -> None:
+        ticker = str(state.get("ticker") or "")
+        live = self._tape_quote(ticker)
+        price = float((live or {}).get("price") or 0)
+        live_bid = float((live or {}).get("bid") or 0)
+        if price <= 0:
+            try:
+                px = self._ticker(ticker)
+                price = float(px.get("price") or 0)
+            except Exception as exc:
+                logger.info("[Крипта] щуп %s цена: %s", ticker, exc)
+                return
+        trend = "bull"
+        try:
+            # Кэш 30с: частые WS-проверки не должны бить REST на каждый тик.
+            bars = self._probe_bars(ticker, "15", 80, cache_sec=30.0)
+            if bars:
+                trend = ma_trend([bar["close"] for bar in bars])
+        except Exception as exc:
+            logger.info("[Крипта] щуп %s тренд: %s", ticker, exc)
+        peak = max(float(state.get("peak") or 0), price)
+        leg_algo = str(state.get("algo") or "")
+        qty = float(state.get("qty") or 0)
+        entry = float(state.get("entry") or 0)
+        if peak > float(state.get("peak") or 0) + 1e-12:
+            write_probe(
+                ticker=ticker,
+                qty=qty,
+                entry=entry,
+                shelf=float(state.get("shelf") or 0),
+                arm_px=float(state.get("arm_px") or 0),
+                peak=peak,
+                low=float(state.get("low") or 0),
+                algo=leg_algo,
+            )
+        arm_need = exit_trap_arm_pct(entry=entry, qty=qty) if entry > 0 and qty > 0 else 9e9
+        peak_gain = (peak / entry - 1.0) * 100.0 if entry > 0 else 0.0
+        obi: float | None = None
+        if peak_gain >= arm_need - 1e-6:
+            obi_fn = getattr(self, "_orderbook_obi", None)
+            if callable(obi_fn):
+                obi = obi_fn(ticker)
+        if self._probe_limit_filled(state):
+            return
+        reason = probe_exit_reason(
+            price=price,
+            entry=entry,
+            shelf=float(state.get("shelf") or 0),
+            trend15=trend,
+            arm_px=float(state.get("arm_px") or 0),
+            peak=peak,
+            entry_low=float(state.get("low") or 0),
+            algo=leg_algo,
+            qty=qty,
+            opened_ts=float(state.get("ts") or 0),
+            now=time.time(),
+            bid=live_bid,
+            obi=obi,
+            strict=bool(self._probe_loss_guard_reason()),
+        )
+        if not reason:
+            return
+        # Спот без OCO: лимитный TP снимаем и ждём terminal ДО любого маркета
+        # (срез 18м/45м, стоп, полка) — иначе Insufficient Balance / фантомный шорт.
+        tp_order = str(state.get("tp_order") or "")
+        if tp_order:
+            ok, done_qty, done_quote, done_fee = self._cancel_limit_confirmed(ticker, tp_order)
+            if not ok:
+                logger.info(
+                    "[Крипта] щуп %s: лимитка %s жива (%s) — маркет не ставлю",
+                    ticker,
+                    tp_order,
+                    reason,
+                )
+                return
+            if done_qty > 0 and done_quote > 0:
+                self._probe_journal_limit(ticker, done_qty, done_quote, done_fee)
+            qty = max(0.0, qty - done_qty)
+            # TP снят: не оставляем id в JSON на случай ретрая/краша.
+            if qty * price >= _MIN_QUOTE:
+                write_probe(
+                    ticker=ticker,
+                    qty=qty,
+                    entry=entry,
+                    shelf=float(state.get("shelf") or 0),
+                    arm_px=float(state.get("arm_px") or 0),
+                    peak=peak,
+                    low=float(state.get("low") or 0),
+                    algo=leg_algo,
+                    tp_order="",
+                    tp_px=0.0,
+                )
+            if qty * price < _MIN_QUOTE:
+                write_probe(drop=ticker)
+                logger.info("[Крипта] щуп %s: тейк закрыл ногу", ticker)
+                return
+            tp_order = ""
+        shelf = float(state.get("shelf") or 0)
+        # Мягкий выход → карман2 только если уже был реальный плюс (ловушка),
+        # либо если нога застряла в щупе («застой») — освобождаем слот щупа под минимальный выход в кармане2.
+        seed_high = max(float(state.get("peak") or 0), float(price or 0))
+        peak_gain = (seed_high / entry - 1.0) * 100.0 if entry > 0 else 0.0
+        is_stale = reason == "застой"
+        has_trap_peak = peak_gain >= arm_need - 1e-6
+        if (
+            probe_should_handoff(reason)
+            and cfg().second_on
+            and qty > 0
+            and entry > 0
+            and (has_trap_peak or is_stale)
+        ):
+            shelf_floor = (
+                shelf * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0)
+                if is_stale and shelf > 0
+                else 0.0
+            )
+            ok = upsert_second_pocket_leg(
+                ticker=ticker,
+                qty=qty,
+                entry=entry,
+                low=shelf_floor,
+                exit_high=0.0 if is_stale else seed_high,
+                exit_ts=0.0 if is_stale else (time.time() if seed_high > 0 else 0.0),
+                scratch=is_stale,
+                max_legs=pocket_from_probe_max(),
+            )
+            if ok:
+                write_probe(drop=ticker)
+                logger.info(
+                    "[Крипта] щуп %s: передача во второй карман (%s) %.6g @ %.4g",
+                    ticker,
+                    reason,
+                    qty,
+                    entry,
+                )
+                return
+            logger.info(
+                "[Крипта] щуп %s: карман2 полон — продаю (%s)",
+                ticker,
+                reason,
+            )
+        elif probe_should_handoff(reason) and entry > 0 and peak_gain < arm_need - 1e-6:
+            logger.info(
+                "[Крипта] щуп %s: без плюса не в карман2 (%s, пик %+.2f%% < %.2f%%) — продаю",
+                ticker,
+                reason,
+                peak_gain,
+                arm_need,
+            )
+        try:
+            _cash, held = self._cash_and_held()
+            wallet_qty = float((held.get(ticker) or {}).get("qty") or 0)
+        except Exception:
+            wallet_qty = qty
+        sell_qty = min(qty, wallet_qty)
+        if sell_qty <= 0:
+            write_probe(drop=ticker)
+            return
+        seen = getattr(self, "_last_fill", None)
+        # Срез/стоп/полка — только маркет. Maker после TP снова подвесит монеты.
+        force_market = str(reason) in {"срез", "стоп", "полка", "безубыток", "дно"}
+        use_maker = (
+            not force_market
+            and not tp_order
+            and not (obi is not None and obi <= EXIT_TRAP_BEAR_OBI + 1e-12)
+        )
+        self._pending_exit_reason = str(reason or "")
+        self._pending_trade_book = "probe"
+        try:
+            self._place_order(ticker, "Sell", base_qty=sell_qty, price=price, maker=use_maker)
+        except Exception as exc:
+            self._pending_exit_reason = ""
+            self._pending_trade_book = ""
+            logger.info("[Крипта] щуп %s продажа не прошла: %s", ticker, exc)
+            return
+        fill = getattr(self, "_last_fill", None)
+        sold = float(fill.get("qty") or 0) if fill is not seen and isinstance(fill, dict) else sell_qty
+        left = max(0.0, qty - sold)
+        if left * price >= _MIN_QUOTE:
+            write_probe(
+                ticker=ticker,
+                qty=left,
+                entry=entry,
+                shelf=float(state.get("shelf") or 0),
+                arm_px=float(state.get("arm_px") or 0),
+                peak=float(state.get("peak") or 0),
+                low=float(state.get("low") or 0),
+                tp_order="",
+                tp_px=0.0,
+            )
+            logger.info("[Крипта] щуп %s ещё %.6g монет после неполной продажи", ticker, left)
+            return
+        write_probe(drop=ticker)
+        fill_px = (
+            float(fill.get("price") or 0)
+            if fill is not seen and isinstance(fill, dict)
+            else 0.0
+        )
+        logger.info(
+            "[Крипта] щуп %s: выход (%s) %.6g по %.4g",
+            ticker,
+            reason,
+            sold,
+            fill_px or price,
+        )
+
+    def _probe_arm(self, state: dict[str, Any]) -> None:
+        ticker = str(state.get("arm_ticker") or "")
+        shelf = float(state.get("arm_shelf") or 0)
+        algo = str(state.get("arm_algo") or "")
+        params = probe_algo_params(algo)
+        # hold=0: week/trend уже есть из _probe_try_arm — не долбим REST заново.
+        week = state.get("week_chg")
+        if week is not None:
+            try:
+                week = float(week)
+            except (TypeError, ValueError):
+                week = None
+        trend = str(state.get("trend15") or "")
+        day = state.get("day_chg")
+        bars = state.get("bars15")
+        if not isinstance(bars, list):
+            bars = None
+        try:
+            px = self._ticker(ticker)
+            price = float(px.get("price") or 0)
+            if day is None:
+                day = float(px.get("chg") or 0)
+            else:
+                day = float(day)
+        except Exception as exc:
+            logger.info("[Крипта] щуп %s цена: %s", ticker, exc)
+            return
+        if not trend or bars is None:
+            try:
+                bars = self._probe_bars(ticker, "15", 80, cache_sec=30.0)
+                trend = ma_trend([bar["close"] for bar in bars])
+            except Exception as exc:
+                logger.info("[Крипта] щуп %s тренд: %s", ticker, exc)
+                return
+        if week is None:
+            week = self._probe_week(ticker)
+        # Реальный day_chg всегда: иначе pin-лидер обходит POP/SPARK MAX_DAY на охотничьем pop.
+        action = probe_arm_action(
+            armed_ts=float(state.get("arm_ts") or 0),
+            now=time.time(),
+            price=price,
+            shelf=shelf,
+            trend15=trend,
+            day_chg=day,
+            arm_px=float(state.get("arm_px") or 0),
+            week_chg=week,
+            algo=algo,
+            hold_sec=float(params["hold_sec"]),
+            chase_pct=float(params["chase_pct"]),
+        )
+        if action == "wait":
+            return
+        if action == "drop":
+            write_probe(drop_arm=ticker)
+            week_bit = "нет" if week is None else f"{week:+.1f}%"
+            logger.info(
+                "[Крипта] щуп %s снят (%s): полка %.4g сейчас %.4g тренд %s 7d=%s day=%+.1f%%",
+                ticker,
+                algo or "shelf",
+                shelf,
+                price,
+                trend,
+                week_bit,
+                day,
+            )
+            return
+        if len(probe_legs()) >= self._probe_cap() and not probe_is_paper():
+            while len(probe_legs()) >= self._probe_cap():
+                if not self._probe_make_room():
+                    write_probe(drop_arm=ticker)
+                    logger.info("[Крипта] щуп %s снят: слоты заняты, карман2 не взял", ticker)
+                    return
+        if len(probe_legs()) >= self._probe_cap() and probe_is_paper():
+            self._probe_paper_signal(
+                ticker,
+                {"algo": algo, "shelf": shelf, "price": price, "stair": 1.0},
+                "слот занят — в бою не взял бы",
+            )
+            write_probe(drop_arm=ticker)
+            return
+        # За hold цена часто доезжает до хая — перед buy ещё раз режем tip.
+        if str(algo or "") == PROBE_ALGO_GRIND and bars:
+            live = bars[-1]
+            if not probe_grind_live_ok(
+                price,
+                float(live.get("high") or 0),
+                float(live.get("low") or 0),
+            ):
+                write_probe(drop_arm=ticker)
+                logger.info(
+                    "[Крипта] щуп %s снят (grind tip): сейчас %.4g high %.4g low %.4g",
+                    ticker,
+                    price,
+                    float(live.get("high") or 0),
+                    float(live.get("low") or 0),
+                )
+                return
+        surge = False
+        arm_px = float(state.get("arm_px") or 0)
+        bid = ask = 0.0
+        tick = 0.0
+        depth_usd: float | None = None
+        obi: float | None = None
+        # Один L2 limit=25 → bid/ask + глубина + OBI (без 3 отдельных REST).
+        l2_fn = getattr(self, "_orderbook_l2", None)
+        snap = l2_fn(ticker) if callable(l2_fn) else None
+        if snap:
+            bid = float(snap.get("bid") or 0)
+            ask = float(snap.get("ask") or 0)
+            depth_usd = orderbook_ask_depth_usd(snap.get("asks") or [])
+            obi = orderbook_obi(snap.get("bids") or [], snap.get("asks") or [])
+        else:
+            try:
+                book = self._book(ticker)
+                bid = float(book.get("bid") or 0)
+                ask = float(book.get("ask") or 0)
+            except Exception:
+                bid = ask = 0.0
+            depth_usd = self._ask_depth_usd(ticker)
+            obi_fn = getattr(self, "_orderbook_obi", None)
+            if callable(obi_fn):
+                obi = obi_fn(ticker)
+        try:
+            tick = float((self._filters(ticker) or {}).get("tick") or 0)
+        except Exception:
+            tick = 0.0
+        # Ask-slip vs взвод (ERA +1.63%): жёсткий потолок PROBE_MAX_BUY_SLIP_PCT.
+        strict_book = bool(self._probe_loss_guard_reason())
+        max_buy_slip = (
+            float(PROBE_STRICT_MAX_ASK_SLIP_PCT) if strict_book else float(PROBE_MAX_BUY_SLIP_PCT)
+        )
+        if ask > 0 and arm_px > 0:
+            ask_slip_pct = (ask / arm_px - 1.0) * 100.0
+            if ask_slip_pct > max_buy_slip + 1e-12:
+                write_probe(drop_arm=ticker)
+                logger.info(
+                    "[Крипта] щуп %s снят (проскальзывание ask): ask %.4g > взвод %.4g (+%.2f%% > %.2f%%)",
+                    ticker,
+                    ask,
+                    arm_px,
+                    ask_slip_pct,
+                    max_buy_slip,
+                )
+                return
+        if not probe_book_buy_ok(
+            bid=bid,
+            ask=ask,
+            arm_px=arm_px,
+            strict=strict_book,
+            tick_size=tick,
+        ):
+            write_probe(drop_arm=ticker)
+            logger.info(
+                "[Крипта] щуп %s снят (спред/ask): bid %.4g ask %.4g взвод %.4g",
+                ticker,
+                bid,
+                ask,
+                arm_px,
+            )
+            return
+        # Глубина ask: нога ≤ 15% ask в пределах slip — иначе свой маркет сдвигает цену.
+        try:
+            want_quote = float(probe_quote_for_buy())
+        except Exception:
+            want_quote = float(probe_quote())
+        if not probe_depth_buy_ok(ask_depth_usd=depth_usd, quote_usd=want_quote):
+            write_probe(drop_arm=ticker)
+            logger.info(
+                "[Крипта] щуп %s снят (тонкий ask): глубина $%.0f, нога $%.0f > %.0f%% ask +%.2f%%",
+                ticker,
+                float(depth_usd or 0),
+                want_quote,
+                PROBE_ASK_DEPTH_MAX_QUOTE_FRAC * 100.0,
+                PROBE_ASK_DEPTH_SLIP_PCT,
+            )
+            return
+        if str(algo or "") in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+            # Актуальных 5м: buy_ok мягче live_ok — иначе hold убивает вход (CPOOL).
+            try:
+                bars5 = self._probe_bars(ticker, "5", 20, cache_sec=2.0)
+            except Exception as exc:
+                logger.info("[Крипта] щуп %s 5м tip: %s", ticker, exc)
+                write_probe(drop_arm=ticker)
+                return
+            live = bars5[-1] if bars5 else {}
+            check_px = price
+            if ask > 0 and str(algo or "") not in {PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+                check_px = max(price, ask)
+            live_hi = max(float(live.get("high") or 0), check_px)
+            live_lo = float(live.get("low") or 0)
+            live_op = float(live.get("open") or 0)
+            bar_ts = float(live.get("ts") or 0)
+            elapsed = (time.time() - bar_ts) if bar_ts > 0 else None
+            if str(algo or "") == PROBE_ALGO_SPARK:
+                tip_ok = probe_spark_buy_ok(
+                    check_px, live_hi, live_lo, live_op, elapsed_sec=elapsed
+                )
+            elif str(algo or "") == PROBE_ALGO_POP:
+                tip_ok = probe_pop_buy_ok(
+                    check_px, live_hi, live_lo, live_op, elapsed_sec=elapsed
+                )
+            else:
+                tip_ok = probe_candle_buy_ok(check_px, live_hi, live_lo, live_op)
+            if not tip_ok:
+                # LIT: новый 5м бар open=high=price — ждём тело, не роняем взвод.
+                if str(algo or "") == PROBE_ALGO_CANDLE and probe_candle_bar_immature(
+                    check_px, live_hi, live_lo, live_op
+                ):
+                    logger.info(
+                        "[Крипта] щуп %s жду тело бара: сейчас %.4g open %.4g high %.4g",
+                        ticker,
+                        check_px,
+                        live_op,
+                        live_hi,
+                    )
+                    return
+                write_probe(drop_arm=ticker)
+                logger.info(
+                    "[Крипта] щуп %s снят (%s tip): сейчас %.4g open %.4g high %.4g",
+                    ticker,
+                    algo or "candle",
+                    check_px,
+                    live_op,
+                    live_hi,
+                )
+                return
+            surge = probe_volume_surge(bars5, now=time.time())
+        strict = bool(self._probe_loss_guard_reason())
+        if not probe_entry_obi_ok(obi, strict=strict, volume_surge=surge):
+            write_probe(drop_arm=ticker)
+            logger.info(
+                "[Крипта] щуп %s снят (obi%s): %.2f < %.2f",
+                ticker,
+                ", объём" if surge else "",
+                float(obi or 0),
+                probe_entry_obi_floor(strict=strict, volume_surge=surge),
+            )
+            return
+        self._probe_buy(
+            ticker,
+            shelf,
+            price,
+            arm_px=float(state.get("arm_px") or price),
+            entry_low=float(bars[-1].get("low") or 0) if bars else 0.0,
+            algo=algo or "shelf",
+            note={
+                "obi": obi,
+                "bid": bid or None,
+                "ask": ask or None,
+            },
+            ask=ask,
+            strict=strict,
+        )
+
+    def _probe_park_in_pocket2(self, leg: dict[str, Any], *, reason: str) -> bool:
+        """Передать ногу щупа в карман2 без продажи — слот щупа свободен."""
+        ticker = str(leg.get("ticker") or "")
+        qty = float(leg.get("qty") or 0)
+        entry = float(leg.get("entry") or 0)
+        if not ticker or qty <= 0 or entry <= 0 or not cfg().second_on:
+            return False
+        prices = self._probe_leg_prices([leg])
+        px = float(prices.get(ticker) or 0)
+        peak = max(float(leg.get("peak") or 0), px)
+        arm_need = exit_trap_arm_pct(entry=entry, qty=qty) if entry > 0 and qty > 0 else 9e9
+        peak_gain = (peak / entry - 1.0) * 100.0 if entry > 0 else 0.0
+        has_trap = peak_gain >= arm_need - 1e-6
+        shelf = float(leg.get("shelf") or 0)
+        shelf_floor = (
+            shelf * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0)
+            if not has_trap and shelf > 0
+            else 0.0
+        )
+        ok = upsert_second_pocket_leg(
+            ticker=ticker,
+            qty=qty,
+            entry=entry,
+            low=shelf_floor,
+            exit_high=0.0 if not has_trap else peak,
+            exit_ts=0.0 if not has_trap else time.time(),
+            scratch=not has_trap,
+            max_legs=pocket_from_probe_max(),
+        )
+        if not ok:
+            logger.info("[Крипта] щуп %s: карман2 полон — слот не освободить (%s)", ticker, reason)
+            return False
+        write_probe(drop=ticker)
+        logger.info(
+            "[Крипта] щуп %s: в карман2 (%s) %.6g @ %.4g — слот свободен",
+            ticker,
+            reason,
+            qty,
+            entry,
+        )
+        return True
+
+    def _probe_make_room(self) -> bool:
+        """Щуп забит — худшую старую ногу в карман2, чтобы взять новый вход."""
+        self._probe_room_tried = True
+        if probe_is_paper() or not cfg().second_on:
+            return False
+        cap = self._probe_cap()
+        legs = probe_legs()
+        if len(legs) < cap:
+            return False
+        prices = self._probe_leg_prices(legs)
+        pick = pick_probe_leg_for_room(legs, prices)
+        if not pick:
+            logger.info("[Крипта] щуп: слоты заняты, парковать некого (все свежие)")
+            return False
+        return self._probe_park_in_pocket2(pick, reason="слот")
+
+    def _probe_leg_prices(self, legs: list[dict[str, Any]]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for leg in legs:
+            name = str(leg.get("ticker") or "").upper()
+            if not name:
+                continue
+            try:
+                out[name] = float(self._ticker(name)["price"])
+            except Exception:
+                continue
+        return out
+
+    def _free_second_pocket_for_probe(self, need_usd: float) -> float:
+        """Если кэша + Earn не хватает на новый щуп — продать ногу из кармана2 с наименьшим убытком."""
+        for _ in range(len(read_second_pocket_legs())):
+            free_cash, held_now = self._cash_and_held()
+            if free_cash * common._BUY_CASH_BUFFER >= need_usd * 0.9:
+                return free_cash
+            self._refresh_manual_holds()
+            sec_legs = [
+                leg
+                for leg in read_second_pocket_legs()
+                if str(leg.get("ticker") or "").upper() not in self._manual_holds
+            ]
+            if not sec_legs:
+                break
+            sec_prices: dict[str, float] = {}
+            for leg in sec_legs:
+                coin = str(leg.get("ticker") or "").upper()
+                if not coin:
+                    continue
+                px = float((held_now.get(coin) or {}).get("price") or 0)
+                if px <= 0:
+                    try:
+                        px = float(self._ticker(coin).get("price") or 0)
+                    except Exception:
+                        px = 0.0
+                if px > 0:
+                    sec_prices[coin] = px
+            best = pick_second_pocket_leg_for_funding(sec_legs, sec_prices)
+            if not best:
+                break
+            coin = str(best["ticker"]).upper()
+            qty = float(best.get("qty") or 0)
+            entry = float(best.get("entry") or 0)
+            px = float(sec_prices.get(coin) or 0)
+            held_qty = float((held_now.get(coin) or {}).get("qty") or 0)
+            sell_qty = min(qty, held_qty)
+            if sell_qty <= 0 or px <= 0:
+                drop_second_pocket_leg(coin)
+                self._drop_anchor(coin)
+                continue
+            pnl_usd = (px - entry) * sell_qty
+            try:
+                self._place_order(coin, "Sell", base_qty=sell_qty, price=px, maker=False)
+            except Exception as exc:
+                logger.info("[Крипта] карман2 %s разгрузка под щуп не прошла: %s", coin, exc)
+                break
+            drop_second_pocket_leg(coin)
+            self._drop_anchor(coin)
+            logger.info(
+                "[Крипта] карман2 %s: продал %.6g по %.4g (%+.2f$) под новый щуп",
+                coin,
+                sell_qty,
+                px,
+                pnl_usd,
+            )
+        free_cash, _held = self._cash_and_held()
+        return free_cash
+
+    def _probe_buy(
+        self,
+        ticker: str,
+        shelf: float,
+        price: float,
+        arm_px: float = 0.0,
+        entry_low: float = 0.0,
+        algo: str = "",
+        note: dict[str, Any] | None = None,
+        *,
+        ask: float = 0.0,
+        strict: bool = False,
+    ) -> None:
+        if probe_is_paper():
+            self._probe_paper_fill(
+                ticker,
+                shelf=shelf,
+                price=price,
+                arm_px=arm_px,
+                entry_low=entry_low,
+                algo=algo,
+                note=note,
+            )
+            return
+        free_cash, held_now = self._cash_and_held()
+        legs = probe_legs()
+        if str(algo or "") == PROBE_ALGO_PIN:
+            if probe_sniper_count(legs) >= PROBE_SNIPER_MAX_LEGS:
+                logger.info("[Крипта] щуп %s: слот снайпера занят", ticker)
+                write_probe(drop_arm=ticker)
+                return
+        elif probe_hunter_count(legs) >= PROBE_HUNTER_MAX_LEGS:
+            logger.info("[Крипта] щуп %s: слоты охотников заняты", ticker)
+            write_probe(drop_arm=ticker)
+            return
+        if len(legs) >= self._probe_cap():
+            while len(probe_legs()) >= self._probe_cap():
+                if not self._probe_make_room():
+                    logger.info("[Крипта] щуп %s: слоты заняты, карман2 не взял", ticker)
+                    write_probe(drop_arm=ticker)
+                    return
+            legs = probe_legs()
+        prices = self._probe_leg_prices(legs) if legs else {}
+        want = probe_quote_for_buy(legs=legs, prices=prices)
+        min_frac = float(PROBE_MIN_QUOTE_FRAC)
+        quote = min(want, free_cash * common._BUY_CASH_BUFFER)
+        if quote < want * min_frac:
+            free_cash = self._free_second_pocket_for_probe(want)
+            _, held_now = self._cash_and_held()
+            quote = min(want, free_cash * common._BUY_CASH_BUFFER)
+        if quote < want * min_frac:
+            logger.info("[Крипта] щуп %s: кэша мало на %.0f$", ticker, want)
+            return
+        before = float((held_now.get(ticker) or {}).get("qty") or 0)
+        seen_fill = getattr(self, "_last_fill", None)
+        name = str(algo or "").strip().lower()
+        # shelf — maker; ракеты — Limit IOC с потолком (не Market и не PostOnly).
+        maker = name in {"", "shelf"}
+        use_ioc = (not maker) and name in PROBE_BUY_IOC_ALGOS
+        ioc_slip = (
+            float(PROBE_BUY_IOC_STRICT_SLIP_PCT) if strict else float(PROBE_BUY_IOC_SLIP_PCT)
+        )
+        ask_px = float(ask or 0)
+        if ask_px <= 0 and use_ioc:
+            try:
+                ask_px = float(self._book(ticker).get("ask") or 0)
+            except Exception:
+                ask_px = 0.0
+        cap_px = float(arm_px or price or 0)
+        limit_px = 0.0
+        if use_ioc and ask_px > 0:
+            limit_px = probe_buy_ioc_cap_px(
+                ask=ask_px,
+                arm_px=cap_px,
+                strict=strict,
+            )
+            logger.info(
+                "[Крипта] щуп %s IOC Buy: ask %.6g потолок %.6g (arm %.6g slip %.2f%% pad %.2f%%)",
+                ticker,
+                ask_px,
+                limit_px,
+                cap_px,
+                ioc_slip,
+                PROBE_BUY_IOC_ASK_PAD_PCT,
+            )
+            # Не ходим в _place_order, если ask уже выше потолка (экономия 1–2с REST).
+            # drop_arm обязателен: иначе при hold=0 взвод останется и _probe_arm повторит тикер.
+            if limit_px > 0 and limit_px + 1e-12 < ask_px:
+                write_probe(drop_arm=ticker)
+                logger.info(
+                    "[Крипта] щуп %s: ask %.6g > потолок %.6g — пропуск до ордера",
+                    ticker,
+                    ask_px,
+                    limit_px,
+                )
+                return
+        self._pending_trade_book = "probe"
+        try:
+            self._place_order(
+                ticker,
+                "Buy",
+                quote_usdt=quote,
+                price=price,
+                maker=maker,
+                ioc=use_ioc,
+                cap_px=cap_px if use_ioc else 0.0,
+                max_slip_pct=ioc_slip if use_ioc else None,
+            )
+        except Exception as exc:
+            self._pending_trade_book = ""
+            write_probe(drop_arm=ticker)
+            logger.info("[Крипта] щуп %s покупка не прошла: %s", ticker, exc)
+            return
+        fill = getattr(self, "_last_fill", None)
+        spent_quote = (
+            float(fill.get("quote") or 0)
+            if fill is not seen_fill and isinstance(fill, dict) and float(fill.get("quote") or 0) > 0
+            else quote
+        )
+        _cash, held = self._cash_and_held()
+        after = float((held.get(ticker) or {}).get("qty") or 0)
+        bought = after - before
+        if bought <= 0:
+            return
+        entry_px = spent_quote / bought
+        write_probe(
+            ticker=ticker,
+            qty=bought,
+            entry=entry_px,
+            shelf=shelf,
+            arm_px=arm_px or price,
+            peak=price,
+            low=entry_low,
+            algo=algo or "shelf",
+        )
+        tp_order = ""
+        tp_px = 0.0
+        if str(algo or "") != PROBE_ALGO_PIN:
+            tp_pct = probe_limit_tp_pct(strict=bool(self._probe_loss_guard_reason()))
+            tp_px = entry_px * (1.0 + tp_pct / 100.0)
+            tp_order = self._rest_limit_sell(ticker, bought, tp_px)
+        if tp_order:
+            write_probe(
+                ticker=ticker,
+                qty=bought,
+                entry=entry_px,
+                shelf=shelf,
+                arm_px=arm_px or price,
+                peak=price,
+                low=entry_low,
+                algo=algo or "shelf",
+                tp_order=tp_order,
+                tp_px=tp_px,
+            )
+        tag = ""
+        if len(legs) >= 2 and want >= PROBE_BOOST_USD - 1e-6:
+            tag = " (3я, boost $60)"
+        elif len(probe_legs()) > 1:
+            tag = " (второй)"
+        logger.info(
+            "[Крипта] щуп %s: купил на %.0f$ над полкой %.4g (%s)%s",
+            ticker,
+            quote,
+            shelf,
+            algo or "shelf",
+            tag,
+        )
+
+    def _probe_paper_signal(
+        self,
+        ticker: str,
+        setup: dict[str, Any],
+        reason: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if crypto_journal.probe_paper_recent(ticker, "skip"):
+            return
+        payload = dict(extra or {})
+        if setup.get("stair") is not None:
+            payload["stair"] = setup.get("stair")
+        crypto_journal.record_probe_paper(
+            kind="skip",
+            ticker=ticker,
+            algo=str(setup.get("algo") or ""),
+            shelf=float(setup.get("shelf") or 0),
+            price=float(setup.get("price") or 0),
+            reason=reason,
+            extra=payload or None,
+        )
+        logger.info(
+            "[Крипта] щуп имитация %s: сетап %s полка %.4g сейчас %.4g — %s",
+            ticker,
+            setup.get("algo") or "shelf",
+            float(setup.get("shelf") or 0),
+            float(setup.get("price") or 0),
+            reason,
+        )
+
+    def _probe_paper_fill(
+        self,
+        ticker: str,
+        *,
+        shelf: float,
+        price: float,
+        arm_px: float,
+        entry_low: float,
+        algo: str,
+        note: dict[str, Any] | None,
+    ) -> None:
+        if price <= 0:
+            return
+        open_names = {
+            str(leg.get("ticker") or "").upper()
+            for leg in crypto_journal.probe_paper_open_legs()
+        }
+        if ticker.upper() in open_names or crypto_journal.probe_paper_recent(ticker, "buy"):
+            return
+        quote = probe_quote()
+        extra = {key: value for key, value in (note or {}).items() if value is not None}
+        extra["low"] = entry_low
+        extra["arm_px"] = arm_px or price
+        crypto_journal.record_probe_paper(
+            kind="buy",
+            ticker=ticker,
+            algo=algo or "shelf",
+            shelf=shelf,
+            price=price,
+            quote=quote,
+            reason="взял бы",
+            extra=extra,
+        )
+        bits = []
+        if extra.get("stair") is not None:
+            bits.append(f"stair={extra['stair']}")
+        if extra.get("obi") is not None:
+            bits.append(f"obi={float(extra['obi']):.2f}")
+        if extra.get("ask"):
+            bits.append(f"ask={float(extra['ask']):.4g}")
+        detail = (" " + " ".join(bits)) if bits else ""
+        logger.info(
+            "[Крипта] щуп имитация %s: взял бы %s полка %.4g сейчас %.4g на %.0f$%s",
+            ticker,
+            algo or "shelf",
+            shelf,
+            price,
+            quote,
+            detail,
+        )
+
+    def _probe_paper_tick(self) -> None:
+        for leg in crypto_journal.probe_paper_open_legs():
+            self._probe_paper_exit(leg)
+
+    def _probe_paper_exit(self, state: dict[str, Any]) -> None:
+        ticker = str(state.get("ticker") or "")
+        try:
+            px = self._ticker(ticker)
+            price = float(px.get("price") or 0)
+        except Exception as exc:
+            logger.info("[Крипта] щуп имитация %s цена: %s", ticker, exc)
+            return
+        live = self._tape_quote(ticker)
+        if live and float(live.get("price") or 0) > 0:
+            price = float(live["price"])
+        live_bid = float((live or {}).get("bid") or 0)
+        trend = "bull"
+        try:
+            bars = self._probe_bars(ticker, "15", 80)
+            if bars:
+                trend = ma_trend([bar["close"] for bar in bars])
+        except Exception:
+            pass
+        peak = max(float(state.get("peak") or 0), price)
+        if peak > float(state.get("peak") or 0) + 1e-12:
+            crypto_journal.update_probe_paper_leg(ticker, peak=peak)
+        entry = float(state.get("entry") or 0)
+        qty = float(state.get("qty") or 0)
+        arm_need = exit_trap_arm_pct(entry=entry, qty=qty) if entry > 0 and qty > 0 else 9e9
+        peak_gain = (peak / entry - 1.0) * 100.0 if entry > 0 else 0.0
+        obi: float | None = None
+        if peak_gain >= arm_need - 1e-6:
+            obi_fn = getattr(self, "_orderbook_obi", None)
+            if callable(obi_fn):
+                obi = obi_fn(ticker)
+        reason = probe_exit_reason(
+            price=price,
+            entry=entry,
+            shelf=float(state.get("shelf") or 0),
+            trend15=trend,
+            arm_px=float(state.get("arm_px") or 0),
+            peak=peak,
+            entry_low=float(state.get("low") or 0),
+            algo=str(state.get("algo") or ""),
+            qty=qty,
+            opened_ts=float(state.get("ts") or 0),
+            now=time.time(),
+            bid=live_bid,
+            obi=obi,
+        )
+        if not reason:
+            return
+        crypto_journal.record_probe_paper(
+            kind="exit",
+            ticker=ticker,
+            algo=str(state.get("algo") or ""),
+            shelf=float(state.get("shelf") or 0),
+            price=price,
+            quote=qty * price if qty > 0 and price > 0 else 0.0,
+            reason=reason,
+            extra={"entry": entry, "peak": peak, "pnl_pct": peak_gain if entry > 0 else 0.0},
+        )
+        logger.info(
+            "[Крипта] щуп имитация %s: выход (%s) сейчас %.4g вход %.4g",
+            ticker,
+            reason,
+            price,
+            entry,
+        )
+
+    def _probe_oi_divergence_ok(self, ticker: str) -> tuple[bool, str]:
+        """Всплеск OI на Bybit linear за 5м — ловушка плечевиков. Fail-Open без фьючерса/API."""
+        coin = str(ticker or "").upper()
+        if not coin or coin in {"BTC", "ETH", "SOL", "USDT", "USDC"}:
+            return True, ""
+        try:
+            data = self._public_get(
+                "/v5/market/open-interest",
+                {
+                    "category": "linear",
+                    "symbol": f"{coin}USDT",
+                    "intervalTime": "5min",
+                    "limit": "2",
+                },
+                f"oi:{coin}:5m",
+                cache_sec=55.0,
+            )
+            rows = (data.get("result") or {}).get("list") or []
+            if len(rows) < 2:
+                return True, ""
+            oi_now = float(rows[0].get("openInterest") or 0)
+            oi_prev = float(rows[1].get("openInterest") or 0)
+            return probe_oi_spike_ok(oi_now, oi_prev)
+        except Exception as exc:
+            logger.debug("[Крипта] щуп %s проверка OI: %s", coin, exc)
+            return True, ""
+
+    def _probe_try_arm(
+        self,
+        row: dict[str, Any],
+        setup: dict[str, Any],
+        bars15: list[dict[str, Any]],
+        hour: list[dict[str, Any]],
+    ) -> bool:
+        """Взвод, если тренд/неделя ок. True — слот занят, скан стоп."""
+        ticker = str(row.get("ticker") or "")
+        paper = probe_is_paper()
+        strict = bool(self._probe_loss_guard_reason()) if probe_places_buys() else False
+        turn = float(row.get("turnover") or 0)
+        algo = str(setup.get("algo") or "shelf")
+        # AI-радар: мгновенный lookup. Лидер дня (пин) не режем ни на каком сетапе.
+        pin_name = str(read_probe_pin().get("ticker") or "").upper()
+        is_pinned_leader = (algo == PROBE_ALGO_PIN) or (
+            bool(pin_name) and ticker.upper() == pin_name
+        )
+        if not is_pinned_leader:
+            ai_radar = getattr(self, "_ai_radar", None)
+            if ai_radar is not None:
+                ai_veto = ai_radar.check_veto(ticker)
+                if ai_veto:
+                    self._probe_skip(f"{ticker} {algo}: вето ИИ — {ai_veto}")
+                    return False
+        if not probe_setup_ok_now(
+            setup,
+            now=time.time(),
+            turnover=turn,
+            strict=strict,
+        ):
+            mode = "жёсткий" if strict else ("ночь" if probe_night_halted() else "фильтр")
+            self._probe_skip(
+                f"{ticker} {algo}: {mode} turn=${turn/1e3:.0f}k"
+            )
+            return False
+        cap = self._probe_cap()
+        if len(probe_legs()) + len(probe_arms()) >= cap:
+            if paper:
+                self._probe_paper_signal(
+                    ticker,
+                    setup,
+                    "слот занят — в бою не взял бы",
+                )
+                return False
+            while len(probe_legs()) + len(probe_arms()) >= cap:
+                if not self._probe_make_room():
+                    self._probe_skip(f"{ticker} {algo}: слоты заняты")
+                    return False
+        week = self._probe_week(ticker)
+        t15 = ma_trend([bar["close"] for bar in bars15])
+        t1h = ma_trend([bar["close"] for bar in hour])
+        day_chg = float(row.get("chg") or 0)
+        if week is None or not probe_trends_ok(
+            t15,
+            t1h,
+            day_chg,
+            week_chg=week,
+            algo=algo,
+        ):
+            week_bit = "нет" if week is None else f"{week:+.1f}%"
+            self._probe_skip(
+                f"{ticker} {algo}: тренд 15м={t15} 1h={t1h} 7d={week_bit} day={day_chg:+.1f}%"
+            )
+            return False
+        # Open Interest: всплеск OI на linear — ловушка плечевиков (Fail-Open).
+        oi_ok, oi_reason = self._probe_oi_divergence_ok(ticker)
+        if not oi_ok:
+            self._probe_skip(f"{ticker} {algo}: ловушка — {oi_reason}")
+            return False
+        # Имитация: сразу в свой журнал, без боевого взвода и без виджета.
+        if paper:
+            self._probe_paper_fill(
+                ticker,
+                shelf=float(setup["shelf"]),
+                price=float(setup["price"]),
+                arm_px=float(setup["price"]),
+                entry_low=float(setup.get("low") or 0),
+                algo=algo,
+                note={
+                    key: setup.get(key)
+                    for key in ("stair", "obi", "ask")
+                    if setup.get(key) is not None
+                },
+            )
+            return True
+        hold = int(probe_setup_hold_sec(setup))
+        arm_ts = time.time()
+        write_probe(
+            arm_ticker=ticker,
+            arm_shelf=float(setup["shelf"]),
+            arm_ts=arm_ts,
+            arm_px=float(setup["price"]),
+            arm_algo=algo,
+        )
+        wait_bit = "беру сразу" if hold <= 0 else f"жду {hold}с"
+        logger.info(
+            "[Крипта] щуп %s %s полка %.4g сейчас %.4g — %s",
+            ticker,
+            algo,
+            setup["shelf"],
+            setup["price"],
+            wait_bit,
+        )
+        if hold <= 0:
+            self._probe_arm(
+                {
+                    "arm_ticker": ticker,
+                    "arm_shelf": float(setup["shelf"]),
+                    "arm_ts": arm_ts,
+                    "arm_px": float(setup["price"]),
+                    "arm_algo": algo,
+                    "week_chg": week,
+                    "trend15": t15,
+                    "day_chg": day_chg,
+                    "bars15": bars15,
+                }
+            )
+        return True
+
+    def _btc_day_chg(self, tape: list[dict[str, Any]] | None = None) -> float | None:
+        chg = tape_btc_day_chg(tape)
+        if chg is not None:
+            return chg
+        try:
+            return float(self._ticker("BTC").get("chg"))
+        except Exception:
+            return None
+
+    def _probe_cap(self, tape: list[dict[str, Any]] | None = None) -> int:
+        return probe_max_legs(btc_day_chg=self._btc_day_chg(tape), now=time.time())
+
+    def _refresh_probe_pin(self, tape: list[dict[str, Any]]) -> str:
+        """Обновить мягкий пин. Пустая строка — пина нет."""
+        if not PROBE_PIN_ON:
+            if read_probe_pin().get("ticker"):
+                write_probe_pin("")
+            return ""
+        prev = read_probe_pin()
+        chosen = probe_choose_pin(
+            tape,
+            prev,
+            now=time.time(),
+            lost=crypto_journal.probe_recent_loss_tickers(tape=tape),
+            skip=probe_tickers() | second_pocket_tickers(),
+            moves=self._probe_pin_moves(tape),
+        )
+        prev_name = str(prev.get("ticker") or "").upper()
+        name = str((chosen or {}).get("ticker") or "").upper()
+        if not name:
+            if prev_name:
+                write_probe_pin("")
+                logger.info("[Крипта] щуп пин снят")
+            else:
+                self._note_pin_idle("")
+            return ""
+        forced = bool(chosen.get("forced"))
+        if (
+            name != prev_name
+            or bool(prev.get("forced")) != forced
+            or abs(float(chosen.get("ts") or 0) - float(prev.get("ts") or 0)) > 1.0
+        ):
+            write_probe_pin(
+                name,
+                float(chosen.get("ts") or time.time()),
+                float(chosen.get("score") or 0),
+                forced=forced,
+            )
+            logger.info(
+                "[Крипта] щуп пин: %s ход %+.1f%%%s",
+                name,
+                float(chosen.get("score") or 0),
+                " вручную" if forced else "",
+            )
+            if common.telegram_configured() and probe_places_buys() and name != prev_name:
+                note = " вручную" if forced else ""
+                common.send_telegram_notification(f"Крипта: щуп пин {name}{note}", background=True)
+        return name
+
+    def _probe_pin_moves(self, tape: list[dict[str, Any]]) -> dict[str, float]:
+        """Ход за ~10м у ликвидных альтов (не мажоры). Кэш ~1.5м; топ по суткам."""
+        now = time.time()
+        cached = getattr(self, "_probe_pin_move_cache", None)
+        cached_at = float(getattr(self, "_probe_pin_move_ts", 0.0) or 0.0)
+        if isinstance(cached, dict) and now - cached_at < 90.0:
+            return cached
+        ranked: list[tuple[float, str]] = []
+        for row in tape:
+            if not probe_pin_row_ok(row):
+                continue
+            ticker = str(row.get("ticker") or "").upper()
+            try:
+                chg = float(row.get("chg") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ticker and chg >= PROBE_PIN_MIN_DAY_PCT - 1e-12:
+                ranked.append((chg, ticker))
+        ranked.sort(reverse=True)
+        names = [ticker for _chg, ticker in ranked[:16]]
+        current = str(read_probe_pin().get("ticker") or "").upper()
+        if current and current not in names:
+            names.append(current)
+        moves: dict[str, float] = {}
+        for ticker in names:
+            try:
+                bars = self._probe_bars(ticker, "5", 20, cache_sec=85.0)
+            except Exception as exc:
+                msg = str(exc)
+                low = msg.lower()
+                if "rate limit" in low or "too many visits" in low or "bybit 429" in low:
+                    logger.info("[Крипта] щуп пин ход: лимит API — оставляю кэш")
+                    if isinstance(cached, dict) and cached:
+                        self._probe_pin_move_ts = now
+                        return cached
+                    break
+                logger.info("[Крипта] щуп пин %s ход: %s", ticker, exc)
+                continue
+            move = probe_pin_move(bars)
+            if move is not None:
+                moves[ticker] = move
+        self._probe_pin_move_cache = moves
+        self._probe_pin_move_ts = now
+        return moves
+
+    def _note_pin_idle(self, ticker: str) -> None:
+        name = str(ticker or "").upper()
+        key = name or "-"
+        now = time.time()
+        last = float(getattr(self, "_probe_pin_idle_log_ts", 0.0) or 0.0)
+        prev = str(getattr(self, "_probe_pin_idle_name", "") or "")
+        if key == prev and now - last < _PROBE_PIN_IDLE_LOG_SEC:
+            return
+        self._probe_pin_idle_log_ts = now
+        self._probe_pin_idle_name = key
+        if not name:
+            logger.info("[Крипта] щуп пин: нет кандидата")
+            return
+        logger.info("[Крипта] щуп пин %s: сетапа нет", name)
+
+    def _probe_scan_one(
+        self,
+        row: dict[str, Any],
+        blocked: set[str],
+        order: tuple[str, ...],
+        *,
+        cache_sec: float,
+    ) -> bool:
+        ticker = str(row.get("ticker") or "")
+        if not ticker or ticker in blocked:
+            return False
+        pin = str(read_probe_pin().get("ticker") or "").upper()
+        is_pin = bool(pin) and ticker.upper() == pin
+        # Реальный day_chg всегда: pin_ticker только открывает ветку pin_pullback в pick_setup.
+        # Иначе ICNT/PIEVERSE на +30% заходили охотничьим pop в обход MAX_DAY 18%.
+        day_chg = float(row.get("chg") or 0)
+        day_high = float(row.get("high") or 0)
+        self._probe_skip_bump("смотрели")
+        if not is_pin and not probe_scan_day_ok(
+            price=float(row.get("price") or 0),
+            day_high=day_high,
+            day_chg=day_chg,
+        ):
+            self._probe_skip_bump("сутки")
+            return False
+        try:
+            bars5 = self._probe_bars(ticker, "5", 80, cache_sec=cache_sec)
+        except Exception as exc:
+            logger.info("[Крипта] щуп %s 5м: %s", ticker, exc)
+            return False
+        setup = probe_pick_setup(
+            [],
+            bars5,
+            order=tuple(
+                a
+                for a in order
+                if a in {PROBE_ALGO_CANDLE, PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
+            ),
+            day_chg=day_chg,
+            day_high=day_high,
+            now=time.time(),
+            ticker=ticker,
+            pin_ticker=pin if is_pin else "",
+        )
+        if (
+            setup
+            and str(setup.get("algo") or "") != PROBE_ALGO_PIN
+            and probe_hunter_count(list(probe_legs()) + list(probe_arms())) >= PROBE_HUNTER_MAX_LEGS
+        ):
+            self._probe_skip(
+                f"{ticker} {setup.get('algo')}: охотники заняты"
+            )
+            return False
+        if not setup:
+            self._probe_skip_bump("без_сетапа")
+            return False
+        self._probe_skip_bump("сетап")
+        try:
+            bars15 = self._probe_bars(ticker, "15", 120)
+            hour = self._probe_bars(ticker, "60", 80)
+        except Exception as exc:
+            logger.info("[Крипта] щуп %s тренд: %s", ticker, exc)
+            return False
+        if self._probe_try_arm(row, setup, bars15, hour):
+            blocked.add(ticker)
+            return True
+        return False
+
+    def _probe_scan(self) -> None:
+        try:
+            tape = self._tape()
+        except Exception as exc:
+            logger.info("[Крипта] щуп лента: %s", exc)
+            return
+        self._probe_skip_notes = []
+        self._probe_skip_stats = {}
+        paper = probe_is_paper()
+        pause: str | None = None
+        strict = False
+        if probe_places_buys():
+            halt = self._probe_entry_halt_reason(tape)
+            if halt:
+                self._note_probe_halt(halt)
+                return
+            pause = self._probe_loss_guard_reason(tape)
+            strict = bool(pause)
+            if pause:
+                self._note_probe_pause(pause)
+            elif str(getattr(self, "_probe_pause_kind", "") or "") != "рост":
+                self._note_probe_resume()
+        elif str(getattr(self, "_probe_pause_kind", "") or ""):
+            self._note_probe_resume()
+        cap = self._probe_cap(tape)
+        self._probe_room_tried = False
+        pin = self._refresh_probe_pin(tape)
+        blocked = self._probe_blocked() | probe_tickers() | {arm["ticker"] for arm in probe_arms()}
+        candidates: list[dict[str, Any]] = []
+        tape_by: dict[str, dict[str, Any]] = {}
+        for row in tape:
+            ticker = str(row.get("ticker") or "")
+            if ticker:
+                tape_by[ticker] = row
+            if not ticker or ticker in blocked or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+                continue
+            candidates.append(row)
+        scan_lim, _classic_lim, mand_top = probe_scan_limits()
+        min_turn = probe_min_turnover_usd(now=time.time(), strict=strict)
+        ranked = probe_scan_ranked_rows(
+            candidates,
+            now=time.time(),
+            min_turnover=min_turn,
+            limit=scan_lim,
+        )
+        self._probe_scan_top = [
+            (str(row.get("ticker") or ""), float(score))
+            for score, row in ranked[:10]
+            if str(row.get("ticker") or "")
+        ]
+        self._probe_scan_meta = {
+            "candidates": len(candidates),
+            "ranked": len(ranked),
+            "min_turn": min_turn,
+            "strict": strict,
+            "scan_lim": scan_lim,
+        }
+        ai_radar = getattr(self, "_ai_radar", None)
+        if ai_radar is not None:
+            try:
+                ai_radar.sync_enabled()
+                ai_radar.offer_candidates(
+                    [
+                        row
+                        for _score, row in ranked[:20]
+                        if probe_scan_day_ok(
+                            price=float(row.get("price") or 0),
+                            day_high=float(row.get("high") or 0),
+                            day_chg=float(row.get("chg") or 0),
+                        )
+                    ]
+                )
+            except Exception:
+                pass
+        if (
+            len(probe_legs()) + len(probe_arms()) >= cap
+            and not paper
+            and not cfg().second_on
+        ):
+            self._note_probe_beat(cap=cap, pin=pin)
+            return
+        order = probe_scan_algo_order()
+
+        def _book_items() -> list[dict[str, Any]]:
+            return list(probe_legs()) + list(probe_arms())
+
+        def _hunter_room() -> bool:
+            if probe_is_paper():
+                return True
+            return probe_hunter_count(_book_items()) < PROBE_HUNTER_MAX_LEGS
+
+        def _sniper_room() -> bool:
+            if probe_is_paper():
+                return True
+            return probe_sniper_count(_book_items()) < PROBE_SNIPER_MAX_LEGS
+
+        if pin and _sniper_room():
+            pin_row = tape_by.get(pin)
+            pin_hit = False
+            if pin_row:
+                pin_hit = self._probe_scan_one(pin_row, blocked, order, cache_sec=8.0)
+            if pin_hit:
+                self._note_probe_beat(cap=cap, pin=pin)
+                return
+            if not pin_hit and pin not in probe_tickers() and pin not in {
+                arm["ticker"] for arm in probe_arms()
+            }:
+                self._note_pin_idle(pin)
+
+        # Пока скан держит _TRADE_LOCK, WS не достучится до выходов — сами будим ноги.
+        last_exit_check = time.time()
+
+        def _exit_pulse() -> None:
+            nonlocal last_exit_check
+            if not probe_legs():
+                return
+            now_ex = time.time()
+            if now_ex - last_exit_check < 1.5:
+                return
+            self._probe_check_exits()
+            last_exit_check = time.time()
+
+        # Один проход: impulse/pop/spark/candle. Classic-цикл убран (дубль REST 15м).
+        for scan_idx, (_rank, row) in enumerate(ranked[:scan_lim]):
+            if not _hunter_room():
+                break
+            ticker = str(row["ticker"])
+            if ticker in blocked:
+                continue
+            fast_bar = (
+                scan_idx < mand_top
+                or float(row.get("turnover") or 0) >= 1_000_000.0
+            )
+            if self._probe_scan_one(row, blocked, order, cache_sec=8.0 if fast_bar else 45.0):
+                self._note_probe_beat(cap=cap, pin=pin)
+                return
+            _exit_pulse()
+        self._note_probe_beat(cap=cap, pin=pin)
+
+    def _note_probe_beat(self, *, cap: int, pin: str) -> None:
+        """Раз в минуту: топ-10 суток, слоты, пин, фильтры и почему не взяли."""
+        now = time.time()
+        last = float(getattr(self, "_probe_beat_ts", 0.0) or 0.0)
+        if now - last < 60.0:
+            return
+        self._probe_beat_ts = now
+        scan_top = list(getattr(self, "_probe_scan_top", None) or [])
+        top_bit = (
+            ", ".join(f"{name} {chg:+.1f}%" for name, chg in scan_top)
+            if scan_top
+            else "пусто"
+        )
+        moves = getattr(self, "_probe_pin_move_cache", None) or {}
+        top = sorted(moves.items(), key=lambda item: float(item[1]), reverse=True)[:3]
+        move_bit = ", ".join(f"{name} {float(chg):+.1f}%" for name, chg in top) or "никого"
+        held = len(probe_legs()) + len(probe_arms())
+        mode = "бумага" if probe_is_paper() else "бой"
+        meta = getattr(self, "_probe_scan_meta", None) or {}
+        night = probe_night_halted(now)
+        night_lift = float(probe_night_lift_until() or 0)
+        hour_lift = float(crypto_journal.probe_hourly_lift_until() or 0)
+        filter_bits: list[str] = []
+        if night:
+            filter_bits.append("ночь")
+        elif night_lift > now:
+            left = max(1, int((night_lift - now + 59) // 60))
+            filter_bits.append(f"ночь снята {left}м")
+        if meta.get("strict"):
+            filter_bits.append("жёсткий")
+        elif hour_lift > now:
+            left = max(1, int((hour_lift - now + 59) // 60))
+            filter_bits.append(f"час снят {left}м")
+        turn = float(meta.get("min_turn") or 0)
+        if turn > 0:
+            filter_bits.append(f"оборот≥${turn/1e3:.0f}k")
+        ai_radar = getattr(self, "_ai_radar", None)
+        if ai_radar is not None:
+            try:
+                filter_bits.append(ai_radar.status_bit())
+            except Exception:
+                filter_bits.append("ИИ-радар: вкл")
+        stats = getattr(self, "_probe_skip_stats", None) or {}
+        if stats:
+            filter_bits.append(
+                "скан "
+                + "/".join(
+                    f"{key}={stats[key]}"
+                    for key in ("смотрели", "сутки", "без_сетапа", "сетап")
+                    if key in stats
+                )
+            )
+        filt_bit = ", ".join(filter_bits) if filter_bits else "день"
+        skips = list(getattr(self, "_probe_skip_notes", None) or [])
+        skip_bit = "; ".join(skips[:12]) if skips else "—"
+        logger.info(
+            "[Крипта] щуп: %s, топ %s, слоты %s/%s, пин %s, ход: %s | %s | отказы: %s",
+            mode,
+            top_bit,
+            held,
+            cap,
+            pin or "нет",
+            move_bit,
+            filt_bit,
+            skip_bit,
+        )
+        self._probe_skip_notes = []
+        self._probe_skip_stats = {}
+
+    def _spot_buy_vwap(self, ticker: str, need_qty: float) -> float | None:
+        """Средняя цена ручной покупки по свежим fill Bybit (spot)."""
+        need = float(need_qty or 0)
+        if need <= 0:
+            return None
+        try:
+            data = self._signed(
+                "GET",
+                "/v5/execution/list",
+                {
+                    "category": "spot",
+                    "symbol": self._symbol(ticker),
+                    "limit": "50",
+                },
+            )
+        except Exception as exc:
+            logger.info("[Крипта] ловушка %s история сделок: %s", ticker, exc)
+            return None
+        rows = (data.get("result") or {}).get("list") or []
+        got = 0.0
+        cost = 0.0
+        for row in rows:
+            if str(row.get("side") or "").lower() != "buy":
+                continue
+            try:
+                px = float(row.get("execPrice") or 0)
+                qty = float(row.get("execQty") or 0)
+            except (TypeError, ValueError):
+                continue
+            if px <= 0 or qty <= 0:
+                continue
+            take = min(qty, need - got)
+            cost += take * px
+            got += take
+            if got + 1e-12 >= need:
+                break
+        if got <= 0 or cost <= 0:
+            return None
+        return cost / got
+
+    def _manual_entry_px(self, ticker: str, qty: float, mark: float) -> float:
+        """Вход для ловушки: VWAP по бирже, иначе mark (хуже — ловушка от текущей)."""
+        vwap = self._spot_buy_vwap(ticker, qty)
+        if vwap and vwap > 0:
+            return float(vwap)
+        # Журнал стола — если покупка шла через Jarvis.
+        try:
+            trades = crypto_journal._read_trades()
+        except Exception:
+            trades = []
+        got = 0.0
+        cost = 0.0
+        for row in reversed(list(trades or [])):
+            if str(row.get("ticker") or "").upper() != ticker:
+                continue
+            if str(row.get("side") or "").lower() != "buy":
+                continue
+            try:
+                px = float(row.get("price") or 0)
+                quote = float(row.get("quote") or 0)
+                q = float(row.get("qty") or 0)
+            except (TypeError, ValueError):
+                continue
+            if q <= 0 and px > 0 and quote > 0:
+                q = quote / px
+            if px <= 0 or q <= 0:
+                continue
+            take = min(q, float(qty) - got)
+            cost += take * px
+            got += take
+            if got + 1e-12 >= float(qty):
+                break
+        if got > 0 and cost > 0:
+            return cost / got
+        return float(mark or 0)
+
+    def _journal_manual_buy(self, ticker: str, qty: float, entry: float) -> None:
+        """Дописать в дневник ручную покупку, если лота ещё нет — иначе продажа без pnl."""
+        coin = str(ticker or "").upper()
+        amount = float(qty or 0)
+        px = float(entry or 0)
+        if not coin or amount <= 0 or px <= 0:
+            return
+        have = float((crypto_journal.open_lots().get(coin) or {}).get("qty") or 0)
+        missing = amount - have
+        if missing * px < max(_MIN_QUOTE, ALT_HELD_MIN_USD) * 0.5:
+            return
+        # Ручная дописка в дневник — без book=probe (иначе strict съест карман2/ручные).
+        self._journal_trade(coin, "Buy", missing * px, px, coin, book="")
+
+    def _claim_manual_trap_legs(
+        self,
+        positions: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        """Любые свободные ноги на балансе (кроме BTC и активных щупа/SOL-dip) — в карман2 под ловушку вершины."""
+        notes: list[str] = []
+        self._refresh_manual_holds()
+        probe_qty: dict[str, float] = {}
+        for leg in probe_legs():
+            coin = str(leg.get("ticker") or "").upper()
+            if coin:
+                probe_qty[coin] = probe_qty.get(coin, 0.0) + float(leg.get("qty") or 0)
+        dip_qty = float(read_btc_dip().get("qty") or 0)
+        pocketed = {str(leg["ticker"]) for leg in read_second_pocket_legs()}
+        for ticker, pos in positions.items():
+            coin = str(ticker or "").upper()
+            if (
+                not coin
+                or coin in MANUAL_TRAP_SKIP
+                or coin in SLEEVE_SKIP
+                or _leveraged_base(coin)
+                or coin in self._manual_holds
+            ):
+                continue
+            held = float(pos.get("qty") or 0)
+            price = float(pos.get("price") or 0)
+            value = float(pos.get("value") or 0) or held * price
+            if held <= 0 or value < ALT_HELD_MIN_USD:
+                continue
+            target = manual_trap_free_qty(
+                held,
+                probe_qty=float(probe_qty.get(coin) or 0),
+                pocket_qty=0.0,
+                dip_qty=dip_qty if coin == BTC_DIP_TICKER else 0.0,
+            )
+            if target * price < max(_MIN_QUOTE, ALT_HELD_MIN_USD):
+                continue
+            # Уже в кармане2 — подтянуть qty к свободному остатку (минус щуп/SOL-dip).
+            if coin in pocketed:
+                reserved = second_pocket_qty(coin)
+                if abs(target - reserved) > max(1e-8, reserved * 1e-6):
+                    book = next(
+                        (leg for leg in read_second_pocket_legs() if str(leg["ticker"]) == coin),
+                        None,
+                    )
+                    if book:
+                        entry = float(book.get("entry") or 0)
+                        extra = target - reserved
+                        if extra > 0 and entry > 0:
+                            self._journal_manual_buy(coin, target, entry)
+                        update_second_pocket_leg(
+                            coin,
+                            qty=target,
+                            entry=entry,
+                            low=float(book.get("low") or 0),
+                            exit_high=float(book.get("exit_high") or 0),
+                            exit_ts=float(book.get("exit_ts") or 0),
+                        )
+                        notes.append(f"{coin} qty→{target:.6g}")
+                continue
+            entry = self._manual_entry_px(coin, target, price)
+            if entry <= 0:
+                continue
+            ok = upsert_second_pocket_leg(
+                ticker=coin,
+                qty=target,
+                entry=entry,
+                max_legs=MANUAL_TRAP_MAX_LEGS,
+            )
+            if ok:
+                self._journal_manual_buy(coin, target, entry)
+                notes.append(f"{coin} вход {entry:.6g} qty {target:.6g}")
+                logger.info(
+                    "[Крипта] ловушка вручную %s: qty %.6g вход %.6g (нужен +%.2f%%)",
+                    coin,
+                    target,
+                    entry,
+                    exit_trap_arm_pct(entry=entry, qty=target),
+                )
+        return notes
+
+    def _pockets_tick(self) -> None:
+        """Раз в минуту SOL: локальный откат; второй карман — handoff и ручные ноги."""
+        if not getattr(self, "_api_key", ""):
+            return
+        with common._TRADE_LOCK:
+            self._reconcile_desk_state()
+            try:
+                cash, positions_list = self._wallet()
+            except Exception as exc:
+                logger.info("[Крипта] карманы кошелёк: %s", exc)
+                return
+            positions = {item["ticker"]: item for item in positions_list}
+            equity = max(cash + sum(float(item.get("value") or 0) for item in positions_list), 1.0)
+            prices = {
+                str(item.get("ticker") or "").upper(): float(item.get("price") or 0)
+                for item in positions_list
+                if item.get("ticker")
+            }
+            claim_notes = self._claim_manual_trap_legs(positions)
+            if claim_notes:
+                logger.info("[Крипта] ловушка вручную: %s", "; ".join(claim_notes))
+            for pocket_leg in read_second_pocket_legs():
+                coin = str(pocket_leg["ticker"])
+                if coin not in prices:
+                    try:
+                        prices[coin] = float(self._ticker(coin).get("price") or 0)
+                    except Exception:
+                        prices[coin] = 0.0
+            self._trade_second_pocket_legs(
+                positions=positions,
+                prices=prices,
+                blocked=set(),
+            )
+            ticker = BTC_DIP_TICKER
+            try:
+                quote = self._ticker(ticker)
+            except Exception as exc:
+                logger.info("[Крипта] карман %s цена: %s", ticker, exc)
+                return
+            price = float(quote.get("price") or 0)
+            day = quote.get("chg")
+            sol_on = cfg().pocket_on
+            arms = read_entry_arms()
+            if sol_on:
+                tape = getattr(self, "_bybit_tape", None)
+                taped = tape.entry_lows() if tape is not None else {}
+                updated = self._swing_pocket_arm(
+                    ticker,
+                    arms.get("pocket"),
+                    price=price,
+                    day_chg=None if day is None else float(day),
+                    now=time.time(),
+                    taped=taped,
+                )
+                write_entry_arms({}, updated, sui=False)
+            else:
+                write_entry_arms({}, None, sui=False)
+            self._sync_tape_symbols()
+            self._trade_btc_dip(
+                day_chg=None if day is None else float(day),
+                positions=positions,
+                price=price,
+                blocked=False,
+                equity=equity,
+                allow_entry=sol_on,
+                ticker=ticker,
+            )
+
+    def _maybe_daily_report(self) -> None:
+        if not common.telegram_configured():
+            return
+        if not crypto_journal.should_send_daily_report():
+            return
+        try:
+            realized = crypto_journal.read_lifetime_pnl()
+            earned = None if realized is None else realized + self._earn_interest()
+            text = crypto_journal.format_daily_pnl_report(lifetime=earned)
+            common.send_telegram_notification(text, background=False)
+            crypto_journal.mark_daily_report_sent()
+            logger.info("[Крипта] дневной отчёт отправлен.")
+        except Exception as exc:
+            logger.warning("[Крипта] дневной отчёт: %s", exc)
+
+    def _desk_loop(self) -> None:
+        try:
+            self._ensure_tape()
+            self._sync_tape_symbols()
+        except Exception as exc:
+            logger.warning("[Крипта] лента старт: %s", exc)
+        self._desk_stop.wait(5)
+        next_probe = 0.0
+        next_report = time.time() + _DESK_PERIOD_SEC
+        while not self._desk_stop.is_set():
+            if not self._desk_ready():
+                if self._desk_stop.wait(2.0):
+                    return
+                continue
+            now = time.time()
+            if next_probe <= 0:
+                next_probe = now
+            armed = bool(probe_arms())
+            gap = PROBE_ARMED_PERIOD_SEC if armed else probe_period_sec()
+            wake_at = min(next_probe, next_report)
+            tape = getattr(self, "_bybit_tape", None)
+            while time.time() < wake_at:
+                remaining = min(2.0, wake_at - time.time())
+                if remaining <= 0:
+                    break
+                if tape is not None:
+                    fired = tape.wait(remaining)
+                    if self._desk_stop.is_set():
+                        return
+                    if fired:
+                        tape.consume_signals()
+                        self._pockets_tick()
+                        # Тикер щупа будит выходы сразу, не ждём next_probe / конец скана.
+                        try:
+                            self._probe_exits_tick()
+                        except Exception as exc:
+                            logger.warning("[Крипта] щуп выход по ленте: %s", exc)
+                        break
+                elif self._desk_stop.wait(remaining):
+                    return
+                if not self._desk_ready():
+                    break
+            if not self._desk_ready():
+                continue
+            now = time.time()
+            try:
+                self._reload_env()
+            except Exception as exc:
+                logger.warning("[Крипта] env: %s", exc)
+            if now >= next_report:
+                try:
+                    self._maybe_daily_report()
+                except Exception as exc:
+                    logger.warning("[Крипта] отчёт: %s", exc)
+                next_report = time.time() + _DESK_PERIOD_SEC
+            if now >= next_probe:
+                try:
+                    self._pockets_tick()
+                except Exception as exc:
+                    logger.warning("[Крипта] карманы: %s", exc)
+                try:
+                    self._probe_cycle()
+                    self._sync_tape_symbols()
+                except Exception as exc:
+                    logger.warning("[Крипта] щуп: %s", exc)
+                armed = bool(probe_arms())
+                gap = PROBE_ARMED_PERIOD_SEC if armed else probe_period_sec()
+                next_probe = time.time() + gap
+        tape = getattr(self, "_bybit_tape", None)
+        if tape is not None:
+            tape.stop()

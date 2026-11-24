@@ -1504,8 +1504,8 @@ def probe_is_paper() -> bool:
 
 
 def probe_places_buys() -> bool:
-    """Боевой щуп: настройки включены и не имитация."""
-    return bool(cfg().probe_on) and not bool(cfg().probe_paper)
+    """Боевой щуп выключен (спот-алго в архиве spot_desk_20261124)."""
+    return False
 
 
 def probe_quote() -> float:

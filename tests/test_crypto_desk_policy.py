@@ -2639,15 +2639,17 @@ class TestDeskPolicy(unittest.TestCase):
 
     def test_probe_reserve_and_boost_quote(self):
         q = policy.probe_quote()
-        # 3 слота: пусто — резерв одной ноги; есть нога — место под остальные.
-        self.assertEqual(policy.probe_reserve_quote(open_legs=0), q)
-        self.assertEqual(policy.probe_reserve_quote(open_legs=1), q * 2)
-        self.assertEqual(policy.probe_reserve_quote(open_legs=2), max(q, policy.PROBE_BOOST_USD))
+        # Спот-алго сняты: probe_places_buys всегда False → резерв 0.
+        self.assertFalse(policy.probe_places_buys())
+        self.assertEqual(policy.probe_reserve_quote(open_legs=0), 0.0)
+        self.assertEqual(policy.probe_reserve_quote(open_legs=1), 0.0)
+        self.assertEqual(policy.probe_reserve_quote(open_legs=2), 0.0)
         self.assertEqual(policy.probe_reserve_quote(open_legs=3), 0.0)
         legs = [
             {"ticker": "AAA", "entry": 100.0, "qty": 1.0},
             {"ticker": "BBB", "entry": 50.0, "qty": 1.0},
         ]
+        # quote_for_buy сам по себе считает boost; покупки всё равно режет places_buys.
         self.assertEqual(
             policy.probe_quote_for_buy(legs=legs, prices={"AAA": 103.5, "BBB": 51.6}),
             policy.PROBE_BOOST_USD,

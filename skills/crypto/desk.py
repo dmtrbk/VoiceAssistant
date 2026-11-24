@@ -216,20 +216,8 @@ class CryptoDeskMixin:
             )
             self._desk_thread.start()
             common._desk_loop_started = True
-            try:
-                from .crypto_ai_radar import CryptoAIRadar
-
-                if getattr(self, "_ai_radar", None) is None:
-                    self._ai_radar = CryptoAIRadar(self)
-                self._ai_radar.sync_enabled()
-            except Exception as exc:
-                logger.warning("[Крипта] AI-радар старт: %s", exc)
-            try:
-                from crypto_probe_watch import start_probe_watch_thread
-
-                start_probe_watch_thread(notify_on_start=False)
-            except Exception:
-                pass
+            # AI-радар / probe-watch — часть автоторгового контура, снят с рантайма.
+            # Архив: _archive/spot_desk_20261124/
 
     def on_disabled(self) -> None:
         self._desk_enabled.clear()
@@ -951,9 +939,8 @@ class CryptoDeskMixin:
         return phrase
 
     def _desk_ready(self) -> bool:
+        """Готовность фонового контура. Автоторговля всегда off — см. _auto_trade_enabled."""
         if not self._desk_enabled.is_set():
-            return False
-        if not common._auto_trade_enabled():
             return False
         try:
             from skill_settings import is_skill_enabled
@@ -963,6 +950,10 @@ class CryptoDeskMixin:
         except Exception:
             pass
         return True
+
+    def _desk_trading_ready(self) -> bool:
+        """Боевые заявки стола (щуп/карманы). Всегда false после снятия спот-алго."""
+        return False
 
     def _probe_bars(
         self,
@@ -1058,6 +1049,8 @@ class CryptoDeskMixin:
             return None
 
     def _probe_cycle(self) -> None:
+        if not self._desk_trading_ready():
+            return
         with common._TRADE_LOCK:
             try:
                 self._probe_locked()
@@ -2889,6 +2882,8 @@ class CryptoDeskMixin:
 
     def _pockets_tick(self) -> None:
         """Раз в минуту SOL: локальный откат; второй карман — handoff и ручные ноги."""
+        if not self._desk_trading_ready():
+            return
         if not getattr(self, "_api_key", ""):
             return
         with common._TRADE_LOCK:
@@ -2971,28 +2966,31 @@ class CryptoDeskMixin:
             logger.warning("[Крипта] дневной отчёт: %s", exc)
 
     def _desk_loop(self) -> None:
+        """Базовый слой без алго-входов.
+
+        Живут: WS-лента, reconcile с биржей, Earn-парковка, дневной журнал/отчёт.
+        Сняты: щуп/карманы/ребаланс-заявки (архив `_archive/spot_desk_20261124/`).
+        Обёртки Limit IOC / post-only в trades.py не трогаем — нужны linear-контуру.
+        """
         try:
             self._ensure_tape()
             self._sync_tape_symbols()
         except Exception as exc:
             logger.warning("[Крипта] лента старт: %s", exc)
+        logger.info("[Крипта] базовый слой: лента/reconcile/earn/журнал (без автоалго)")
         self._desk_stop.wait(5)
-        next_probe = 0.0
         next_report = time.time() + _DESK_PERIOD_SEC
+        next_base = time.time() + 60.0  # reconcile + earn раз в минуту
         while not self._desk_stop.is_set():
             if not self._desk_ready():
                 if self._desk_stop.wait(2.0):
                     return
                 continue
             now = time.time()
-            if next_probe <= 0:
-                next_probe = now
-            armed = bool(probe_arms())
-            gap = PROBE_ARMED_PERIOD_SEC if armed else probe_period_sec()
-            wake_at = min(next_probe, next_report)
+            wake_at = min(next_report, next_base)
             tape = getattr(self, "_bybit_tape", None)
             while time.time() < wake_at:
-                remaining = min(2.0, wake_at - time.time())
+                remaining = min(5.0, wake_at - time.time())
                 if remaining <= 0:
                     break
                 if tape is not None:
@@ -3001,12 +2999,6 @@ class CryptoDeskMixin:
                         return
                     if fired:
                         tape.consume_signals()
-                        self._pockets_tick()
-                        # Тикер щупа будит выходы сразу, не ждём next_probe / конец скана.
-                        try:
-                            self._probe_exits_tick()
-                        except Exception as exc:
-                            logger.warning("[Крипта] щуп выход по ленте: %s", exc)
                         break
                 elif self._desk_stop.wait(remaining):
                     return
@@ -3019,25 +3011,26 @@ class CryptoDeskMixin:
                 self._reload_env()
             except Exception as exc:
                 logger.warning("[Крипта] env: %s", exc)
+            if now >= next_base:
+                try:
+                    self._reconcile_desk_state()
+                except Exception as exc:
+                    logger.warning("[Крипта] reconcile: %s", exc)
+                try:
+                    self._earn_park_idle()
+                except Exception as exc:
+                    logger.warning("[Крипта] earn park: %s", exc)
+                try:
+                    self._sync_tape_symbols()
+                except Exception as exc:
+                    logger.warning("[Крипта] лента sync: %s", exc)
+                next_base = time.time() + 60.0
             if now >= next_report:
                 try:
                     self._maybe_daily_report()
                 except Exception as exc:
                     logger.warning("[Крипта] отчёт: %s", exc)
                 next_report = time.time() + _DESK_PERIOD_SEC
-            if now >= next_probe:
-                try:
-                    self._pockets_tick()
-                except Exception as exc:
-                    logger.warning("[Крипта] карманы: %s", exc)
-                try:
-                    self._probe_cycle()
-                    self._sync_tape_symbols()
-                except Exception as exc:
-                    logger.warning("[Крипта] щуп: %s", exc)
-                armed = bool(probe_arms())
-                gap = PROBE_ARMED_PERIOD_SEC if armed else probe_period_sec()
-                next_probe = time.time() + gap
         tape = getattr(self, "_bybit_tape", None)
         if tape is not None:
             tape.stop()

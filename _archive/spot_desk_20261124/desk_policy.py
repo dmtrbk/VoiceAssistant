@@ -1,0 +1,3434 @@
+# skills/crypto/desk_policy.py
+# Правила щупа и кармана. Рукав/alloc — desk_policy_legacy.py.
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import json
+import os
+import time
+from typing import Any
+
+_YEKT = timezone(timedelta(hours=5))
+
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROBE_TUNE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe_tune.json")
+_DAILY_META_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_daily.json")
+_NIGHT_LIFT_KEY = "probe_night_lift_until"
+
+# Рукав альтов: до 50% счёта, 2 слота. Карман SOL 25%. Остаток — кэш и щупы.
+# Берём только на провале у нижней полосы.
+DESK_ALT_SLEEVE = frozenset({
+    "BTC", "ETH",
+    "SOL", "XRP", "DOGE", "LINK", "AVAX", "SUI", "AVA", "NEAR", "ADA", "MNT", "BNB", "APT", "DOT",
+})
+ALT_SLEEVE_MAX_PCT = 50.0
+ALT_MAX_NAMES = 2
+# 2 охотника (ракеты со дна) + 1 снайпер (пин). Третий слот обычным сетапам не отдаём.
+PROBE_MAX_LEGS = 3
+PROBE_HUNTER_MAX_LEGS = 2
+PROBE_SNIPER_MAX_LEGS = 1
+# BTC за сутки в минусе — не раздувать слоты (сейчас probe_max_legs сутки BTC не режет).
+PROBE_MAX_LEGS_BTC_DOWN = 2
+# Сколько переданных с щупа ног держит второй карман (отдельно от щупа).
+POCKET_FROM_PROBE_MAX = 6
+# Мягкий выход щупа → передача во второй карман; жёсткий — продажа.
+# «дно» не передаём: цена уже у low щупа — карман2 сразу резал бы тем же дном.
+PROBE_HANDOFF_REASONS = frozenset({"ожидание", "тренд", "застой"})
+PROBE_SELL_REASONS = frozenset({"стоп", "полка", "безубыток", "вершина", "дно", "срез"})
+PROBE_CANDLE_STALE_SEC = 2 * 3600
+# Срез только если сломана полка. 3 минуты — дыхание 5м свечи. Слив режет кап −1.8%.
+PROBE_FAIL_SCRATCH_SEC = 180.0
+# Нет взвода ловушки и цена ниже входа ≥ 18м — «срез».
+# 10м = 2×5м: резали ретест/флаг на taker round-trip (TA/SPX/ONDO).
+PROBE_NO_TRAP_TIMEOUT_SEC = 18 * 60
+# Срез по таймауту только в минусе глубже комиссии-шума, не на нуле.
+# Gross ±0%: после taker×2 (~0.36%) уже минус — 18м режет только явный минус цены.
+PROBE_NO_TRAP_MIN_LOSS_PCT = 0.20
+# Плоский чоп (−0.19…+0.50%) без трапа: не висеть вечно — 45м ≈ 9×5м.
+PROBE_NO_TRAP_MAX_STALE_SEC = 45 * 60
+PROBE_NO_TRAP_MAX_STALE_GAIN_PCT = 0.50
+# Минимальная доля want при Buy: после лосей буфер $118 → 3-й слот не отваливается на 0.9×$40.
+PROBE_MIN_QUOTE_FRAC = 0.85
+# Лимитный тейк на всю ногу сразу после покупки. Стоп и срез остаются маркетом.
+PROBE_LIMIT_TP_PCT = 4.5
+# Жёсткий режим (час/серия/полка): короче тейк и раньше BE — рынок в распиле.
+PROBE_STRICT_LIMIT_TP_PCT = 2.2
+PROBE_STRICT_FAST_BE_PEAK_PCT = 0.7
+# После «среза» не входить в ту же пилу сразу (TA/CARV/GROVE по 4–5 раз).
+PROBE_SCRATCH_COOLDOWN_SEC = 20 * 60
+# Парковка в карман2 ради свободного слота: свежую ногу не трогаем.
+PROBE_ROOM_MIN_AGE_SEC = 15 * 60
+POCKET_SCRATCH_PCT = -0.20
+DESK_CASH_FLOOR_PCT = 25.0
+DESK_CASH_FLOOR_BULL_PCT = 8.0
+REBALANCE_BAND_PCT = 6.0
+REBALANCE_BAND_ALT_PCT = 8.0
+# Исключение по неделе: вход при 7д ≤ −5%, выход при 7д ≥ −1%.
+# Между этими порогами список не прыгает.
+EXCLUDE_ENTER_CHG7 = -5.0
+EXCLUDE_EXIT_CHG7 = -1.0
+BTC_RISK_OFF_7D = -5.0
+BTC_RISK_OFF_DAY = -3.0
+BTC_BULL_7D = 5.0
+# Альты: Боллинджер 4h (MA20 ± 2σ), равные слоты рукава. Пороги подобраны crypto_backtest.py
+# (333 дня часовых свечей Bybit; рыночные заявки — taker 0.18% за сторону, проверено и на 0.1%).
+ALT_BB_INTERVAL = "240"
+ALT_BB_ENTRY_Z = -2.5
+# 0,4% ловил шум в начале падения. Нужен заметный отскок, и дно не должно обновляться.
+ALT_ENTRY_BOUNCE_PCT = 1.5
+ALT_ENTRY_HOLD_SEC = 5 * 60
+ALT_ENTRY_STILL_Z = -1.2
+ALT_ENTRY_CANCEL_Z = -0.5
+POCKET_ENTRY_BOUNCE_PCT = 1.0
+POCKET_ENTRY_HOLD_SEC = 10 * 60
+# Карман SOL и AVA: откат от верха последних 4 часов, не только сутки −3%.
+POCKET_SWING_PCT = 3.0
+POCKET_SWING_BARS = 16
+# Живой выход рукава — ловушка вершины, не касание средней.
+# Взвод: рост покрыл taker×2 + $0.50. Продажа на откате −0,5% после 2 минут, плюс ещё ≥ порога взвода.
+# Прогон выше +8% не режем: это верх рабочей зоны, не потолок.
+ALT_EXIT_ARM_PCT = 3.0  # устаревший %; живой взвод — exit_trap_arm_pct()
+ALT_EXIT_PULLBACK_PCT = 0.5
+ALT_EXIT_HOLD_SEC = 2 * 60
+ALT_EXIT_MIN_GAIN_PCT = 1.0  # старый порог у средней; его держит crypto_backtest.py
+ALT_STOP_LOSS_PCT = 4.0
+# Выше этого % от дна — догон, сетап рукава сбрасываем (как CAP +20% пока ждали свечу).
+ALT_CHASE_PCT = 5.0
+ALT_HELD_MIN_USD = 5.0  # меньше — пыль, не позиция
+MIN_TURNOVER_USD = 5_000_000.0
+# Суточный потолок +25% остался только у impulse: уже разогнанную свечу не догоняем.
+# Ловушка кармана/рукава: круг комиссий (taker 0,18% × 2) + $0.12 сверх (на $40 ~+0.66%).
+# Щуп impulse/grind: взвод ~+1.56% на $40 и откат 1.50% — первый выдох тренда не продаём.
+# Candle/spark/pop: запас $0.38 → взвод ~+1.31% на $40; выход «вершина» ≥ +0.60%.
+# Откат 0.45%, иначе мелкий пик после отката не покрывает комиссию.
+# Пик от +4% — откат 1.0%. Убыток глубже −1.4% режем сразу, не ждём полку свечи.
+# После пика +1.2% полка не ниже входа: возврат к entry−0.2% закрываем.
+# После продажи «полка» ту же монету не берём 90 минут.
+EXIT_FEE_SIDE = 0.0018
+EXIT_TRAP_EXTRA_USD = 0.12
+PROBE_TRAP_EXTRA_USD = 0.48
+PROBE_TRAP_PULLBACK_PCT = 1.50
+# Раньше $0.25 → взвод ~+0.99% на $40 → «вершина» в 0.00$ (APEX). $0.38 → ~+1.31%.
+PROBE_FAST_TRAP_EXTRA_USD = 0.38
+PROBE_FAST_TRAP_PULLBACK_PCT = 0.45
+PROBE_FAST_TRAP_RUN_PCT = 4.0
+PROBE_FAST_TRAP_RUN_PULLBACK_PCT = 1.0
+# Минимум net% на выходе «вершина»: 2×taker=0.36% оставлял ноль после спреда; 0.60% — запас.
+PROBE_TRAP_MIN_EXIT_PCT = 0.60
+
+# Жёсткий короткий стоп и BE: не зависят от PROBE_SHELF_EXIT_ON (пробой open выкл.).
+# Ракеты: −1.4% ловит шум; глубже −1.8% режем всегда (не зависит от PROBE_SHELF_EXIT_ON).
+PROBE_FAST_LOSS_CAP_PCT = 1.8
+PROBE_FAST_BE_PEAK_PCT = 1.2
+PROBE_FAST_BE_BUFFER_PCT = 0.1
+# Пробой open/полки выкл. (дефолт). −1.4% и BE после пика — всегда.
+PROBE_SHELF_EXIT_ON = False
+# После «полки» не входить в ту же монету сразу (серия лосей на сползающем тренде).
+PROBE_SHELF_REENTRY_SEC = 90 * 60
+EXIT_TRAP_DEFAULT_COST_USD = 100.0
+
+# Стейблы не рукав, даже если оборот большой. Базовый список остаётся всегда.
+SLEEVE_SKIP = frozenset({
+    "USDT", "USDC", "DAI", "FDUSD", "USDE", "USDS", "USD1", "RLUSD",
+    "TUSD", "USDD", "PYUSD", "USDY", "USDP", "GUSD", "EURC", "EUR", "USD",
+    # Bybit xStocks (токены акций) — не крипто-импульс щупа (CRCLX срез −0.13$).
+    "AAPLX", "AMZNX", "COINX", "CRCLX", "GOOGLX", "HOODX",
+    "MCDX", "METAX", "NVDAX", "SPCXX", "TSLAX",
+})
+_live_extra: set[str] = set()
+# Щуп: 40$ на пробой тихой полки / свечи. Не слот рукава и не карман.
+PROBE_USD = 40.0
+# Днём ≥ $500k: хвост $150k — пустой стакан и фитили. Ночь — тот же пол.
+# Жёсткий режим после убытков — ≥ $800k. $1.5M вырезал ракеты из сканера.
+PROBE_MIN_TURNOVER_USD = 500_000.0
+PROBE_NIGHT_MIN_TURNOVER_USD = 500_000.0
+# Жёсткий режим ≥ $650k (раньше $800k резал LA/MOCA на разгоне).
+PROBE_STRICT_MIN_TURNOVER_USD = 650_000.0
+
+PROBE_NIGHT_START_HOUR_YEKT = 23
+PROBE_NIGHT_END_HOUR_YEKT = 6
+# Защита от падающего рынка: сутки BTC / flash 15м / ширина рынка.
+PROBE_MARKET_FALL_ON = True
+PROBE_BTC_MAX_DROP_DAY_PCT = -2.5
+PROBE_BTC_FLASH_DROP_PCT = -1.0
+PROBE_BTC_FLASH_BARS = 3
+# Ширина — live-стоп без часового залипания. Ниже 16% или пролив BTC.
+# 21–24% на споте альт ещё стреляет в одиночку, скан не глушим.
+PROBE_MIN_MARKET_BREADTH_PCT = 16.0
+# Часовая пауза только после пролива BTC (сутки / flash), не из-за ширины.
+PROBE_MARKET_FALL_PAUSE_SEC = 3600.0
+PROBE_HOURLY_MAX_LOSS_USD = 1.50
+PROBE_MAX_CONSECUTIVE_LOSSES = 3
+PROBE_STREAK_PAUSE_SEC = 3600.0
+# Серия strict: только системный лось ≥ 1% cost (полка/стоп). Скрэтч −$0.10 — опцион, не бан.
+PROBE_STREAK_MIN_LOSS_PCT = 1.0
+# Таймаут-срез с мизерным PnL (>$−0.25) в серию не входит, даже если % формально жёсткий на пыли.
+PROBE_STREAK_IGNORE_SCRATCH_USD = 0.25
+# Fade-the-pump: 2 полки/стопа подряд быстрее 3м → полный стоп входов на 45м.
+PROBE_FAST_DUMP_MAX_HOLD_SEC = 180.0
+PROBE_FAST_DUMP_COUNT = 2
+PROBE_FAST_DUMP_PAUSE_SEC = 45 * 60
+PROBE_FAST_DUMP_REASONS = frozenset({"полка", "стоп"})
+# После среза «полка» не перерабатывать слот в тот же чоп (ZAMA→DOOD, LA→INIT).
+PROBE_SHELF_COOLDOWN_SEC = 25 * 60
+PROBE_SHELF_COOLDOWN_LOSS_USD = 0.25
+# Жёсткий режим (оборот $650k, OBI 0.60) только на свои локальные убытки.
+# Дневной −$6 — полный стоп входов. Падающий рынок — PROBE_MARKET_FALL_ON.
+PROBE_STRICT_MODE = True
+PROBE_RISING_BTC_MIN_PCT = 0.0
+PROBE_RISING_BREADTH_PCT = 50.0
+# Ракеты со дна: утренний слив −4..−12% не должен давать -inf в сканере.
+PROBE_DAY_MIN_PCT = -15.0
+PROBE_NEAR_HIGH = 0.99
+PROBE_BOUNCE_MIN_PCT = 8.0
+PROBE_BOUNCE_NEAR_HIGH = 0.92
+PROBE_SHELF_MAX_RANGE_PCT = 12.0
+PROBE_BREAK_MIN_PCT = 4.0
+PROBE_BREAK_MAX_PCT = 12.0
+PROBE_VOL_MULT = 3.0
+PROBE_LOCAL_BARS = 8
+PROBE_LOCAL_VOL_MULT = 2.0
+PROBE_LOCAL_DRIFT_PCT = 2.5
+PROBE_ENTRY_HOLD_SEC = 90
+PROBE_CHASE_PCT = 4.0
+PROBE_SHELF_DRIFT_PCT = 1.5
+PROBE_SHELF_DRIFT_BARS = 8
+PROBE_RUN_PCT = 6.0
+PROBE_MAX_LOSS_PCT = 8.0
+# Бой: пул 25 — монеты со дна в поле зрения до пампа (Топ-5 опаздывал).
+PROBE_SCAN_LIMIT_LIVE = 25
+PROBE_SCAN_CLASSIC_LIMIT_LIVE = 25
+PROBE_SCAN_MANDATORY_TOP_LIVE = 25
+# Доп. слоты: отскок от дневного low (прокси RVOL без 5м на всей ленте).
+PROBE_ROCKET_MIN_BOUNCE_PCT = 2.0
+PROBE_ROCKET_SCAN_SLOTS = 10
+PROBE_SCAN_LIMIT_PAPER = 128
+PROBE_SCAN_CLASSIC_LIMIT_PAPER = 50
+PROBE_SCAN_MANDATORY_TOP_PAPER = 50
+# Совместимость импортов/реплеев: по умолчанию боевые лимиты.
+PROBE_SCAN_LIMIT = PROBE_SCAN_LIMIT_LIVE
+PROBE_SCAN_CLASSIC_LIMIT = PROBE_SCAN_CLASSIC_LIMIT_LIVE
+PROBE_SCAN_MANDATORY_TOP = PROBE_SCAN_MANDATORY_TOP_LIVE
+# Чаще сканируем: растущую 5м свечу надо брать в первой половине, не раз в минуту у хая.
+PROBE_PERIOD_SEC = 10
+PROBE_ARMED_PERIOD_SEC = 6
+# После любой продажи щуп не возвращается в ту же монету сразу (KAS: вершина → тот же grind).
+# Короткий блок: иначе BLEND слили и 2ч не вернулись в памп.
+PROBE_REENTRY_HOURS = 0.75
+# Если цена уже выше продажи на этот % — блок снимаем (продолжение хода).
+PROBE_REENTRY_BREAKOUT_PCT = 2.5
+# Мягкий автопин: смотрит имя первым, слот не занимает.
+PROBE_PIN_ON = True
+PROBE_PIN_MIN_TURNOVER_USD = 600_000.0
+# ≥+7% суток: ранний MOCA (+2.6%→+14%) поймаем позже; без порога — шум мажоров/дна.
+PROBE_PIN_MIN_DAY_PCT = 7.0
+PROBE_PIN_MAX_DAY_PCT = 35.0
+# Мажоры почти никогда не дают +1.5%/10м — занимали все 16 слотов хода пина.
+PROBE_PIN_MAJOR_SKIP = frozenset({
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "SUI",
+    "BNB", "DOT", "TRX", "MATIC", "LTC", "BCH", "NEAR", "APT", "TON",
+    "ATOM", "UNI", "AAVE", "MNT",
+})
+
+# Перехай суток — нормальный сетап. Глубже −0.5% от записанного хая уже догон.
+PROBE_PIN_MIN_ROOM_PCT = -0.5
+PROBE_PIN_MAX_ROOM_PCT = 12.0
+PROBE_PIN_DROP_ROOM_PCT = -0.5
+PROBE_PIN_HOLD_SEC = 45 * 60
+PROBE_PIN_MAX_HOLD_SEC = 3 * 3600
+PROBE_PIN_TOP_N = 30
+PROBE_PIN_KEEP_TOP_N = 8
+PROBE_PIN_MIN_SCORE = 45.0
+PROBE_PIN_MOVE_PCT = 1.5
+# 2 живых 5м ≈ 10 минут: зарождение хода, не середина пятнадцатиминутного тренда.
+PROBE_PIN_MOVE_BARS = 2
+PROBE_PIN_MOVE_VOL_MULT = 1.5
+PROBE_PIN_SWITCH_PCT = 0.3
+PROBE_PIN_LOSS_LOOKBACK_SEC = 45 * 60
+# Убыток до $1 на сильном дне пин не банит. Перехай +2.5% над продажей снимает бан сразу.
+PROBE_PIN_SCRATCH_IGNORE_USD = 1.00
+PROBE_PIN_SWITCH_SCORE_MULT = 1.15
+# Пин-ретест: откат 0.4–1.5% от локального хая, объём не пустой, отбой вверх.
+PROBE_PIN_PULLBACK_MIN_PCT = 0.4
+PROBE_PIN_PULLBACK_MAX_PCT = 1.5
+PROBE_PIN_VOL_MULT = 1.2
+PROBE_PIN_WICK_FRAC = 0.40
+# Снайпер дышит: взвод +1.5%, трейлинг 1.2%. −1.8% и BE +1.2% общие.
+PROBE_PIN_ARM_PCT = 1.5
+PROBE_PIN_TRAIL_PCT = 1.2
+PROBE_NIGHT_PIN_MAX_LEGS = 2
+PROBE_EMA_FAST = 20
+PROBE_EMA_SLOW = 50
+PROBE_SHELF_BARS = 96
+# Только живая свеча (INIT: open→середина бара → ловушка).
+# Impulse/sprint/shelf сегодня: CPOOL/HYPE — поздний вход и срез за минуты.
+PROBE_ALGO_CANDLE = "candle"
+PROBE_ALGO_IMPULSE = "impulse"
+PROBE_ALGO_SPARK = "spark"
+PROBE_ALGO_POP = "pop"
+PROBE_ALGO_PIN = "pin_pullback"
+PROBE_ALGO_GRIND = "grind"
+PROBE_ALGO_SPRINT = "sprint"
+PROBE_ALGO_SHELF = "shelf"
+# Сначала выстрел/подскок (ракеты), потом spark/ступенька.
+PROBE_ALGO_ORDER = (
+    PROBE_ALGO_IMPULSE,
+    PROBE_ALGO_POP,
+    PROBE_ALGO_SPARK,
+    PROBE_ALGO_CANDLE,
+)
+# 5м зелёная свеча: ловим начало восходящей свечи от open, без верхнего фитиля (слива).
+PROBE_CANDLE_LOOKBACK = 12
+# 0,25% ловил шум (CSPR/BICO +0,5%). INIT был +0,67…1,3% от open.
+PROBE_CANDLE_MIN_BODY_PCT = 0.6
+PROBE_CANDLE_MAX_BODY_PCT = 2.0
+# Середина и верх восходящей свечи. Pos до 1.0: px == hi не «кончик», а импульс.
+PROBE_CANDLE_MIN_BAR_POS = 0.35
+PROBE_CANDLE_MAX_BAR_POS = 1.0
+# Верхний фитиль ≤ 0.90% от open. У хая без фитиля слива (ratio ≤ 0.10) — вход ок.
+PROBE_CANDLE_MAX_WICK_PCT = 0.90
+PROBE_CANDLE_MAX_DIP_PCT = 0.80
+PROBE_CANDLE_TIP_GAP_PCT = 0.05
+# Доля верхней тени от (high−low): ≤10% — чистый импульс у хая, tip_cap не режем.
+PROBE_CANDLE_TIP_WICK_RATIO = 0.10
+# В первые минуты 5м свечи нормируем порог объёма по доле прошедшего времени (min 0.30 бара).
+PROBE_CANDLE_MIN_ELAPSED_FRAC = 0.30
+# OBI-surge: раньше 0.30 глушил ракету в 1-й минуте (сырой V << 2×median).
+PROBE_OBI_SURGE_MIN_ELAPSED_FRAC = 0.15
+# Касание open — фитиль той же свечи, не провал. Полка — только уход под open.
+PROBE_CANDLE_SHELF_BREAK_PCT = 0.4
+PROBE_CANDLE_VOL_MULT = 1.5
+PROBE_CANDLE_PRIOR_MAX_BODY_PCT = 5.0
+# Hold 0: как spark/pop — buy сразу в _probe_try_arm, без Earn-пинг-понга на 20–50с.
+PROBE_CANDLE_HOLD_SEC = 0
+PROBE_CANDLE_CHASE_PCT = 1.2
+
+# Запас хода до хая суток ≥ 1% (режет BR/PORTAL под самым пиком, пускает BLUR/BEAM/BIRB/EDGE), без перегрева ≥45%.
+PROBE_CANDLE_MAX_DAY_PCT = 45.0
+PROBE_CANDLE_MIN_DAY_ROOM_PCT = 1.0
+# Перехай суток для spark/pop: запас может быть нулевым и чуть отрицательным.
+PROBE_BREAKOUT_MIN_ROOM_PCT = -0.5
+PROBE_CANDLE_MAX_DAY_DROP_PCT = 28.0
+# Отсечение перегрева за 30м (>2.2%), кульминации объёма на пред. баре (>6.5x) и верхних фитилей слива (>0.85%).
+PROBE_CANDLE_MAX_30M_CHG_PCT = 8.0
+PROBE_CANDLE_MAX_PRIOR_VOL_MULT = 6.5
+PROBE_CANDLE_MAX_PREV3_WICK_PCT = 0.85
+# Ступенька (3 зелёных 5м бара подряд с растущими low и close, как TREE/BIRB/WET/MPLX):
+# на 3-м баре цена идёт плотно у верха (pos ≥ 0.70, wick ≤ 0.30%), допускаем room ≥ 0.3%,
+# и требуем поджатие к верхней границе часового диапазона (pos_in_1h ≥ 0.85).
+PROBE_STAIR_MIN_RISE_PCT = 0.70
+PROBE_STAIR_MAX_RISE_PCT = 2.40
+PROBE_STAIR_MIN_BODY_PCT = 0.20
+PROBE_STAIR_MAX_BODY_PCT = 1.50
+PROBE_STAIR_MIN_BAR_POS = 0.70
+PROBE_STAIR_MAX_WICK_PCT = 0.30
+PROBE_STAIR_MAX_DIP_PCT = 0.35
+PROBE_STAIR_VOL2_MULT = 1.5
+PROBE_STAIR_VOL_MIN_MULT = 1.1
+PROBE_STAIR_MIN_DAY_ROOM_PCT = 0.3
+PROBE_STAIR_MIN_1H_POS = 0.85
+# Быстрая 2-свечная ступенька (prior зелёная + forming пробивает prior.high с общим ростом 0.80..1.80%):
+PROBE_STAIR2_MIN_RISE_PCT = 0.80
+PROBE_STAIR2_MAX_RISE_PCT = 1.80
+PROBE_STAIR2_MIN_BODY_PCT = 0.25
+PROBE_STAIR2_MAX_BODY_PCT = 1.20
+PROBE_STAIR2_MIN_BAR_POS = 0.72
+PROBE_STAIR2_MAX_WICK_PCT = 0.25
+PROBE_STAIR2_MAX_DIP_PCT = 0.30
+PROBE_STAIR2_VOL2_MULT = 1.6
+PROBE_STAIR2_VOL_MIN_MULT = 1.2
+PROBE_STAIR2_MIN_1H_POS = 0.88
+# Защита от проскальзывания по пустому стакану перед рыночной покупкой щупа (GROVE 0.007281->0.007409):
+PROBE_MAX_SPREAD_PCT = 0.55
+# ERA: arm 0.092 → ask/fill 0.0935 (+1.63%). Потолок +0.6% от взвода.
+PROBE_MAX_BUY_SLIP_PCT = 0.60
+PROBE_MAX_ASK_SLIP_PCT = PROBE_MAX_BUY_SLIP_PCT  # alias: book_buy_ok / логи
+# Ракеты: Limit IOC вместо Market — потолок min(ask×1.002, arm×(1+slip)).
+PROBE_BUY_IOC_ASK_PAD_PCT = 0.20
+PROBE_BUY_IOC_SLIP_PCT = 0.40
+PROBE_BUY_IOC_STRICT_SLIP_PCT = 0.22
+PROBE_BUY_IOC_ALGOS = frozenset({
+    "candle", "spark", "pop", "impulse", "pin_pullback",
+})
+# One-candle pump на плече: если OI linear за 5м вырос >8% — спот не берём.
+PROBE_MAX_OI_SPIKE_PCT = 8.0
+# Глубина ask в пределах проскальзывания (не жёсткие 3 тика на дешёвых монетах).
+PROBE_ASK_DEPTH_LEVELS = 25
+PROBE_ASK_DEPTH_SLIP_PCT = 0.40
+PROBE_ASK_DEPTH_MAX_QUOTE_FRAC = 0.15
+
+# Дешёвые монеты (<$0.01): тик раздувает % спреда (DEGEN 0.82% при пороге 0.55).
+PROBE_LOW_NOMINAL_PX = 0.01
+PROBE_LOW_NOMINAL_MAX_SPREAD_PCT = 1.0
+PROBE_LOW_NOMINAL_SPREAD_TICKS = 3.0
+# Buy-ok: микрососкальзывание тела после взвода (CPOOL 1.491% < 1.50%) не tip.
+PROBE_BUY_BODY_SLACK = 0.92
+# OBI на каждом входе. Нет котировки стакана — не блокируем.
+PROBE_MIN_ENTRY_OBI = 0.55
+# При всплеске объёма ask уплотняется тейками — сырой OBI падает, импульс жив (TIA/CPOOL).
+PROBE_MIN_ENTRY_OBI_SURGE = 0.35
+PROBE_STRICT_MIN_ENTRY_OBI_SURGE = 0.40
+PROBE_OBI_SURGE_VOL_MULT = 2.0
+# Жёсткий режим (бывшие паузы: полка, час, серия, день): щуп не молчит, фильтры туже.
+PROBE_STRICT_MIN_ENTRY_OBI = 0.60
+PROBE_STRICT_MAX_SPREAD_PCT = 0.20
+PROBE_STRICT_MAX_ASK_SLIP_PCT = 0.25
+# Жёсткий дневной риск-лимит (Daily Max Drawdown) на новые входы щупа.
+PROBE_DAILY_LOSS_ON = True
+PROBE_DAILY_MAX_LOSS_USD = 6.0
+PROBE_SPRINT_HOLD_SEC = 30
+PROBE_SPRINT_CHASE_PCT = 5.0
+# 8 с на выстреле — вечность: цена уходит, и вход снимает догон. Как у spark/pop — сразу.
+PROBE_IMPULSE_HOLD_SEC = 0
+# Догон impulse = ask-slip (+0.6%): шире — покупаем уже на вершине выноса.
+PROBE_IMPULSE_CHASE_PCT = 0.6
+PROBE_IMPULSE_LOOKBACK = 12
+PROBE_IMPULSE_VOL_MULT = 2.5
+PROBE_IMPULSE_BREAK_MIN_PCT = 3.0
+# Выстрел с базы (NAVX +22%): потолок шире 15%, иначе середина импульса уже «поздно».
+PROBE_IMPULSE_BREAK_MAX_PCT = 32.0
+PROBE_IMPULSE_MAX_DAY_PCT = 35.0
+# Вход у хая живой свечи: не снимать, пока цена летит у максимума бара.
+PROBE_IMPULSE_MAX_BAR_POS = 0.99
+PROBE_IMPULSE_TIP_GAP_PCT = 0.05
+# Spark: одиночная 5м в начале бара. Покупка сразу (hold 0): иначе 6–10с до buy и tip.
+# Pos до хая бара — ранняя свеча часто закрывается у high.
+# Spark на любой монете: 2.2× типичного. 1.5× шумит, 3× глушит импульс.
+PROBE_SPARK_VOL_MULT = 2.2
+PROBE_SPARK_MAX_ELAPSED_SEC = 120.0
+PROBE_SPARK_MAX_BAR_POS = 1.0
+PROBE_SPARK_HOLD_SEC = 0.0
+PROBE_SPARK_CHASE_PCT = 1.2
+# Spark/pop после дневного пампа: +22% вечером — излёт, не ракета со дна (TA).
+PROBE_SPARK_MAX_DAY_PCT = 18.0
+PROBE_POP_MAX_DAY_PCT = 18.0
+# Pop: вертикальные свечи. 4.2%/0.5%/5.5% браковали ракеты +6..+15%.
+PROBE_POP_MIN_BODY_PCT = 1.5
+PROBE_POP_MAX_BODY_PCT = 8.5
+PROBE_POP_MAX_ELAPSED_SEC = 300.0
+PROBE_POP_VOL_MULT = 2.2
+# Дно (сутки ≤ +2%): шум 1.5×/тело 1.5% кормит комиссию. Ракета даёт 3× и тело от 2.3%.
+PROBE_BOTTOM_MAX_DAY_PCT = 2.0
+PROBE_BOTTOM_VOL_MULT = 3.0
+PROBE_BOTTOM_POP_MIN_BODY_PCT = 2.3
+PROBE_POP_MAX_WICK_PCT = 1.80
+PROBE_POP_MAX_30M_CHG_PCT = 16.0
+PROBE_POP_HOLD_SEC = 0.0
+PROBE_POP_CHASE_PCT = 2.0
+# Grind: горячее candle нельзя; у хая дня (+25%) — уже догон.
+PROBE_GRIND_MAX_DAY_PCT = 18.0
+# Лестница: ближе к началу хода, не только у самого хая. Свежий пробой +4% — не grind.
+PROBE_GRIND_BARS = 16
+PROBE_GRIND_NEAR_HIGH = 0.97
+PROBE_GRIND_MIN_RISE_PCT = 3.0
+# Окно 4ч уже уехало сильнее — это не свежая лестница, а догон хая.
+PROBE_GRIND_MAX_RISE_PCT = 10.0
+PROBE_GRIND_MAX_EXT_PCT = 4.0
+PROBE_GRIND_MAX_BAR_PCT = 8.0
+# Живая свеча — не вертикальный выстрел и не покупка у её хая.
+PROBE_GRIND_MAX_LIVE_BAR_PCT = 1.5
+# Абсолютный откат от high + не в верхней доле диапазона свечи.
+PROBE_GRIND_TIP_GAP_PCT = 1.2
+PROBE_GRIND_TIP_FRAC = 0.45
+PROBE_GRIND_FLOOR_BARS = 4
+PROBE_GRIND_HOLD_SEC = 10
+# После взвода почти не догоняем — иначе берём пик той же свечи.
+PROBE_GRIND_CHASE_PCT = 0.5
+# Уже держанное: при сильном дневном пампе фиксируем избыток даже внутри коридора.
+TAKE_PROFIT_DAY_PCT = 18.0
+TAKE_PROFIT_ALT_DAY_PCT = 12.0  # альты раньше фиксируем на подъёме
+# Дозор (~12 мин): выход альтов и новые входы у нижней полосы.
+WATCH_TP_DAY_PCT = 12.0
+WATCH_TP_ALT_DAY_PCT = 8.0
+# Карман SOL: 25% счёта на дневной просадке.
+# Уже открытый карман не добираем: новый размер — со следующего входа.
+BTC_DIP_TICKER = "SOL"
+BTC_DIP_PCT = 25.0
+BTC_DIP_DAY_PCT = -3.0
+# Устаревший фиксированный %; живой взвод кармана — exit_trap_arm_pct().
+BTC_DIP_EXIT_PCT = 1.1
+# Второй карман: те же сутки и отскок, фиксированные 50$ вместо доли счёта.
+SUI_DIP_TICKER = "AVA"
+SUI_DIP_USD = 50.0
+# Карман дышит как снайпер: взвод от +1.5%, продажа на откате 1.2% от вершины.
+POCKET_EXIT_PULLBACK_PCT = 1.2
+POCKET_EXIT_WALL_PULLBACK_PCT = 0.20
+POCKET_EXIT_DEEP_PULLBACK_PCT = 1.2
+POCKET_EXIT_HOLD_SEC = 60
+# Срочный выход из кармана2: продаём, пока bid не хуже последней цены больше чем на 0.45%.
+POCKET_UNWIND_MAX_BID_GAP_PCT = 0.45
+EXIT_TRAP_BEAR_OBI = 0.28
+EXIT_TRAP_BULL_OBI = 0.72
+BTC_DIP_STOP_PCT = 15.0
+WATCH_MAX_TRADES_PER_HOUR = 2
+WATCH_PERIOD_CALM = 12 * 60
+WATCH_PERIOD_NEAR = 2 * 60
+WATCH_PERIOD_HOT = 60
+NEAR_TP_PCT = 0.35
+NEAR_SL_PCT = 3.0
+NEAR_MA_PCT = 0.4
+TRAIL_ARM_PCT = 5.0
+TRAIL_ALT_PCT = 8.0
+# После offset — туже, как trailing_stop_positive у Freqtrade.
+TRAIL_POSITIVE_PCT = 4.0
+CHURN_COOLDOWN_HOURS = 12.0
+# Свежекупленный альт не ротируем полным столом (трейл, TP и risk-off продают как обычно).
+ALT_MIN_HOLD_HOURS = 12.0
+
+
+def cfg():
+    """Живые пороги из настроек стола. Нет файла — рабочие числа выше."""
+    from skills.crypto.settings import current
+
+    return current()
+
+
+def read_probe_tune() -> dict[str, Any]:
+    try:
+        with open(_PROBE_TUNE_PATH, encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if isinstance(raw, dict):
+            return raw
+    except Exception:
+        pass
+    return {"tier": 1, "baseline_lifetime": None}
+
+
+def probe_tune_tier() -> int:
+    return max(1, min(4, int(read_probe_tune().get("tier") or 1)))
+
+
+def probe_period_sec() -> float:
+    if probe_tune_tier() >= 2:
+        return 6.0
+    return float(PROBE_PERIOD_SEC)
+
+
+def probe_scan_algo_order() -> tuple[str, ...]:
+    tier = probe_tune_tier()
+    if tier >= 3:
+        return (
+            PROBE_ALGO_CANDLE,
+            PROBE_ALGO_IMPULSE,
+            PROBE_ALGO_SPARK,
+            PROBE_ALGO_POP,
+        )
+    return PROBE_ALGO_ORDER
+
+
+def probe_candle_prior_max_body_pct() -> float:
+    if probe_tune_tier() >= 4:
+        return 6.0
+    return float(PROBE_CANDLE_PRIOR_MAX_BODY_PCT)
+
+
+def probe_candle_min_body_pct() -> float:
+    """Нижняя граница тела candle/spark. Пробой полки — отдельно, probe_break_min_pct."""
+    raw = getattr(cfg(), "probe_candle_min_pct", None)
+    if raw is None:
+        return float(PROBE_CANDLE_MIN_BODY_PCT)
+    return float(raw)
+
+
+def probe_candle_max_body_pct() -> float:
+    """Верхняя граница тела candle/spark. Пробой полки — probe_break_max_pct."""
+    raw = getattr(cfg(), "probe_candle_max_pct", None)
+    if raw is None:
+        return float(PROBE_CANDLE_MAX_BODY_PCT)
+    return float(raw)
+
+
+def update_exclusions(
+    excluded: set[str],
+    rows: list[dict[str, Any]],
+) -> set[str]:
+    """Монеты с неделей ≤ −5% в исключениях. Неделя ≥ −1% — выход из списка.
+
+    Значение между порогами состояние не меняет.
+    """
+    current = {str(ticker).upper() for ticker in excluded}
+    for row in rows:
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker not in sleeve_names():
+            continue
+        chg7 = row.get("chg_7")
+        if chg7 is None:
+            continue
+        week = float(chg7)
+        if ticker not in current and week <= EXCLUDE_ENTER_CHG7:
+            current.add(ticker)
+        elif ticker in current and week >= EXCLUDE_EXIT_CHG7:
+            current.discard(ticker)
+    return current
+
+
+def btc_dip_should_buy(*, day_chg: float | None, qty: float) -> bool:
+    """Покупка кармана, только если его ещё нет и сутки просели."""
+    if qty > 0 or day_chg is None:
+        return False
+    return float(day_chg) <= cfg().pocket_day_pct
+
+
+def exit_trap_arm_pct(
+    *,
+    entry: float = 0.0,
+    qty: float = 0.0,
+    cost_usd: float = 0.0,
+    extra_usd: float | None = None,
+) -> float:
+    """Порог взвода ловушки в %: taker×2 на ногу + extra сверх.
+
+    Нет размера — считаем от типичных $100, чтобы дозор не молчал.
+    extra_usd: карман/рукав $0.12; щуп — PROBE_TRAP_EXTRA_USD.
+    """
+    cost = float(cost_usd or 0)
+    if cost <= 0:
+        ent = float(entry or 0)
+        q = float(qty or 0)
+        if ent > 0 and q > 0:
+            cost = ent * q
+    if cost <= 0:
+        cost = EXIT_TRAP_DEFAULT_COST_USD
+    extra = EXIT_TRAP_EXTRA_USD if extra_usd is None else float(extra_usd)
+    need = cost * (2.0 * EXIT_FEE_SIDE) + extra
+    return need / cost * 100.0
+
+
+_PROBE_FAST_TRAP = frozenset({PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP})
+
+
+def probe_trap_extra_usd(algo: str) -> float:
+    """Ранний взвод у подскока ($0.38). Impulse и лестница — $0.48."""
+    if str(algo or "").strip().lower() in _PROBE_FAST_TRAP:
+        return float(PROBE_FAST_TRAP_EXTRA_USD)
+    return float(PROBE_TRAP_EXTRA_USD)
+
+
+def probe_trap_pullback_pct(algo: str, peak_gain: float) -> float:
+    """Короткий откат на небольшом пике подскока, шире — когда ход уже выше +4%."""
+    if str(algo or "").strip().lower() in _PROBE_FAST_TRAP:
+        if float(peak_gain or 0) >= PROBE_FAST_TRAP_RUN_PCT - 1e-9:
+            return float(PROBE_FAST_TRAP_RUN_PULLBACK_PCT)
+        return float(PROBE_FAST_TRAP_PULLBACK_PCT)
+    return float(PROBE_TRAP_PULLBACK_PCT)
+
+
+def pick_probe_leg_for_room(
+    legs: list[dict[str, Any]],
+    prices: dict[str, float],
+    *,
+    now: float | None = None,
+    min_age_sec: float | None = None,
+) -> dict[str, Any] | None:
+    """Худшая по PnL% нога щупа старше min_age — её паркуем в карман2, слот снова свободен."""
+    now_ts = float(now if now is not None else time.time())
+    min_age = float(PROBE_ROOM_MIN_AGE_SEC if min_age_sec is None else min_age_sec)
+    best: dict[str, Any] | None = None
+    best_pnl = float("inf")
+    best_age = -1.0
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            continue
+        ticker = str(leg.get("ticker") or "").upper()
+        try:
+            qty = float(leg.get("qty") or 0)
+            entry = float(leg.get("entry") or 0)
+            px = float(prices.get(ticker) or 0)
+            opened = float(leg.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not ticker or qty <= 0 or entry <= 0 or px <= 0:
+            continue
+        age = now_ts - opened if opened > 0 else min_age
+        if age < min_age - 1e-12:
+            continue
+        pnl_pct = (px / entry - 1.0) * 100.0
+        if pnl_pct < best_pnl - 1e-12 or (
+            abs(pnl_pct - best_pnl) <= 1e-12 and age > best_age
+        ):
+            best = leg
+            best_pnl = pnl_pct
+            best_age = age
+    return best
+
+
+def pick_second_pocket_leg_for_funding(
+    legs: list[dict[str, Any]],
+    prices: dict[str, float],
+) -> dict[str, Any] | None:
+    """Выбрать ногу кармана2 с наименьшим убытком (или плюсом) для освобождения кэша под щуп."""
+    best_leg: dict[str, Any] | None = None
+    best_pnl_usd = float("-inf")
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            continue
+        ticker = str(leg.get("ticker") or "").upper()
+        try:
+            qty = float(leg.get("qty") or 0)
+            entry = float(leg.get("entry") or 0)
+            px = float(prices.get(ticker) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not ticker or qty <= 0 or entry <= 0 or px <= 0:
+            continue
+        pnl_usd = (px - entry) * qty
+        if pnl_usd > best_pnl_usd:
+            best_pnl_usd = pnl_usd
+            best_leg = leg
+    return best_leg
+
+
+def orderbook_obi(
+    bids: list[Any],
+    asks: list[Any],
+    *,
+    depth: int = 5,
+) -> float | None:
+    """Дисбаланс стакана L2 (0..1): доля bid-объёма в USD среди топ-depth уровней."""
+    cap = max(1, int(depth))
+    bid_usd = 0.0
+    ask_usd = 0.0
+    for row in (bids or [])[:cap]:
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            try:
+                bid_usd += float(row[0]) * float(row[1])
+            except (TypeError, ValueError):
+                continue
+    for row in (asks or [])[:cap]:
+        if isinstance(row, (list, tuple)) and len(row) >= 2:
+            try:
+                ask_usd += float(row[0]) * float(row[1])
+            except (TypeError, ValueError):
+                continue
+    tot = bid_usd + ask_usd
+    if tot <= 0:
+        return None
+    return bid_usd / tot
+
+
+def orderbook_ask_depth_usd(
+    asks: list[Any],
+    *,
+    levels: int | None = None,
+    max_slip_pct: float | None = None,
+) -> float:
+    """Сумма USD ask в пределах max_slip_pct от best ask (иначе топ-N уровней)."""
+    rows = list(asks or [])
+    if not rows:
+        return 0.0
+    slip = float(PROBE_ASK_DEPTH_SLIP_PCT if max_slip_pct is None else max_slip_pct)
+    cap = max(1, int(PROBE_ASK_DEPTH_LEVELS if levels is None else levels))
+    try:
+        best = float(rows[0][0])
+    except (TypeError, ValueError, IndexError):
+        return 0.0
+    if best <= 0:
+        return 0.0
+    ceiling = best * (1.0 + max(0.0, slip) / 100.0) if slip > 0 else None
+    total = 0.0
+    for row in rows[:cap]:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        try:
+            px = float(row[0])
+            qty = float(row[1])
+        except (TypeError, ValueError):
+            continue
+        if ceiling is not None and px > ceiling + 1e-12:
+            break
+        total += px * qty
+    return float(total)
+
+
+def probe_buy_ioc_cap_px(
+    *,
+    ask: float,
+    arm_px: float = 0.0,
+    strict: bool = False,
+    ask_pad_pct: float | None = None,
+    max_slip_pct: float | None = None,
+) -> float:
+    """Потолок Limit IOC: min(ask×(1+pad), arm×(1+slip)). 0 — нельзя ставить."""
+    ask_px = float(ask or 0)
+    if ask_px <= 0:
+        return 0.0
+    pad = float(PROBE_BUY_IOC_ASK_PAD_PCT if ask_pad_pct is None else ask_pad_pct) / 100.0
+    if max_slip_pct is None:
+        slip = (
+            float(PROBE_BUY_IOC_STRICT_SLIP_PCT)
+            if strict
+            else float(PROBE_BUY_IOC_SLIP_PCT)
+        ) / 100.0
+    else:
+        slip = float(max_slip_pct) / 100.0
+    from_ask = ask_px * (1.0 + pad)
+    signal = float(arm_px or 0)
+    if signal <= 0:
+        return from_ask
+    return min(from_ask, signal * (1.0 + slip))
+
+
+def probe_depth_buy_ok(
+    *,
+    ask_depth_usd: float | None,
+    quote_usd: float,
+    max_frac: float | None = None,
+) -> bool:
+    """Нога не больше max_frac топ-ask. Нет стакана — не блокируем (как OBI)."""
+    if ask_depth_usd is None:
+        return True
+    depth = float(ask_depth_usd or 0)
+    want = float(quote_usd or 0)
+    if want <= 0:
+        return True
+    if depth <= 0:
+        return False
+    frac = float(PROBE_ASK_DEPTH_MAX_QUOTE_FRAC if max_frac is None else max_frac)
+    return want <= depth * frac + 1e-9
+
+
+def probe_limit_tp_pct(*, strict: bool = False) -> float:
+    """Лимитный тейк: в жёстком режиме короче — микро-импульс до разворота распила."""
+    return float(PROBE_STRICT_LIMIT_TP_PCT if strict else PROBE_LIMIT_TP_PCT)
+
+
+def probe_fast_be_peak_pct(*, strict: bool = False) -> float:
+    """Пик для BE: в жёстком раньше (0.7% вместо 1.2%)."""
+    return float(PROBE_STRICT_FAST_BE_PEAK_PCT if strict else PROBE_FAST_BE_PEAK_PCT)
+
+
+def pocket_unwind_ready(*, price: float, bid: float = 0.0) -> bool:
+    """Срочный выход: стакан рядом с ценой, лишний проскальзывание не добавляем."""
+    px = float(price or 0)
+    if px <= 0:
+        return False
+    b = float(bid or 0)
+    if b <= 0:
+        return True
+    return (px - b) / px * 100.0 <= POCKET_UNWIND_MAX_BID_GAP_PCT + 1e-12
+
+
+def btc_dip_exit_reason(
+    *,
+    price: float,
+    entry: float,
+    exit_arm: dict[str, Any] | None = None,
+    now: float | None = None,
+    swing_low: float = 0.0,
+    scratch: bool = False,
+    bid: float = 0.0,
+    obi: float | None = None,
+) -> str | None:
+    """Стоп −15% на дыре. Обычный срыв — возврат под локальное дно. Плюс закрываем откатом от вершины."""
+    px = float(price or 0)
+    ent = float(entry or 0)
+    if px <= 0 or ent <= 0:
+        return None
+    gain = (px / ent - 1.0) * 100.0
+    if gain <= -cfg().pocket_stop_pct:
+        return "стоп"
+    if float(swing_low or 0) > 0 and px <= float(swing_low):
+        return "дно"
+    if pocket_exit_ready(exit_arm, price=px, now=now, entry=ent, bid=bid, obi=obi):
+        return "вершина"
+    if scratch and gain >= POCKET_SCRATCH_PCT - 1e-6:
+        return "безубыток"
+    return None
+
+
+def _leveraged_base(ticker: str) -> bool:
+    """Плечо Bybit: BTC3L, ETHDOWN. Короткое имя вроде PUMP не плечо."""
+    name = str(ticker or "").upper()
+    if name.endswith(("3L", "3S", "5L", "5S", "DOWN")):
+        return True
+    return name.endswith("UP") and len(name) > 4
+
+
+def sleeve_names() -> frozenset[str]:
+    """Базовый рукав плюс монеты, которые стол добавил по обороту."""
+    return DESK_ALT_SLEEVE | frozenset(_live_extra)
+
+
+def set_live_sleeve(tickers: set[str] | frozenset[str]) -> None:
+    """Запомнить оборотный рукав в этом процессе. Базовый список не снимается."""
+    global _live_extra
+    _live_extra = {
+        str(ticker).upper()
+        for ticker in tickers
+        if str(ticker).upper() and str(ticker).upper() not in DESK_ALT_SLEEVE
+    }
+
+
+def btc_dip_quote(equity: float) -> float:
+    """Сколько USDT класть в карман SOL при входе: доля счёта."""
+    return max(0.0, float(equity or 0)) * cfg().pocket_pct / 100.0
+
+
+def sui_dip_quote() -> float:
+    """Устарело: второй карман больше не покупает на фиксированную сумму."""
+    return float(cfg().sui_usd)
+
+
+def second_pocket_choice() -> str:
+    """Устарело: тикер второго кармана приходит с щупа, не из whitelist."""
+    raw = str(cfg().second_ticker or "AVA").upper()
+    return raw if raw in {"SUI", "AVA"} else "AVA"
+
+
+def pocket_from_probe_max() -> int:
+    """Сколько ног, переданных с щупа, держит второй карман."""
+    return max(1, int(cfg().pocket_from_probe_max))
+
+
+# Ручные покупки (кроме BTC) сажаем в карман2 под ту же ловушку вершины.
+MANUAL_TRAP_SKIP = frozenset({"BTC"})
+MANUAL_TRAP_MAX_LEGS = 32
+
+
+def manual_trap_free_qty(
+    held_qty: float,
+    *,
+    probe_qty: float = 0.0,
+    pocket_qty: float = 0.0,
+    dip_qty: float = 0.0,
+) -> float:
+    """Сколько монет на балансе ещё не учтено щупом/карманом — кандидат на ловушку."""
+    free = float(held_qty or 0) - float(probe_qty or 0) - float(pocket_qty or 0) - float(dip_qty or 0)
+    return free if free > 1e-12 else 0.0
+
+
+def probe_should_handoff(reason: str | None) -> bool:
+    """Мягкий выход щупа — отдать ногу во второй карман, не продавать."""
+    return str(reason or "") in PROBE_HANDOFF_REASONS
+
+
+def _read_daily_meta_file() -> dict[str, Any]:
+    if not os.path.isfile(_DAILY_META_PATH):
+        return {}
+    try:
+        with open(_DAILY_META_PATH, encoding="utf-8") as handle:
+            raw = json.load(handle)
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_daily_meta_file(payload: dict[str, Any]) -> None:
+    tmp_path = _DAILY_META_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, _DAILY_META_PATH)
+
+
+def probe_night_lift_until(now: float | None = None) -> float:
+    """До какого unix-ts ночной фильтр снят вручную. 0 — не снят."""
+    del now
+    try:
+        return float(_read_daily_meta_file().get(_NIGHT_LIFT_KEY) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def lift_probe_night(*, hours: float = 1.0, now: float | None = None) -> float:
+    """Снять ночной узкий фильтр на hours часов. Возвращает until."""
+    ts = float(now if now is not None else time.time())
+    until = ts + max(0.0, float(hours)) * 3600.0
+    meta = _read_daily_meta_file()
+    meta[_NIGHT_LIFT_KEY] = until
+    _write_daily_meta_file(meta)
+    return until
+
+
+def probe_night_halted(now: float | None = None) -> bool:
+    """Ночное окно щупа 23:00–06:00 YEKT: не стоп, а узкий фильтр (сильный сетап + оборот).
+
+    Ручной lift_probe_night() временно считает окно дневным.
+    """
+    ts = time.time() if now is None else float(now)
+    until = probe_night_lift_until()
+    if until > ts + 1e-9:
+        return False
+    hr = datetime.fromtimestamp(ts, _YEKT).hour
+    return hr >= PROBE_NIGHT_START_HOUR_YEKT or hr < PROBE_NIGHT_END_HOUR_YEKT
+
+
+def probe_night_halt_reason(now: float | None = None) -> str | None:
+    """Полный ночной стоп снят — новые входы ночью режет probe_setup_ok_now, не пауза."""
+    del now
+    return None
+
+
+def tape_btc_day_chg(rows: list[dict[str, Any]] | None) -> float | None:
+    """Суточная процентная смена BTC из ленты тикеров. Нет строки — None."""
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("ticker") or "").upper() != "BTC":
+            continue
+        try:
+            return float(row.get("chg"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def probe_max_legs(*, btc_day_chg: float | None = None, now: float | None = None) -> int:
+    """До PROBE_MAX_LEGS ног; ночью с пином — PROBE_NIGHT_PIN_MAX_LEGS. Сутки BTC не режут."""
+    del btc_day_chg
+    if PROBE_PIN_ON and probe_night_halted(now):
+        return int(PROBE_NIGHT_PIN_MAX_LEGS)
+    return int(PROBE_MAX_LEGS)
+
+
+def probe_setup_hold_sec(setup: dict[str, Any] | None) -> float:
+    """0 — валидный hold (spark сразу). Не подменять через `or` на 90 с."""
+    if not isinstance(setup, dict) or "hold_sec" not in setup or setup.get("hold_sec") is None:
+        return float(PROBE_ENTRY_HOLD_SEC)
+    return float(setup.get("hold_sec") or 0)
+
+
+def probe_setup_ok_now(
+    setup: dict[str, Any] | None,
+    *,
+    now: float | None = None,
+    turnover: float | None = None,
+    strict: bool = False,
+) -> bool:
+    """Ночь и жёсткий режим: сильный сетап и оборот не ниже своего пола."""
+    if not setup:
+        return False
+    if not strict and not probe_night_halted(now):
+        return True
+    # pin — снайпер лидера дня: в жёстком/ночном режиме тоже «сильный».
+    strong = (
+        float(setup.get("stair") or 0) >= 1.0 - 1e-12
+        or float(setup.get("impulse") or 0) >= 1.0 - 1e-12
+        or float(setup.get("spark") or 0) >= 1.0 - 1e-12
+        or float(setup.get("pop") or 0) >= 1.0 - 1e-12
+        or float(setup.get("pin") or 0) >= 1.0 - 1e-12
+    )
+    if not strong:
+        return False
+    try:
+        turn = float(turnover) if turnover is not None else 0.0
+    except (TypeError, ValueError):
+        turn = 0.0
+    floor = PROBE_STRICT_MIN_TURNOVER_USD if strict else PROBE_NIGHT_MIN_TURNOVER_USD
+    return turn >= float(floor) - 1e-9
+
+
+def probe_min_turnover_usd(now: float | None = None, *, strict: bool = False) -> float:
+    """Порог оборота: день и ночь $500k, жёсткий режим $650k."""
+    if strict:
+        return float(PROBE_STRICT_MIN_TURNOVER_USD)
+    if now is not None and probe_night_halted(now):
+        return float(PROBE_NIGHT_MIN_TURNOVER_USD)
+    return float(PROBE_MIN_TURNOVER_USD)
+
+
+def _tape_liquid_day_chgs(rows: list[dict[str, Any]] | None) -> list[float]:
+    chgs: list[float] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+            continue
+        try:
+            chg = float(row.get("chg") or 0)
+            turn = float(row.get("turnover") or 0)
+        except (TypeError, ValueError):
+            continue
+        if turn >= PROBE_MIN_TURNOVER_USD:
+            chgs.append(chg)
+    return chgs
+
+
+def probe_market_rising(rows: list[dict[str, Any]] | None) -> bool:
+    """Рынок растёт: BTC за сутки ≥ 0 или ≥ половины ликвидных имён в плюсе."""
+    btc = tape_btc_day_chg(rows)
+    if btc is not None and btc >= PROBE_RISING_BTC_MIN_PCT - 1e-12:
+        return True
+    liquid = _tape_liquid_day_chgs(rows)
+    if len(liquid) < 20:
+        return False
+    green_pct = sum(1 for chg in liquid if chg > 0) / len(liquid) * 100.0
+    return green_pct >= PROBE_RISING_BREADTH_PCT - 1e-9
+
+
+def probe_btc_flash_pct(bars: list[dict[str, Any]] | None) -> float | None:
+    """Ход BTC за ~15м, %. None — свечей не хватает.
+
+    bars — 5м от старых к новым, последняя может быть живой.
+    """
+    need = int(PROBE_BTC_FLASH_BARS) + 1
+    if not bars or len(bars) < need:
+        return None
+    try:
+        ref = float(bars[-need].get("close") or 0)
+        price = float(bars[-1].get("close") or 0)
+    except (TypeError, ValueError):
+        return None
+    if ref <= 0 or price <= 0:
+        return None
+    return (price / ref - 1.0) * 100.0
+
+
+def probe_market_falling(
+    rows: list[dict[str, Any]] | None,
+    *,
+    btc_flash_pct: float | None = None,
+) -> tuple[bool, str]:
+    """Падающий рынок: пролив BTC или мало зелёных имён. Иначе (False, "")."""
+    ok, note = probe_market_regime_ok(rows or [], btc_flash_pct=btc_flash_pct)
+    return (not ok), note
+
+
+def probe_strict_reason(
+    reason: str | None,
+    rows: list[dict[str, Any]] | None = None,
+    *,
+    btc_flash_pct: float | None = None,
+) -> str | None:
+    """Жёсткий режим только на свои локальные убытки и только вне рыночного стресса.
+
+    Дневной лимит и падающий рынок сюда не входят: это полный стоп входов.
+    """
+    if not PROBE_STRICT_MODE or not reason:
+        return None
+    text = str(reason)
+    if text.startswith("дневной") or text.startswith("падающий"):
+        return None
+    if rows is not None:
+        falling, _note = probe_market_falling(rows, btc_flash_pct=btc_flash_pct)
+        if falling:
+            return None
+    return reason
+
+
+def probe_market_regime_ok(
+    rows: list[dict[str, Any]],
+    *,
+    btc_flash_pct: float | None = None,
+) -> tuple[bool, str]:
+    """Стоп входов при проливе BTC (15м или сутки) или при ширине рынка < 35%."""
+    if not PROBE_MARKET_FALL_ON:
+        return True, ""
+    if (
+        btc_flash_pct is not None
+        and float(btc_flash_pct) <= PROBE_BTC_FLASH_DROP_PCT + 1e-9
+    ):
+        return False, (
+            f"BTC {float(btc_flash_pct):+.1f}% за 15м ≤ {PROBE_BTC_FLASH_DROP_PCT:.1f}%"
+        )
+    liquid_chgs: list[float] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+            continue
+        try:
+            chg = float(row.get("chg") or 0)
+            turn = float(row.get("turnover") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ticker == "BTC" and chg <= PROBE_BTC_MAX_DROP_DAY_PCT + 1e-9:
+            return False, f"BTC {chg:+.1f}% ≤ {PROBE_BTC_MAX_DROP_DAY_PCT:.1f}%"
+        if turn >= PROBE_MIN_TURNOVER_USD:
+            liquid_chgs.append(chg)
+    if len(liquid_chgs) >= 20:
+        green_pct = sum(1 for c in liquid_chgs if c > 0) / len(liquid_chgs) * 100.0
+        if green_pct < PROBE_MIN_MARKET_BREADTH_PCT - 1e-9:
+            return False, f"ширина рынка {green_pct:.0f}% < {PROBE_MIN_MARKET_BREADTH_PCT:.0f}%"
+    return True, ""
+
+
+def probe_market_regime_pause_reason(
+    rows: list[dict[str, Any]],
+    *,
+    now: float,
+    pause_until: float = 0.0,
+    btc_flash_pct: float | None = None,
+) -> tuple[str | None, float]:
+    """Падающий рынок: стоп новых входов.
+
+    Пролив BTC — залипающая пауза на час. Узкая ширина — только пока условие живо.
+    """
+    if not PROBE_MARKET_FALL_ON:
+        return None, 0.0
+    ok, note = probe_market_regime_ok(rows, btc_flash_pct=btc_flash_pct)
+    until = float(pause_until or 0.0)
+    if not ok:
+        sticky = str(note or "").startswith("BTC")
+        if sticky:
+            until = max(until, float(now) + float(PROBE_MARKET_FALL_PAUSE_SEC))
+        return f"падающий рынок: {note}", until
+    if until > float(now) + 1e-9:
+        left_min = max(1, int((until - float(now) + 59) // 60))
+        return f"падающий рынок: пауза {left_min}м после обвала", until
+    return None, 0.0
+
+
+def probe_scan_rank(
+    row: dict[str, Any],
+    *,
+    min_turnover: float | None = None,
+) -> float:
+    """Сортировка scan: рост за 24ч (chg %), только ликвидные и day ≥ PROBE_DAY_MIN_PCT."""
+    floor_turn = float(PROBE_MIN_TURNOVER_USD if min_turnover is None else min_turnover)
+    try:
+        chg = float(row.get("chg") or 0)
+        price = float(row.get("price") or 0)
+        turn = float(row.get("turnover") or 0)
+    except (TypeError, ValueError):
+        return -1.0
+    if turn < floor_turn or price <= 0 or chg < PROBE_DAY_MIN_PCT:
+        return float("-inf")
+    return chg
+
+
+def probe_scan_bounce_rank(
+    row: dict[str, Any],
+    *,
+    min_turnover: float | None = None,
+) -> float:
+    """Ранг ракеты со дна: % отскока от дневного low (лента без 5м RVOL)."""
+    floor_turn = float(PROBE_MIN_TURNOVER_USD if min_turnover is None else min_turnover)
+    try:
+        chg = float(row.get("chg") or 0)
+        price = float(row.get("price") or 0)
+        low = float(row.get("low") or 0)
+        turn = float(row.get("turnover") or 0)
+    except (TypeError, ValueError):
+        return float("-inf")
+    if turn < floor_turn or price <= 0 or low <= 0 or chg < PROBE_DAY_MIN_PCT:
+        return float("-inf")
+    bounce = (price / low - 1.0) * 100.0
+    if bounce < PROBE_ROCKET_MIN_BOUNCE_PCT - 1e-12:
+        return float("-inf")
+    return bounce
+
+
+def probe_scan_limits(*, paper: bool | None = None) -> tuple[int, int, int]:
+    """Лимиты скана: (scan, classic, mandatory_top).
+
+    Имитация (`probe_paper`) — широкий скан. Бой — Топ-N суток + ракеты со дна.
+    """
+    use_paper = bool(cfg().probe_paper) if paper is None else bool(paper)
+    if use_paper:
+        return (
+            PROBE_SCAN_LIMIT_PAPER,
+            PROBE_SCAN_CLASSIC_LIMIT_PAPER,
+            PROBE_SCAN_MANDATORY_TOP_PAPER,
+        )
+    return (
+        PROBE_SCAN_LIMIT_LIVE,
+        PROBE_SCAN_CLASSIC_LIMIT_LIVE,
+        PROBE_SCAN_MANDATORY_TOP_LIVE,
+    )
+
+
+def probe_scan_ranked_rows(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+    now: float | None = None,
+    min_turnover: float | None = None,
+    paper: bool | None = None,
+) -> list[tuple[float, dict[str, Any]]]:
+    """15 слотов — лидерам суток, 10 слотов — активным монетам со дна (сутки ≤ +2%)."""
+    scan_lim, _classic, _mandatory = probe_scan_limits(paper=paper)
+    cap = int(scan_lim if limit is None else limit)
+    floor_turn = (
+        float(min_turnover)
+        if min_turnover is not None
+        else probe_min_turnover_usd(now)
+    )
+    valid_rows: list[tuple[float, dict[str, Any]]] = []
+    for row in rows:
+        score = probe_scan_rank(row, min_turnover=floor_turn)
+        if score < PROBE_DAY_MIN_PCT:
+            continue
+        valid_rows.append((score, row))
+    leaders = sorted(valid_rows, key=lambda item: item[0], reverse=True)
+    # Донные слоты — по отскоку от low, не по обороту (иначе BTC/ETH вместо ракет).
+    bottom_movers = [
+        item
+        for item in valid_rows
+        if PROBE_DAY_MIN_PCT <= item[0] <= 2.0
+        and probe_scan_bounce_rank(item[1], min_turnover=floor_turn) > float("-inf")
+    ]
+    bottom_movers.sort(
+        key=lambda item: probe_scan_bounce_rank(item[1], min_turnover=floor_turn),
+        reverse=True,
+    )
+
+    rocket_slots = int(PROBE_ROCKET_SCAN_SLOTS)
+    if cap <= rocket_slots:
+        return leaders[:cap]
+    leader_slots = cap - rocket_slots
+    top_leaders = leaders[:leader_slots]
+    seen_tickers = {str(item[1].get("ticker") or "").upper() for item in top_leaders}
+    top_bottom = [
+        item
+        for item in bottom_movers
+        if str(item[1].get("ticker") or "").upper() not in seen_tickers
+    ][:rocket_slots]
+    return (top_leaders + top_bottom)[:cap]
+
+
+def probe_pin_room_pct(row: dict[str, Any] | None) -> float:
+    """Запас до хая суток, %."""
+    if not isinstance(row, dict):
+        return -1.0
+    try:
+        price = float(row.get("price") or 0)
+        high = float(row.get("high") or 0)
+    except (TypeError, ValueError):
+        return -1.0
+    if price <= 0 or high <= 0:
+        return -1.0
+    return (high - price) / high * 100.0
+
+
+def probe_day_ranks(rows: list[dict[str, Any]] | None) -> dict[str, int]:
+    """Место по росту за 24ч среди ликвидных имён (1 — лидер)."""
+    ranked: list[tuple[float, str]] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        if not ticker or ticker in seen or ticker in SLEEVE_SKIP or _leveraged_base(ticker):
+            continue
+        try:
+            chg = float(row.get("chg") or 0)
+            turn = float(row.get("turnover") or 0)
+            price = float(row.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if turn < PROBE_MIN_TURNOVER_USD or price <= 0:
+            continue
+        seen.add(ticker)
+        ranked.append((chg, ticker))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return {ticker: index + 1 for index, (_chg, ticker) in enumerate(ranked)}
+
+
+def probe_pin_row_ok(row: dict[str, Any] | None) -> bool:
+    """Фильтр пина: оборот, день ≥ MIN_DAY, не мажор, не парабола."""
+    if not isinstance(row, dict):
+        return False
+    ticker = str(row.get("ticker") or "").upper()
+    if (
+        not ticker
+        or ticker in SLEEVE_SKIP
+        or ticker in PROBE_PIN_MAJOR_SKIP
+        or _leveraged_base(ticker)
+    ):
+        return False
+    try:
+        chg = float(row.get("chg") or 0)
+        turn = float(row.get("turnover") or 0)
+        price = float(row.get("price") or 0)
+    except (TypeError, ValueError):
+        return False
+    if price <= 0 or turn < PROBE_PIN_MIN_TURNOVER_USD - 1e-9:
+        return False
+    if chg < PROBE_PIN_MIN_DAY_PCT - 1e-12:
+        return False
+    if chg > PROBE_PIN_MAX_DAY_PCT + 1e-12:
+        return False
+    room = probe_pin_room_pct(row)
+    return PROBE_PIN_MIN_ROOM_PCT - 1e-12 <= room <= PROBE_PIN_MAX_ROOM_PCT + 1e-12
+
+
+def probe_pin_move(bars: list[dict[str, Any]] | None) -> float | None:
+    """Ход за ~10м в процентах. None — тихо или объём не выше обычного.
+
+    bars — 5м от старых к новым, последняя может быть живой.
+    """
+    need = PROBE_PIN_MOVE_BARS + 13
+    if not bars or len(bars) < need:
+        return None
+    ref_bar = bars[-(PROBE_PIN_MOVE_BARS + 1)]
+    window = bars[-PROBE_PIN_MOVE_BARS:]
+    prior = bars[-(PROBE_PIN_MOVE_BARS + 13):-(PROBE_PIN_MOVE_BARS + 1)]
+    try:
+        ref = float(ref_bar.get("close") or 0)
+        price = float(bars[-1].get("close") or 0)
+        live_vol = max(float(bar.get("volume") or 0) for bar in window)
+        base = [float(bar.get("volume") or 0) for bar in prior if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError):
+        return None
+    if ref <= 0 or price <= 0 or not base:
+        return None
+    move = (price / ref - 1.0) * 100.0
+    if move < PROBE_PIN_MOVE_PCT - 1e-12:
+        return None
+    typical = _median(base)
+    if typical <= 0 or live_vol < typical * PROBE_PIN_MOVE_VOL_MULT - 1e-12:
+        return None
+    return move
+
+
+def probe_pin_loss_breakout(sell_px: float, live_px: float) -> bool:
+    """Цена выше продажи на PROBE_REENTRY_BREAKOUT_PCT — бан пина с этой продажи снят."""
+    sell = float(sell_px or 0)
+    live = float(live_px or 0)
+    if sell <= 0 or live <= 0:
+        return False
+    return live >= sell * (1.0 + PROBE_REENTRY_BREAKOUT_PCT / 100.0) - 1e-12
+
+
+def probe_pin_hard_drop_reason(
+    row: dict[str, Any] | None,
+    *,
+    ticker: str,
+    rank: int | None,
+    lost: set[str] | None = None,
+) -> str | None:
+    """Снять пин сразу: срез, ушёл далеко сквозь хай, тонкий стакан, перегрев."""
+    name = str(ticker or "").upper()
+    if not name:
+        return "пусто"
+    if lost and name in lost:
+        return "убыток щупа"
+    if not isinstance(row, dict):
+        return "нет в ленте"
+    try:
+        chg = float(row.get("chg") or 0)
+        turn = float(row.get("turnover") or 0)
+    except (TypeError, ValueError):
+        return "нет в ленте"
+    if turn < PROBE_MIN_TURNOVER_USD - 1e-9:
+        return "оборот"
+    if chg >= PROBE_CANDLE_MAX_DAY_PCT - 1e-12:
+        return "перегрев"
+    room = probe_pin_room_pct(row)
+    if room < PROBE_PIN_DROP_ROOM_PCT - 1e-12:
+        return "нет воздуха"
+    if room > PROBE_PIN_MAX_ROOM_PCT + 1e-12:
+        return "слив с хая"
+    if chg < 0.0:
+        return "сутки в минусе"
+    return None
+
+
+def probe_choose_pin(
+    rows: list[dict[str, Any]] | None,
+    current: dict[str, Any] | None = None,
+    *,
+    now: float,
+    lost: set[str] | None = None,
+    skip: set[str] | None = None,
+    moves: dict[str, float] | None = None,
+) -> dict[str, Any] | None:
+    """Пин — кто идёт последние ~10 минут. Ход сдулся — имя снова бродячее.
+
+    moves: тикер → ход за окно пина в %. Сильнее текущего на PROBE_PIN_SWITCH_PCT — переключаемся сразу.
+    """
+    if not PROBE_PIN_ON:
+        return None
+    lost_names = {str(name).upper() for name in (lost or set()) if name}
+    skip_names = {str(name).upper() for name in (skip or set()) if name}
+    live_moves = {
+        str(name).upper(): float(value)
+        for name, value in (moves or {}).items()
+        if name and float(value or 0) >= PROBE_PIN_MOVE_PCT - 1e-12
+    }
+    by_ticker: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker:
+            by_ticker[ticker] = row
+    scored: list[tuple[float, str]] = []
+    for ticker, move in live_moves.items():
+        if ticker in lost_names or ticker in skip_names:
+            continue
+        row = by_ticker.get(ticker)
+        if not probe_pin_row_ok(row):
+            continue
+        scored.append((float(move), ticker))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    cur = current if isinstance(current, dict) else {}
+    cur_ticker = str(cur.get("ticker") or "").upper()
+    try:
+        cur_ts = float(cur.get("ts") or 0)
+        cur_score = float(cur.get("score") or 0)
+    except (TypeError, ValueError):
+        cur_ts = 0.0
+        cur_score = 0.0
+    age = (float(now) - cur_ts) if cur_ticker and cur_ts > 0 else 1e18
+    cur_row = by_ticker.get(cur_ticker)
+    forced = bool(cur.get("forced"))
+    if cur_ticker and forced and age < PROBE_PIN_HOLD_SEC:
+        try:
+            turn = float((cur_row or {}).get("turnover") or 0)
+        except (TypeError, ValueError):
+            turn = 0.0
+        if isinstance(cur_row, dict) and turn >= PROBE_MIN_TURNOVER_USD - 1e-9:
+            return {
+                "ticker": cur_ticker,
+                "ts": cur_ts,
+                "score": cur_score,
+                "forced": True,
+            }
+    drop = (
+        probe_pin_hard_drop_reason(cur_row, ticker=cur_ticker, rank=None, lost=lost_names)
+        if cur_ticker
+        else "пусто"
+    )
+    cur_move = live_moves.get(cur_ticker, 0.0)
+    if cur_ticker and cur_ticker not in skip_names and drop is None and cur_move >= PROBE_PIN_MOVE_PCT - 1e-12:
+        best = scored[0] if scored else None
+        if best is None or best[1] == cur_ticker or best[0] < cur_move + PROBE_PIN_SWITCH_PCT - 1e-12:
+            return {"ticker": cur_ticker, "ts": cur_ts or float(now), "score": cur_move}
+
+    if not scored:
+        return None
+    score, ticker = scored[0]
+    if ticker == cur_ticker and cur_ts > 0:
+        return {"ticker": ticker, "ts": cur_ts, "score": score}
+    return {"ticker": ticker, "ts": float(now), "score": score}
+
+
+def probe_is_paper() -> bool:
+    """Имитация: скан, взвод и логи, ордеров Buy нет. Живые ноги продаёт как обычно."""
+    return bool(cfg().probe_on) and bool(cfg().probe_paper)
+
+
+def probe_places_buys() -> bool:
+    """Боевой щуп: настройки включены и не имитация."""
+    return bool(cfg().probe_on) and not bool(cfg().probe_paper)
+
+
+def probe_quote() -> float:
+    """Щуп: базовый размер ноги из настроек (обычно 30$)."""
+    return float(cfg().probe_usd)
+
+
+PROBE_BOOST_USD = 60.0
+PROBE_BOOST_MIN_GAIN_PCT = 3.0
+
+
+def probe_legs_boost_ok(
+    legs: list[dict[str, Any]],
+    prices: dict[str, float],
+) -> bool:
+    """Две открытые ноги в уверенном плюсе — третью можно увеличить до PROBE_BOOST_USD."""
+    if len(legs) != 2:
+        return False
+    for leg in legs:
+        ticker = str(leg.get("ticker") or "").upper()
+        try:
+            entry = float(leg.get("entry") or 0)
+            price = float(prices.get(ticker) or 0)
+        except (TypeError, ValueError):
+            return False
+        if entry <= 0 or price <= 0:
+            return False
+        gain = (price / entry - 1.0) * 100.0
+        if gain + 1e-9 < PROBE_BOOST_MIN_GAIN_PCT:
+            return False
+    return True
+
+
+def probe_quote_for_buy(
+    *,
+    legs: list[dict[str, Any]] | None = None,
+    prices: dict[str, float] | None = None,
+) -> float:
+    """1–2-я нога — база из настроек; 3-я — $60, если обе предыдущие ≥ PROBE_BOOST_MIN_GAIN_PCT%."""
+    base = probe_quote()
+    legs = list(legs or [])
+    if len(legs) != 2:
+        return base
+    if prices and probe_legs_boost_ok(legs, prices):
+        return max(base, float(PROBE_BOOST_USD))
+    return base
+
+
+def probe_reserve_quote(*, open_legs: int, pending: int = 0) -> float:
+    """Пустой щуп резервирует один слот. Взвод или открытая нога держат место и под второй."""
+    if not probe_places_buys():
+        return 0.0
+    opened = max(0, int(open_legs))
+    waiting = max(0, int(pending))
+    want = PROBE_MAX_LEGS if opened + waiting >= 1 else 1
+    slots = max(0, want - opened)
+    if slots <= 0:
+        return 0.0
+    unit = probe_quote()
+    if opened >= 2:
+        unit = max(unit, float(PROBE_BOOST_USD))
+    return unit * slots
+
+
+def ema_last(values: list[float], period: int) -> float | None:
+    """Последнее значение EMA. Мало точек — сигнала нет."""
+    period = int(period)
+    if period <= 0 or len(values) < period:
+        return None
+    k = 2.0 / (period + 1.0)
+    ema = sum(values[:period]) / period
+    for price in values[period:]:
+        ema = float(price) * k + ema * (1.0 - k)
+    return ema
+
+
+def ma_trend(closes: list[float]) -> str:
+    """Бычий/медвежий тренд как сводка средних: быстрая EMA против медленной и цены.
+
+    Совпадает по смыслу со вкладкой «Торговый анализ» Bybit, без осцилляторов.
+    """
+    if len(closes) < PROBE_EMA_SLOW:
+        return "neutral"
+    fast = ema_last(closes, PROBE_EMA_FAST)
+    slow = ema_last(closes, PROBE_EMA_SLOW)
+    price = float(closes[-1])
+    if fast is None or slow is None or price <= 0:
+        return "neutral"
+    if fast > slow and price > fast:
+        return "bull"
+    if fast < slow and price < fast:
+        return "bear"
+    return "neutral"
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(float(v) for v in values)
+    if not ordered:
+        return 0.0
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _probe_window_setup(
+    bars: list[dict[str, Any]],
+    *,
+    shelf_bars: int,
+    vol_mult: float,
+    min_len: int,
+    drift_pct: float = 0.0,
+) -> dict[str, float] | None:
+    """Одна полка: тихий коридор и живой пробой с объёмом."""
+    forming = bars[-1]
+    closed = bars[:-1]
+    if len(closed) < min_len + 1:
+        return None
+    shelf = closed[:-1][-int(shelf_bars):]
+    if len(shelf) < min_len:
+        return None
+    try:
+        high = max(float(bar["high"]) for bar in shelf)
+        low = min(float(bar["low"]) for bar in shelf)
+        vols = [float(bar["volume"]) for bar in shelf if float(bar["volume"]) > 0]
+        price = float(forming["close"])
+        impulse = max(float(forming.get("volume") or 0), float(closed[-1].get("volume") or 0))
+    except (TypeError, ValueError, KeyError):
+        return None
+    if low <= 0 or high <= 0 or price <= 0 or not vols:
+        return None
+    limits = cfg()
+    if (high - low) / low * 100.0 > limits.probe_shelf_range_pct:
+        return None
+    floor = high * (1.0 + limits.probe_break_min_pct / 100.0)
+    ceiling = high * (1.0 + limits.probe_break_max_pct / 100.0)
+    if price < floor or price > ceiling:
+        return None
+    typical = _median(vols)
+    if typical <= 0 or impulse < typical * float(vol_mult):
+        return None
+    prev_high = float(closed[-1].get("high") or 0)
+    if prev_high >= high * (1.0 + limits.probe_break_min_pct / 100.0):
+        return None
+    if drift_pct > 0:
+        tail = shelf[-min(PROBE_SHELF_DRIFT_BARS, len(shelf)):]
+        if len(tail) >= 2:
+            old = float(tail[0].get("close") or 0)
+            new = float(tail[-1].get("close") or 0)
+            if old > 0 and abs(new / old - 1.0) * 100.0 > drift_pct:
+                return None
+    quiet = [float(bar.get("volume") or 0) for bar in shelf[:-2] if float(bar.get("volume") or 0) > 0]
+    base = _median(quiet) if quiet else typical
+    if base > 0:
+        for bar in shelf[-2:]:
+            if float(bar.get("volume") or 0) >= base * float(vol_mult):
+                return None
+    return {"shelf": high, "price": price}
+
+
+def probe_shelf_setup_daily(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Суточная тихая полка + объёмный пробой."""
+    if len(bars) < PROBE_EMA_SLOW + 2:
+        return None
+    return _probe_window_setup(
+        bars,
+        shelf_bars=PROBE_SHELF_BARS,
+        vol_mult=PROBE_VOL_MULT,
+        min_len=20,
+        drift_pct=PROBE_SHELF_DRIFT_PCT,
+    )
+
+
+def probe_shelf_setup_local(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Локальная полка ~2ч — быстрее суточной, для спринта."""
+    if len(bars) < PROBE_LOCAL_BARS + 2:
+        return None
+    return _probe_window_setup(
+        bars,
+        shelf_bars=PROBE_LOCAL_BARS,
+        vol_mult=PROBE_LOCAL_VOL_MULT,
+        min_len=PROBE_LOCAL_BARS,
+        drift_pct=PROBE_LOCAL_DRIFT_PCT,
+    )
+
+
+def probe_shelf_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Пробой узкой полки: сутки 3× или локальные 2 часа 2×.
+
+    bars — от старых к новым, последняя свеча может быть ещё открытой.
+    Полка — до двух последних 15-минутных свечей.
+    """
+    return probe_shelf_setup_daily(bars) or probe_shelf_setup_local(bars)
+
+
+def _candle_upper_wick_ratio(
+    price: float, live_high: float, live_low: float, live_open: float
+) -> float:
+    """Верхняя тень / (high−low). Плоский бар (H=L) → 0, без ZeroDivisionError."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0:
+        return 0.0
+    raw = hi - lo
+    if raw <= 1e-12:
+        return 0.0
+    span = max(1e-8, raw)
+    top = max(op, px) if op > 0 else px
+    return max(0.0, (hi - top) / span)
+
+
+def probe_candle_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
+    """Начало восходящей свечи: сильный бар у хая без фитиля слива не режем."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or lo <= 0 or op <= 0 or hi < lo:
+        return False
+    if px <= op + 1e-12:
+        return False
+    body = (px / op - 1.0) * 100.0
+    min_body = probe_candle_min_body_pct()
+    if body < min_body - 1e-12 or body > probe_candle_max_body_pct() + 1e-12:
+        return False
+    upper_wick = (hi - px) / op * 100.0
+    if upper_wick > PROBE_CANDLE_MAX_WICK_PCT + 1e-12:
+        return False
+    # Фитиль слива по размаху: tip_cap больше не режет px == hi.
+    wick_ratio = _candle_upper_wick_ratio(px, hi, lo, op)
+    if wick_ratio > PROBE_CANDLE_TIP_WICK_RATIO + 1e-12:
+        tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
+        if px > tip_cap + 1e-12:
+            return False
+    # Глубокий пролив под open — не чистый старт восходящей свечи.
+    if lo < op:
+        dip = (op - lo) / op * 100.0
+        if dip > PROBE_CANDLE_MAX_DIP_PCT + 1e-12:
+            return False
+    span = hi - lo
+    if span > 1e-12:
+        pos = (px - lo) / span
+        if pos < PROBE_CANDLE_MIN_BAR_POS - 1e-12 or pos > PROBE_CANDLE_MAX_BAR_POS + 1e-12:
+            return False
+    return True
+
+
+def probe_spark_live_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
+    """Первые 1–2 мин 5м: тело 0.6..2.0%, можно у хая бара, без слива под open."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or lo <= 0 or op <= 0 or hi < lo:
+        return False
+    if px <= op + 1e-12:
+        return False
+    body = (px / op - 1.0) * 100.0
+    min_body = probe_candle_min_body_pct()
+    if body < min_body - 1e-12 or body > probe_candle_max_body_pct() + 1e-12:
+        return False
+    upper_wick = (hi - px) / op * 100.0
+    if upper_wick > PROBE_CANDLE_MAX_WICK_PCT + 1e-12:
+        return False
+    if lo < op:
+        dip = (op - lo) / op * 100.0
+        if dip > PROBE_CANDLE_MAX_DIP_PCT + 1e-12:
+            return False
+    span = hi - lo
+    if span > 1e-12:
+        pos = (px - lo) / span
+        if pos < PROBE_CANDLE_MIN_BAR_POS - 1e-12 or pos > PROBE_SPARK_MAX_BAR_POS + 1e-12:
+            return False
+    return True
+
+
+def probe_tip_wick_ok(
+    price: float, live_high: float, live_low: float, live_open: float
+) -> bool:
+    """Единый допуск кончика: wick_ratio ≤ 0.10 или микрофитиль ≤ 0.25% open."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if (
+        _candle_upper_wick_ratio(px, hi, lo, op)
+        <= PROBE_CANDLE_TIP_WICK_RATIO + 1e-12
+    ):
+        return True
+    # CPOOL: ratio ~0.11 при фитиле 0.21% open — не слив.
+    if px > 0 and hi > 0 and op > 0 and (hi - px) / op * 100.0 <= 0.25 + 1e-12:
+        return True
+    return False
+
+
+def probe_spark_buy_ok(
+    price: float,
+    live_high: float,
+    live_low: float,
+    live_open: float,
+    *,
+    elapsed_sec: float | None = None,
+) -> bool:
+    """Перед buy spark: окно 2 мин ещё живо; тонкий фитиль у хая не tip."""
+    if elapsed_sec is not None and float(elapsed_sec) > PROBE_SPARK_MAX_ELAPSED_SEC + 1e-12:
+        return False
+    if probe_spark_live_ok(price, live_high, live_low, live_open):
+        return True
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or op <= 0 or px <= op + 1e-12:
+        return False
+    if not probe_tip_wick_ok(px, hi, lo if lo > 0 else min(op, px), op):
+        return False
+    body = (px / op - 1.0) * 100.0
+    min_body = probe_candle_min_body_pct() * PROBE_BUY_BODY_SLACK
+    max_body = probe_candle_max_body_pct()
+    return min_body - 1e-12 <= body <= max_body + 1e-12
+
+
+def probe_spark_setup(
+    bars: list[dict[str, Any]],
+    *,
+    now: float | None = None,
+    day_chg: float | None = None,
+) -> dict[str, float] | None:
+    """Одиночная 5м в первые 1–2 минуты бара. Со дна — объём ≥ 3× типичного."""
+    if now is None or len(bars) < PROBE_CANDLE_LOOKBACK + 2:
+        return None
+    forming = bars[-1]
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        bar_ts = float(forming.get("ts") or 0)
+        vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if bar_ts <= 0 or not vols:
+        return None
+    elapsed = float(now) - bar_ts
+    if elapsed < 0.0 or elapsed > PROBE_SPARK_MAX_ELAPSED_SEC + 1e-12:
+        return None
+    typical = _median(vols)
+    if typical <= 0:
+        return None
+    elapsed_frac = max(PROBE_CANDLE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
+    del day_chg
+    if vol < typical * PROBE_SPARK_VOL_MULT * elapsed_frac:
+        return None
+    if not probe_spark_live_ok(px, hi, lo, op):
+        return None
+    return {"shelf": op, "price": px, "spark": 1.0}
+
+
+def probe_bottom_entry(day_chg: float | None) -> bool:
+    """Сутки ≤ +2% — слот дна, не лидер дня."""
+    if day_chg is None:
+        return False
+    try:
+        return float(day_chg) <= PROBE_BOTTOM_MAX_DAY_PCT + 1e-12
+    except (TypeError, ValueError):
+        return False
+
+
+def probe_pop_live_ok(
+    price: float,
+    live_high: float,
+    live_low: float,
+    live_open: float,
+    *,
+    min_body: float | None = None,
+) -> bool:
+    """Подскок: тело 1.5..8.5% от open, фитиль ≤ 1.8%, без слива под open."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or lo <= 0 or op <= 0 or hi < lo:
+        return False
+    body = (px / op - 1.0) * 100.0
+    floor = PROBE_POP_MIN_BODY_PCT if min_body is None else float(min_body)
+    if body < floor - 1e-12 or body > PROBE_POP_MAX_BODY_PCT + 1e-12:
+        return False
+    if (hi - px) / op * 100.0 > PROBE_POP_MAX_WICK_PCT + 1e-12:
+        return False
+    if lo < op and (op - lo) / op * 100.0 > PROBE_CANDLE_MAX_DIP_PCT + 1e-12:
+        return False
+    return True
+
+
+def probe_pop_30m_ok(bars: list[dict[str, Any]], price: float) -> bool:
+    """Ход за 30м вместе с живой свечой. Выше 16% — кульминация, не первый подскок."""
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    if len(window) < 6 or float(price or 0) <= 0:
+        return True
+    try:
+        ref = float(window[-6].get("close") or 0)
+    except (TypeError, ValueError):
+        return True
+    if ref <= 0:
+        return True
+    return (float(price) / ref - 1.0) * 100.0 <= PROBE_POP_MAX_30M_CHG_PCT + 1e-12
+
+
+def probe_pop_buy_ok(
+    price: float,
+    live_high: float,
+    live_low: float,
+    live_open: float,
+    *,
+    elapsed_sec: float | None = None,
+    min_body: float | None = None,
+) -> bool:
+    """Перед buy pop: бар жив; wick_ratio ≤ 0.10 не режем как tip (CPOOL)."""
+    if elapsed_sec is not None and (
+        float(elapsed_sec) < 0.0 or float(elapsed_sec) > PROBE_POP_MAX_ELAPSED_SEC + 1e-12
+    ):
+        return False
+    if probe_pop_live_ok(price, live_high, live_low, live_open, min_body=min_body):
+        return True
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or op <= 0 or px <= op + 1e-12:
+        return False
+    if not probe_tip_wick_ok(px, hi, lo if lo > 0 else min(op, px), op):
+        return False
+    body = (px / op - 1.0) * 100.0
+    floor = PROBE_POP_MIN_BODY_PCT if min_body is None else float(min_body)
+    soft = float(floor) * PROBE_BUY_BODY_SLACK
+    return soft - 1e-12 <= body <= PROBE_POP_MAX_BODY_PCT + 1e-12
+
+
+def probe_pop_setup(
+    bars: list[dict[str, Any]],
+    *,
+    now: float | None = None,
+    day_chg: float | None = None,
+) -> dict[str, float] | None:
+    """Живая 5м с телом 1.5–8.5%. Со дна — тело от 2.3% и объём ≥ 3×. Полка — open."""
+    if now is None or len(bars) < PROBE_CANDLE_LOOKBACK + 2:
+        return None
+    forming = bars[-1]
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        bar_ts = float(forming.get("ts") or 0)
+        vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if bar_ts <= 0 or not vols:
+        return None
+    elapsed = float(now) - bar_ts
+    if elapsed < 0.0 or elapsed > PROBE_POP_MAX_ELAPSED_SEC + 1e-12:
+        return None
+    typical = _median(vols)
+    if typical <= 0:
+        return None
+    elapsed_frac = max(PROBE_CANDLE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
+    bottom = probe_bottom_entry(day_chg)
+    min_body = PROBE_BOTTOM_POP_MIN_BODY_PCT if bottom else None
+    if vol < typical * PROBE_POP_VOL_MULT * elapsed_frac:
+        return None
+    if not probe_pop_live_ok(px, hi, lo, op, min_body=min_body):
+        return None
+    if not probe_pop_30m_ok(bars, px):
+        return None
+    return {"shelf": op, "price": px, "pop": 1.0}
+
+
+def probe_candle_bar_immature(
+    price: float, live_high: float, live_low: float, live_open: float
+) -> bool:
+    """Бар только открылся (open≈high≈price) — диапазона ещё нет, tip не основание снять взвод.
+
+    LIT 21:25: open=high=price → buy_ok=False и стол ронял взвод как «candle tip».
+    """
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or op <= 0:
+        return False
+    # Нет хода вверх от open — тело ещё не сформировано.
+    if hi > op * (1.0 + 1e-8):
+        return False
+    # Цена у open/high; низ не ушёл в явный слив под open.
+    if px + 1e-12 < op * (1.0 - 1e-8):
+        return False
+    if lo > 0 and lo < op * (1.0 - PROBE_CANDLE_MAX_DIP_PCT / 100.0 - 1e-12):
+        return False
+    return True
+
+
+def probe_candle_buy_ok(price: float, live_high: float, live_low: float, live_open: float) -> bool:
+    """Перед buy candle: импульс у хая без фитиля слива (ratio) не режем tip_cap."""
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    op = float(live_open or 0)
+    if px <= 0 or hi <= 0 or op <= 0:
+        return False
+    # Нулевой бар / только open — не buy; desk оставит взвод, если immature.
+    if probe_candle_bar_immature(px, hi, lo, op):
+        return False
+    if px <= op + 1e-12:
+        return False
+    body = (px / op - 1.0) * 100.0
+    if (
+        probe_candle_min_body_pct() - 1e-12
+        <= body
+        <= probe_candle_max_body_pct() + 1e-12
+    ):
+        return probe_spark_live_ok(px, hi, lo, op)
+    if body > probe_candle_max_body_pct() + 1e-12:
+        return False
+    upper_wick = (hi - px) / op * 100.0
+    wick_ratio = _candle_upper_wick_ratio(px, hi, lo if lo > 0 else min(op, px), op)
+    # Чистый хай / тонкий фитиль ≤ 10% размаха — вход (TA/INIT), не tip_cap.
+    if wick_ratio <= PROBE_CANDLE_TIP_WICK_RATIO + 1e-12 or upper_wick <= 0.15:
+        return True
+    pos = (px - lo) / (hi - lo) if (lo > 0 and hi > lo + 1e-12) else 1.0
+    tight_stair = (
+        PROBE_STAIR_MIN_BODY_PCT <= body <= PROBE_STAIR_MAX_BODY_PCT + 1e-12
+        and upper_wick <= PROBE_STAIR_MAX_WICK_PCT + 1e-12
+        and pos >= PROBE_STAIR_MIN_BAR_POS - 1e-12
+    )
+    tip_cap = hi * (1.0 - PROBE_CANDLE_TIP_GAP_PCT / 100.0)
+    if px > tip_cap + 1e-12 and not tight_stair:
+        return False
+    if lo > 0 and hi > lo + 1e-12:
+        if pos < PROBE_CANDLE_MIN_BAR_POS - 1e-12:
+            return False
+    return True
+
+
+def probe_max_spread_pct(
+    *,
+    bid: float = 0.0,
+    ask: float = 0.0,
+    tick_size: float = 0.0,
+    strict: bool = False,
+) -> float:
+    """Потолок спреда: база; для px<$0.01 вне жёсткого — max(база, 1.0%, 3×tick/mid)."""
+    base = PROBE_STRICT_MAX_SPREAD_PCT if strict else PROBE_MAX_SPREAD_PCT
+    if strict:
+        return float(base)
+    b = float(bid or 0)
+    a = float(ask or 0)
+    mid = (b + a) / 2.0 if b > 0 and a > 0 else max(b, a)
+    if mid <= 0 or mid >= PROBE_LOW_NOMINAL_PX - 1e-15:
+        return float(base)
+    ceiling = max(float(base), float(PROBE_LOW_NOMINAL_MAX_SPREAD_PCT))
+    tick = float(tick_size or 0)
+    if tick > 0:
+        ceiling = max(ceiling, PROBE_LOW_NOMINAL_SPREAD_TICKS * tick / mid * 100.0)
+    return float(ceiling)
+
+
+def probe_book_buy_ok(
+    *,
+    bid: float,
+    ask: float,
+    arm_px: float = 0.0,
+    strict: bool = False,
+    tick_size: float = 0.0,
+) -> bool:
+    """Проверка живого стакана перед рыночным Buy: спред и ask-slip. В жёстком режиме туже."""
+    b = float(bid or 0)
+    a = float(ask or 0)
+    if b <= 0 or a <= 0 or a < b:
+        return True
+    spread_pct = (a - b) / b * 100.0
+    max_spread = probe_max_spread_pct(bid=b, ask=a, tick_size=tick_size, strict=strict)
+    max_slip = PROBE_STRICT_MAX_ASK_SLIP_PCT if strict else PROBE_MAX_BUY_SLIP_PCT
+    if spread_pct > max_spread + 1e-12:
+        return False
+    ref = float(arm_px or 0)
+    if ref > 0 and (a / ref - 1.0) * 100.0 > max_slip + 1e-12:
+        return False
+    return True
+
+
+def probe_oi_spike_ok(
+    oi_now: float,
+    oi_prev: float,
+    *,
+    max_spike_pct: float | None = None,
+) -> tuple[bool, str]:
+    """Рост OI за шаг > порога — ловушка плечевиков. (True, '') — вход ок."""
+    now = float(oi_now or 0)
+    prev = float(oi_prev or 0)
+    if prev <= 0 or now <= 0:
+        return True, ""
+    delta_pct = (now - prev) / prev * 100.0
+    ceiling = float(PROBE_MAX_OI_SPIKE_PCT if max_spike_pct is None else max_spike_pct)
+    if delta_pct > ceiling + 1e-12:
+        return False, f"всплеск OI фьючерса +{delta_pct:.1f}% > {ceiling:.0f}%"
+    return True, ""
+
+
+def probe_volume_surge(
+    bars: list[dict[str, Any]] | None,
+    *,
+    now: float | None = None,
+    mult: float | None = None,
+) -> bool:
+    """Живой 5м бар ≥ mult× медианы окна (с поправкой на долю минуты)."""
+    rows = list(bars or [])
+    need = PROBE_CANDLE_LOOKBACK + 2
+    if len(rows) < need:
+        return False
+    forming = rows[-1]
+    window = rows[-(PROBE_CANDLE_LOOKBACK + 1) : -1]
+    try:
+        vol = float(forming.get("volume") or 0)
+        bar_ts = float(forming.get("ts") or 0)
+        vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError, KeyError):
+        return False
+    if vol <= 0 or not vols:
+        return False
+    typical = _median(vols)
+    if typical <= 0:
+        return False
+    elapsed_frac = 1.0
+    ts = time.time() if now is None else float(now)
+    if bar_ts > 0:
+        elapsed = max(0.0, ts - bar_ts)
+        # V_norm = V / max(0.15, t/300): ранняя ракета получает soft OBI.
+        elapsed_frac = max(PROBE_OBI_SURGE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
+    floor = float(PROBE_OBI_SURGE_VOL_MULT if mult is None else mult)
+    return vol >= typical * floor * elapsed_frac - 1e-12
+
+
+def probe_entry_obi_floor(*, strict: bool = False, volume_surge: bool = False) -> float:
+    """Порог OBI: 0.55 / жёсткий 0.60; при всплеске объёма 0.35 / 0.40."""
+    if volume_surge:
+        if strict:
+            return float(PROBE_STRICT_MIN_ENTRY_OBI_SURGE)
+        return float(PROBE_MIN_ENTRY_OBI_SURGE)
+    if strict:
+        return float(PROBE_STRICT_MIN_ENTRY_OBI)
+    return float(PROBE_MIN_ENTRY_OBI)
+
+
+def probe_entry_obi_ok(
+    obi: float | None, *, strict: bool = False, volume_surge: bool = False
+) -> bool:
+    """OBI перед Buy. Нет котировки стакана — не блокируем."""
+    if obi is None:
+        return True
+    try:
+        value = float(obi)
+    except (TypeError, ValueError):
+        return True
+    return value >= probe_entry_obi_floor(strict=strict, volume_surge=volume_surge) - 1e-12
+
+
+def _probe_staircase_setup(
+    bars: list[dict[str, Any]],
+    *,
+    typical_vol: float,
+    elapsed_frac: float = 1.0,
+) -> dict[str, float] | None:
+    """Ступенька из 3 зелёных 5м свечей с растущими close и непадающими low (TREE, BIRB, WET, MPLX)."""
+    if len(bars) < 3 or typical_vol <= 0:
+        return None
+    b2, prior, forming = bars[-3], bars[-2], bars[-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        p_op = float(prior.get("open") or 0)
+        p_lo = float(prior.get("low") or 0)
+        p_cl = float(prior.get("close") or 0)
+        p_vol = float(prior.get("volume") or 0)
+        b2_op = float(b2.get("open") or 0)
+        b2_lo = float(b2.get("low") or 0)
+        b2_cl = float(b2.get("close") or 0)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if min(op, hi, lo, px, p_op, p_lo, p_cl, b2_op, b2_lo, b2_cl) <= 0 or hi < lo:
+        return None
+    if not (px > op and p_cl > p_op and b2_cl >= b2_op):
+        return None
+    if not (px > p_cl > b2_cl):
+        return None
+    if lo < p_lo - 1e-12 or p_lo < b2_lo - 1e-12:
+        return None
+    rise3 = (px / b2_op - 1.0) * 100.0
+    if rise3 < PROBE_STAIR_MIN_RISE_PCT - 1e-12 or rise3 > PROBE_STAIR_MAX_RISE_PCT + 1e-12:
+        return None
+    body = (px / op - 1.0) * 100.0
+    if body < PROBE_STAIR_MIN_BODY_PCT - 1e-12 or body > PROBE_STAIR_MAX_BODY_PCT + 1e-12:
+        return None
+    span = hi - lo
+    pos = (px - lo) / span if span > 1e-12 else 1.0
+    if pos < PROBE_STAIR_MIN_BAR_POS - 1e-12:
+        return None
+    wick = (hi - px) / op * 100.0
+    if wick > PROBE_STAIR_MAX_WICK_PCT + 1e-12:
+        return None
+    if lo < op and (op - lo) / op * 100.0 > PROBE_STAIR_MAX_DIP_PCT + 1e-12:
+        return None
+    vol2_avg = (vol + p_vol) / 2.0
+    if vol2_avg < typical_vol * PROBE_STAIR_VOL2_MULT * elapsed_frac:
+        return None
+    if vol < typical_vol * PROBE_STAIR_VOL_MIN_MULT * elapsed_frac:
+        return None
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    if window:
+        try:
+            hi_1h = max(float(bar["high"]) for bar in window)
+            lo_1h = min(float(bar["low"]) for bar in window)
+        except (TypeError, ValueError, KeyError):
+            return None
+        if hi_1h > lo_1h + 1e-12:
+            pos_1h = (px - lo_1h) / (hi_1h - lo_1h)
+            if pos_1h < PROBE_STAIR_MIN_1H_POS - 1e-12:
+                return None
+    return {"shelf": p_op, "price": px, "stair": 1.0}
+
+
+def _probe_staircase_2bar_setup(
+    bars: list[dict[str, Any]],
+    *,
+    typical_vol: float,
+    elapsed_frac: float = 1.0,
+) -> dict[str, float] | None:
+    """Ранний вход на 2-й ступеньке (prior зелёная + forming пробивает prior.high, суммарный ход 0.80..1.80%)."""
+    if len(bars) < 2 or typical_vol <= 0:
+        return None
+    prior, forming = bars[-2], bars[-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        p_op = float(prior.get("open") or 0)
+        p_hi = float(prior.get("high") or 0)
+        p_lo = float(prior.get("low") or 0)
+        p_cl = float(prior.get("close") or 0)
+        p_vol = float(prior.get("volume") or 0)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if min(op, hi, lo, px, p_op, p_hi, p_lo, p_cl) <= 0 or hi < lo:
+        return None
+    if not (px > op and p_cl > p_op and px > p_hi):
+        return None
+    if lo < p_lo - 1e-12:
+        return None
+    rise2 = (px / p_op - 1.0) * 100.0
+    if rise2 < PROBE_STAIR2_MIN_RISE_PCT - 1e-12 or rise2 > PROBE_STAIR2_MAX_RISE_PCT + 1e-12:
+        return None
+    body = (px / op - 1.0) * 100.0
+    if body < PROBE_STAIR2_MIN_BODY_PCT - 1e-12 or body > PROBE_STAIR2_MAX_BODY_PCT + 1e-12:
+        return None
+    span = hi - lo
+    pos = (px - lo) / span if span > 1e-12 else 1.0
+    if pos < PROBE_STAIR2_MIN_BAR_POS - 1e-12:
+        return None
+    wick = (hi - px) / op * 100.0
+    if wick > PROBE_STAIR2_MAX_WICK_PCT + 1e-12:
+        return None
+    if lo < op and (op - lo) / op * 100.0 > PROBE_STAIR2_MAX_DIP_PCT + 1e-12:
+        return None
+    vol2_avg = (vol + p_vol) / 2.0
+    if vol2_avg < typical_vol * PROBE_STAIR2_VOL2_MULT * elapsed_frac:
+        return None
+    if vol < typical_vol * PROBE_STAIR2_VOL_MIN_MULT * elapsed_frac:
+        return None
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    if window:
+        try:
+            hi_1h = max(float(bar["high"]) for bar in window)
+            lo_1h = min(float(bar["low"]) for bar in window)
+        except (TypeError, ValueError, KeyError):
+            return None
+        if hi_1h > lo_1h + 1e-12:
+            pos_1h = (px - lo_1h) / (hi_1h - lo_1h)
+            if pos_1h < PROBE_STAIR2_MIN_1H_POS - 1e-12:
+                return None
+    return {"shelf": p_op, "price": px, "stair": 1.0}
+
+
+def _probe_flag_setup(
+    bars: list[dict[str, Any]],
+    *,
+    typical_vol: float,
+    elapsed_frac: float = 1.0,
+) -> dict[str, float] | None:
+    """Пробой 15-минутного плоского флага у вершины часа (TRUMP 19:40 после полки 19:20–19:35)."""
+    if len(bars) < PROBE_CANDLE_LOOKBACK + 2 or typical_vol <= 0:
+        return None
+    forming = bars[-1]
+    flag = bars[-4:-1]
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        flag_top = max(max(float(b["open"]), float(b["close"])) for b in flag)
+        flag_bot = min(min(float(b["open"]), float(b["close"])) for b in flag)
+        flag_hi = max(float(b["high"]) for b in flag)
+        hi_1h = max(float(b["high"]) for b in window)
+        lo_1h = min(float(b["low"]) for b in window)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if min(op, hi, lo, px, flag_top, flag_bot, flag_hi, hi_1h, lo_1h) <= 0 or hi < lo:
+        return None
+    if px <= op or px <= flag_hi:
+        return None
+    body = (px / op - 1.0) * 100.0
+    if body < probe_candle_min_body_pct() - 1e-12 or body > probe_candle_max_body_pct() + 1e-12:
+        return None
+    if (hi - px) / op * 100.0 > 0.50 + 1e-12:
+        return None
+    if lo < op and (op - lo) / op * 100.0 > PROBE_STAIR_MAX_DIP_PCT + 1e-12:
+        return None
+    span = hi - lo
+    pos = (px - lo) / span if span > 1e-12 else 1.0
+    if pos < 0.65 - 1e-12:
+        return None
+    if (flag_top / flag_bot - 1.0) * 100.0 > 0.80 + 1e-12:
+        return None
+    if hi_1h <= lo_1h + 1e-12 or (px - lo_1h) / (hi_1h - lo_1h) < PROBE_STAIR_MIN_1H_POS - 1e-12:
+        return None
+    # Древко флага: до плоской полки должен быть реальный импульс ≥ +2.5% от минимума часа.
+    if (flag_bot / lo_1h - 1.0) * 100.0 < 2.5 - 1e-12:
+        return None
+    if vol < typical_vol * 1.3 * elapsed_frac:
+        return None
+    return {"shelf": flag_bot, "price": px, "stair": 1.0}
+
+
+def probe_candle_setup(
+    bars: list[dict[str, Any]],
+    *,
+    now: float | None = None,
+) -> dict[str, float] | None:
+    """Вход: ступенька 2/3 бара, иначе пробой флага.
+
+    Одиночная 5м свеча выключена: главный поставщик ложных полок.
+    bars — 5м, от старых к новым; нужен open (опционально ts старта бара).
+    Полка — open предыдущей ступени или основание флага.
+    """
+    need = PROBE_CANDLE_LOOKBACK + 2
+    if len(bars) < need:
+        return None
+    forming = bars[-1]
+    prior = bars[-2]
+    window = bars[-(PROBE_CANDLE_LOOKBACK + 1):-1]
+    try:
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        price = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        bar_ts = float(forming.get("ts") or 0)
+        prior_o = float(prior.get("open") or prior.get("close") or 0)
+        prior_c = float(prior.get("close") or 0)
+        prior_vol = float(prior.get("volume") or 0)
+        vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if not vols:
+        return None
+    typical = _median(vols)
+    if typical <= 0:
+        return None
+    # Отсечение кульминационного выброса объёма на предыдущей свече (Blow-off Volume > 6.5x).
+    if prior_vol > typical * PROBE_CANDLE_MAX_PRIOR_VOL_MULT + 1e-12:
+        return None
+    # Проверим, стояла ли цена последние 15 минут (3 закрытых бара) в узкой полке флага ≤ 0.80% после импульса ≥ +2.5%.
+    flag_cooled = False
+    if len(bars) >= 4 and window:
+        try:
+            f_bars = bars[-4:-1]
+            f_top = max(max(float(b["open"]), float(b["close"])) for b in f_bars)
+            f_bot = min(min(float(b["open"]), float(b["close"])) for b in f_bars)
+            lo_1h = min(float(b["low"]) for b in window)
+            flag_cooled = (
+                f_bot > 0
+                and lo_1h > 0
+                and (f_top / f_bot - 1.0) * 100.0 <= 0.80 + 1e-12
+                and (f_bot / lo_1h - 1.0) * 100.0 >= 2.5 - 1e-12
+            )
+        except (TypeError, ValueError, KeyError):
+            flag_cooled = False
+    # Перегрев за 30м: раньше тело < min_body делало фильтр мёртвым (ниже in_break и так None).
+    if not flag_cooled and len(window) >= 6:
+        try:
+            ref_30m = float(window[-6].get("close") or 0)
+        except (TypeError, ValueError):
+            ref_30m = 0.0
+        if (
+            ref_30m > 0
+            and (price / ref_30m - 1.0) * 100.0 > PROBE_CANDLE_MAX_30M_CHG_PCT + 1e-12
+        ):
+            return None
+    # Отсечение длинных верхних фитилей продавца (> 0.85%) на 3 предыдущих 5м свечах.
+    for prev_bar in bars[-4:-1]:
+        try:
+            pb_o = float(prev_bar.get("open") or prev_bar.get("close") or 0)
+            pb_c = float(prev_bar.get("close") or 0)
+            pb_h = float(prev_bar.get("high") or prev_bar.get("close") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pb_o > 0 and pb_h > max(pb_o, pb_c):
+            pb_wick = (pb_h - max(pb_o, pb_c)) / pb_o * 100.0
+            if pb_wick > PROBE_CANDLE_MAX_PREV3_WICK_PCT + 1e-12:
+                return None
+    elapsed_frac = 1.0
+    if now is not None and bar_ts > 0:
+        elapsed = float(now) - bar_ts
+        if 0.0 <= elapsed < 300.0:
+            elapsed_frac = max(PROBE_CANDLE_MIN_ELAPSED_FRAC, min(1.0, elapsed / 300.0))
+    try:
+        prior_high = max(float(bar["high"]) for bar in window)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if prior_high > 0 and price > prior_high * (1.0 + probe_candle_max_body_pct() / 100.0):
+        return None
+    if prior_o > 0 and prior_c > prior_o:
+        prior_body = (prior_c / prior_o - 1.0) * 100.0
+        if prior_body > probe_candle_prior_max_body_pct() + 1e-12:
+            return None
+    body = (price / op - 1.0) * 100.0 if op > 0 else 0.0
+    min_body = probe_candle_min_body_pct()
+    max_body = probe_candle_max_body_pct()
+    # in_break ≥ candle_min_body (0.60%): STAIR_MIN_BODY 0.20/0.25 намеренно ниже —
+    # вялый бар 0.20–0.59% ступенькой не берём, даже если staircase_setup нашёл.
+    in_break = min_body - 1e-12 <= body <= max_body + 1e-12
+    stair = _probe_staircase_setup(
+        bars, typical_vol=typical, elapsed_frac=elapsed_frac
+    ) or _probe_staircase_2bar_setup(
+        bars, typical_vol=typical, elapsed_frac=elapsed_frac
+    )
+    if stair and in_break:
+        return stair
+    flag = _probe_flag_setup(bars, typical_vol=typical, elapsed_frac=elapsed_frac)
+    if flag and in_break:
+        return flag
+    # Одиночная 5м свеча выключена: главный поставщик ложных полок (FHE/SENT).
+    return None
+
+
+def probe_scan_day_ok(
+    *,
+    price: float,
+    day_high: float,
+    day_chg: float | None,
+) -> bool:
+    """Лента скана: режем сутки ≥45% и слив с хая >28%. Сам хай не режем — там живут выстрелы."""
+    if day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
+        return False
+    hi = float(day_high or 0)
+    px = float(price or 0)
+    if hi <= 0 or px <= 0:
+        return True
+    room = (hi - px) / hi * 100.0
+    return room <= PROBE_CANDLE_MAX_DAY_DROP_PCT + 1e-12
+
+
+def probe_candle_day_ok(
+    *,
+    price: float,
+    day_high: float,
+    day_chg: float | None,
+    stair: bool = False,
+    allow_breakout: bool = False,
+    max_day_pct: float | None = None,
+) -> bool:
+    """Топ по росту идут у хая суток; отсекаем перегрев и глубокий слив с пика (>28%).
+
+    allow_breakout: spark и pop могут обновлять хай суток (запас до −0.5%).
+    max_day_pct: потолок суток (spark/pop 18%, candle по умолчанию 45%).
+    Impulse эту проверку не проходит — хай ему и так не запрещён.
+    """
+    ceiling = float(PROBE_CANDLE_MAX_DAY_PCT if max_day_pct is None else max_day_pct)
+    if day_chg is not None and float(day_chg) >= ceiling - 1e-12:
+        return False
+    hi = float(day_high or 0)
+    px = float(price or 0)
+    if hi <= 0 or px <= 0:
+        return True
+    room = (hi - px) / hi * 100.0
+    if room > PROBE_CANDLE_MAX_DAY_DROP_PCT + 1e-12:
+        return False
+    if allow_breakout:
+        min_room = PROBE_BREAKOUT_MIN_ROOM_PCT
+    else:
+        min_room = PROBE_STAIR_MIN_DAY_ROOM_PCT if stair else PROBE_CANDLE_MIN_DAY_ROOM_PCT
+    return room >= min_room - 1e-12
+
+
+def probe_daily_loss_blocked(daily_realized_usd: float | None) -> bool:
+    """Жёсткий дневной стоп (Daily Max Drawdown): при убытке за сутки ≤ -PROBE_DAILY_MAX_LOSS_USD новые щупы стоп."""
+    if not PROBE_DAILY_LOSS_ON or daily_realized_usd is None:
+        return False
+    return float(daily_realized_usd) <= -PROBE_DAILY_MAX_LOSS_USD + 1e-9
+
+
+def probe_impulse_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """5м подножка: объёмный пробой локального хая без тихой суточной полки.
+
+    bars — от старых к новым, последняя может быть открытой.
+    """
+    need = PROBE_IMPULSE_LOOKBACK + 3
+    if len(bars) < need:
+        return None
+    forming = bars[-1]
+    closed = bars[:-1]
+    if len(closed) < PROBE_IMPULSE_LOOKBACK + 1:
+        return None
+    window = closed[-(PROBE_IMPULSE_LOOKBACK + 1):-1]
+    breakout = closed[-1]
+    try:
+        prior_high = max(float(bar["high"]) for bar in window)
+        vols = [float(bar["volume"]) for bar in window if float(bar.get("volume") or 0) > 0]
+        impulse_vol = max(float(breakout.get("volume") or 0), float(forming.get("volume") or 0))
+        price = float(forming.get("close") or 0)
+        break_close = float(breakout.get("close") or 0)
+        break_high = float(breakout.get("high") or 0)
+        live_high = float(forming.get("high") or 0)
+        live_low = float(forming.get("low") or 0)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if prior_high <= 0 or price <= 0 or not vols:
+        return None
+    typical = _median(vols)
+    if typical <= 0 or impulse_vol < typical * PROBE_IMPULSE_VOL_MULT:
+        return None
+    floor = prior_high * (1.0 + PROBE_IMPULSE_BREAK_MIN_PCT / 100.0)
+    ceiling = prior_high * (1.0 + PROBE_IMPULSE_BREAK_MAX_PCT / 100.0)
+    # Пробой уже на закрытой 5м или на живой свече.
+    tip = max(break_close, break_high, price)
+    if tip < floor or price > ceiling:
+        return None
+    if price < prior_high:
+        return None
+    # Кончик: тот же wick_ratio ≤ 0.10, что у candle/pop/spark — не tip_cap от хая.
+    if live_high > 0 and live_low > 0:
+        try:
+            live_open = float(forming.get("open") or 0)
+        except (TypeError, ValueError):
+            live_open = 0.0
+        clean_tip = probe_tip_wick_ok(price, live_high, live_low, live_open or price)
+        if not clean_tip:
+            tip_cap = live_high * (1.0 - PROBE_IMPULSE_TIP_GAP_PCT / 100.0)
+            if price > tip_cap + 1e-12:
+                return None
+        span = live_high - live_low
+        max_pos = 1.0 if clean_tip else PROBE_IMPULSE_MAX_BAR_POS
+        if span > 1e-12 and (price - live_low) / span > max_pos + 1e-12:
+            return None
+    return {"shelf": prior_high, "price": price, "impulse": 1.0}
+
+
+def probe_grind_live_ok(price: float, live_high: float, live_low: float) -> bool:
+    """Цена не у хая живой свечи и свеча не вертикальный выстрел.
+
+    Нужно и при взводе, и перед buy: за hold цена часто доезжает до пика.
+    """
+    px = float(price or 0)
+    hi = float(live_high or 0)
+    lo = float(live_low or 0)
+    if px <= 0 or hi <= 0 or lo <= 0 or hi < lo:
+        return False
+    live_span = (hi - lo) / lo * 100.0
+    if live_span > PROBE_GRIND_MAX_LIVE_BAR_PCT + 1e-12:
+        return False
+    tip_cap = hi * (1.0 - PROBE_GRIND_TIP_GAP_PCT / 100.0)
+    if px > tip_cap + 1e-12:
+        return False
+    span = hi - lo
+    if span > 1e-12 and (px - lo) / span > (1.0 - PROBE_GRIND_TIP_FRAC) + 1e-12:
+        return False
+    return True
+
+
+def probe_grind_setup(bars: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Лестница у хая: подъём без свежего пробоя полки.
+
+    bars — 15м, от старых к новым, последняя может быть открытой.
+    Полка здесь — локальный пол последних свечей, не хай: под ним вход снимаем.
+    Свежий пробой +break_min оставляем sprint/shelf.
+    """
+    if len(bars) < PROBE_GRIND_BARS + 1:
+        return None
+    forming = bars[-1]
+    closed = bars[:-1]
+    if len(closed) < PROBE_GRIND_BARS:
+        return None
+    window = closed[-PROBE_GRIND_BARS:]
+    try:
+        high = max(float(bar["high"]) for bar in window)
+        low = min(float(bar["low"]) for bar in window)
+        price = float(forming.get("close") or 0)
+        live_high = float(forming.get("high") or 0)
+        live_low = float(forming.get("low") or 0)
+        spans = []
+        for bar in window:
+            lo = float(bar["low"])
+            hi = float(bar["high"])
+            if lo <= 0:
+                return None
+            spans.append((hi - lo) / lo * 100.0)
+        older = window[:-2] if len(window) > 4 else window
+        prior = max(float(bar["high"]) for bar in older)
+        floor_src = window[-PROBE_GRIND_FLOOR_BARS:]
+        shelf = min(float(bar["low"]) for bar in floor_src)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if high <= 0 or low <= 0 or price <= 0 or prior <= 0 or shelf <= 0:
+        return None
+    if not probe_grind_live_ok(price, live_high, live_low):
+        return None
+    rise = (price / low - 1.0) * 100.0
+    if rise < PROBE_GRIND_MIN_RISE_PCT or rise > PROBE_GRIND_MAX_RISE_PCT:
+        return None
+    if price < high * PROBE_GRIND_NEAR_HIGH:
+        return None
+    if price > high * (1.0 + PROBE_GRIND_MAX_EXT_PCT / 100.0):
+        return None
+    if max(spans) > PROBE_GRIND_MAX_BAR_PCT:
+        return None
+    if price >= prior * (1.0 + cfg().probe_break_min_pct / 100.0):
+        return None
+    if price <= shelf:
+        return None
+    return {"shelf": shelf, "price": price}
+
+
+def probe_algo_params(algo: str) -> dict[str, float]:
+    """hold_sec / chase_pct для алгоритма щупа."""
+    name = str(algo or PROBE_ALGO_SHELF).strip().lower() or PROBE_ALGO_SHELF
+    if name == PROBE_ALGO_CANDLE:
+        return {
+            "hold_sec": float(PROBE_CANDLE_HOLD_SEC),
+            "chase_pct": float(PROBE_CANDLE_CHASE_PCT),
+        }
+    if name == PROBE_ALGO_IMPULSE:
+        return {
+            "hold_sec": float(PROBE_IMPULSE_HOLD_SEC),
+            "chase_pct": float(PROBE_IMPULSE_CHASE_PCT),
+        }
+    if name == PROBE_ALGO_SPARK:
+        return {
+            "hold_sec": float(PROBE_SPARK_HOLD_SEC),
+            "chase_pct": float(PROBE_SPARK_CHASE_PCT),
+        }
+    if name == PROBE_ALGO_POP:
+        return {
+            "hold_sec": float(PROBE_POP_HOLD_SEC),
+            "chase_pct": float(PROBE_POP_CHASE_PCT),
+        }
+    if name == PROBE_ALGO_PIN:
+        return {"hold_sec": 0.0, "chase_pct": float(PROBE_IMPULSE_CHASE_PCT)}
+    if name == PROBE_ALGO_SPRINT:
+        return {
+            "hold_sec": float(PROBE_SPRINT_HOLD_SEC),
+            "chase_pct": float(PROBE_SPRINT_CHASE_PCT),
+        }
+    if name == PROBE_ALGO_GRIND:
+        return {
+            "hold_sec": float(PROBE_GRIND_HOLD_SEC),
+            "chase_pct": float(PROBE_GRIND_CHASE_PCT),
+        }
+    return {
+        "hold_sec": float(PROBE_ENTRY_HOLD_SEC),
+        "chase_pct": float(PROBE_CHASE_PCT),
+    }
+
+
+def probe_pin_setup(
+    bars: list[dict[str, Any]],
+    *,
+    now: float | None = None,
+) -> dict[str, float] | None:
+    """Продолжение пина: откат 0.4–1.5% от хая 6 закрытых 5м и отбой вверх.
+
+    Полка — минимум отката. Вызывается только для запиненной монеты.
+    """
+    del now
+    if len(bars) < 7:
+        return None
+    window = bars[-7:-1]
+    forming = bars[-1]
+    try:
+        highs = [float(bar["high"]) for bar in window]
+        local_high = max(highs)
+        op = float(forming.get("open") or 0)
+        hi = float(forming.get("high") or 0)
+        lo = float(forming.get("low") or 0)
+        px = float(forming.get("close") or 0)
+        vol = float(forming.get("volume") or 0)
+        vols = [float(bar.get("volume") or 0) for bar in window if float(bar.get("volume") or 0) > 0]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if local_high <= 0 or px <= 0 or op <= 0 or hi <= 0 or lo <= 0 or not vols:
+        return None
+    pullback = (local_high - px) / local_high * 100.0
+    if pullback < PROBE_PIN_PULLBACK_MIN_PCT - 1e-12 or pullback > PROBE_PIN_PULLBACK_MAX_PCT + 1e-12:
+        return None
+    span = hi - lo
+    lower_wick = min(op, px) - lo
+    wick_ok = span > 1e-12 and lower_wick / span >= PROBE_PIN_WICK_FRAC - 1e-12
+    if not (px > op + 1e-12 or wick_ok):
+        return None
+    typical = _median(vols)
+    if typical <= 0 or vol < typical * PROBE_PIN_VOL_MULT - 1e-12:
+        return None
+    start = highs.index(local_high)
+    tail = list(window[start:]) + [forming]
+    try:
+        shelf = min(float(bar["low"]) for bar in tail)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if shelf <= 0 or px <= shelf:
+        return None
+    return {"shelf": shelf, "price": px, "pin": 1.0}
+
+
+def probe_hunter_count(items: list[dict[str, Any]] | None) -> int:
+    """Ноги и взводы обычных сетапов. Снайпер pin_pullback не считается."""
+    return sum(
+        1
+        for item in items or []
+        if str(item.get("algo") or "") != PROBE_ALGO_PIN
+    )
+
+
+def probe_sniper_count(items: list[dict[str, Any]] | None) -> int:
+    """Ноги и взводы сетапа пина."""
+    return sum(
+        1
+        for item in items or []
+        if str(item.get("algo") or "") == PROBE_ALGO_PIN
+    )
+
+
+def probe_pick_setup(
+    bars15: list[dict[str, Any]],
+    bars5: list[dict[str, Any]] | None = None,
+    *,
+    order: tuple[str, ...] | list[str] | None = None,
+    day_chg: float | None = None,
+    day_high: float | None = None,
+    now: float | None = None,
+    ticker: str = "",
+    pin_ticker: str = "",
+) -> dict[str, Any] | None:
+    """Первый сработавший по order. Живой стол: ступенька, выстрел, spark, pop.
+
+    Для запиненной монеты сначала pin_pullback. Sprint/shelf/grind — только явный order=.
+    """
+    if (
+        pin_ticker
+        and ticker
+        and str(ticker).upper() == str(pin_ticker).upper()
+    ):
+        pin_setup = probe_pin_setup(bars5 or [], now=now)
+        if pin_setup:
+            params = probe_algo_params(PROBE_ALGO_PIN)
+            return {**pin_setup, "algo": PROBE_ALGO_PIN, **params}
+    seq = tuple(order or PROBE_ALGO_ORDER)
+    for algo in seq:
+        name = str(algo or "").strip().lower()
+        if (
+            name == PROBE_ALGO_IMPULSE
+            and day_chg is not None
+            and float(day_chg) >= PROBE_IMPULSE_MAX_DAY_PCT
+        ):
+            continue
+        if (
+            name == PROBE_ALGO_SPARK
+            and day_chg is not None
+            and float(day_chg) >= PROBE_SPARK_MAX_DAY_PCT
+        ):
+            continue
+        if (
+            name == PROBE_ALGO_POP
+            and day_chg is not None
+            and float(day_chg) >= PROBE_POP_MAX_DAY_PCT
+        ):
+            continue
+        if (
+            name == PROBE_ALGO_GRIND
+            and day_chg is not None
+            and float(day_chg) >= PROBE_GRIND_MAX_DAY_PCT
+        ):
+            continue
+        if name == PROBE_ALGO_CANDLE:
+            setup = probe_candle_setup(bars5 or [], now=now)
+            if setup and not probe_candle_day_ok(
+                price=float(setup.get("price") or 0),
+                day_high=float(day_high or 0),
+                day_chg=day_chg,
+                stair=bool(setup.get("stair")),
+            ):
+                continue
+        elif name == PROBE_ALGO_IMPULSE:
+            setup = probe_impulse_setup(bars5 or [])
+        elif name == PROBE_ALGO_SPARK:
+            setup = probe_spark_setup(bars5 or [], now=now, day_chg=day_chg)
+            if setup and not probe_candle_day_ok(
+                price=float(setup.get("price") or 0),
+                day_high=float(day_high or 0),
+                day_chg=day_chg,
+                stair=False,
+                allow_breakout=True,
+                max_day_pct=PROBE_SPARK_MAX_DAY_PCT,
+            ):
+                continue
+        elif name == PROBE_ALGO_POP:
+            setup = probe_pop_setup(bars5 or [], now=now, day_chg=day_chg)
+            if setup and not probe_candle_day_ok(
+                price=float(setup.get("price") or 0),
+                day_high=float(day_high or 0),
+                day_chg=day_chg,
+                stair=False,
+                allow_breakout=True,
+                max_day_pct=PROBE_POP_MAX_DAY_PCT,
+            ):
+                continue
+        elif name == PROBE_ALGO_GRIND:
+            setup = probe_grind_setup(bars15)
+        elif name == PROBE_ALGO_SPRINT:
+            setup = probe_shelf_setup_local(bars15)
+        elif name == PROBE_ALGO_SHELF:
+            setup = probe_shelf_setup_daily(bars15)
+        else:
+            continue
+        if not setup:
+            continue
+        params = probe_algo_params(name)
+        return {**setup, "algo": name, **params}
+    return None
+
+
+def probe_trends_ok(
+    trend15: str,
+    trend1h: str,
+    day_chg: float | None,
+    week_chg: float | None = None,
+    *,
+    algo: str = "",
+) -> bool:
+    """Для ракет (impulse, pop, spark) старший тренд не блокирует вход со дна.
+
+    Candle: оба ТФ bear — нет; нужен хотя бы один bull.
+    Grind: бычий час. Неделя не слабее −5% (ракеты этот фильтр не проходят — вход сразу).
+    """
+    name = str(algo or "").strip().lower()
+    if name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP, PROBE_ALGO_PIN}:
+        return True
+    if name == PROBE_ALGO_CANDLE:
+        if trend15 == "bear" and trend1h == "bear":
+            return False
+        if trend15 != "bull" and trend1h != "bull":
+            return False
+    elif name == PROBE_ALGO_GRIND and trend1h != "bull":
+        return False
+    elif name not in {PROBE_ALGO_CANDLE, PROBE_ALGO_GRIND} and (
+        trend15 != "bull" or trend1h == "bear"
+    ):
+        return False
+    if day_chg is None:
+        return False
+    if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
+        return False
+    return True
+
+
+def probe_arm_action(
+    *,
+    armed_ts: float,
+    now: float,
+    price: float,
+    shelf: float,
+    trend15: str,
+    day_chg: float | None,
+    arm_px: float = 0.0,
+    week_chg: float | None = None,
+    algo: str = "",
+    hold_sec: float | None = None,
+    chase_pct: float | None = None,
+) -> str:
+    """buy — держится над полкой; drop — пробой погас или цена ушла; wait — ещё рано."""
+    name = str(algo or "").strip().lower()
+    if shelf <= 0 or price <= shelf:
+        return "drop"
+    # Impulse/spark/pop не снимаем по тренду на холде: CAP neutral убивал вход через 8 с.
+    # Candle: bear — снять, neutral можно. Остальные алгоритмы ждут bull.
+    if name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP, PROBE_ALGO_PIN}:
+        pass
+    elif name == PROBE_ALGO_CANDLE:
+        if trend15 == "bear":
+            return "drop"
+    elif trend15 != "bull":
+        return "drop"
+    if (
+        name == PROBE_ALGO_IMPULSE
+        and day_chg is not None
+        and float(day_chg) >= PROBE_IMPULSE_MAX_DAY_PCT
+    ):
+        return "drop"
+    if name == PROBE_ALGO_SPARK and day_chg is not None and float(day_chg) >= PROBE_SPARK_MAX_DAY_PCT:
+        return "drop"
+    if name == PROBE_ALGO_POP and day_chg is not None and float(day_chg) >= PROBE_POP_MAX_DAY_PCT:
+        return "drop"
+    if name == PROBE_ALGO_CANDLE and day_chg is not None and float(day_chg) >= PROBE_CANDLE_MAX_DAY_PCT:
+        return "drop"
+    # Ракеты + пин: как probe_trends_ok — week −5% не роняем (STABLE/CC/H иначе arm→drop).
+    if (
+        name not in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP, PROBE_ALGO_PIN}
+        and week_chg is not None
+        and float(week_chg) <= EXCLUDE_ENTER_CHG7
+    ):
+        return "drop"
+    params = probe_algo_params(algo)
+    chase = float(params["chase_pct"] if chase_pct is None else chase_pct)
+    hold = float(params["hold_sec"] if hold_sec is None else hold_sec)
+    # Candle stair/flag: полка = open ступени, ход уже +1.2..2.4% — chase от shelf
+    # ронял BASED в пинг-понг. Как spark/pop: догон от arm_px.
+    chase_ref = float(arm_px or 0) or float(shelf or 0)
+    if chase_ref > 0 and price > chase_ref * (1.0 + chase / 100.0):
+        return "drop"
+    if float(now) - float(armed_ts) < hold:
+        return "wait"
+    return "buy"
+
+
+def probe_exit_reason(
+    *,
+    price: float,
+    entry: float,
+    shelf: float,
+    trend15: str,
+    arm_px: float = 0.0,
+    peak: float = 0.0,
+    entry_low: float = 0.0,
+    algo: str = "",
+    qty: float = 0.0,
+    opened_ts: float = 0.0,
+    now: float | None = None,
+    bid: float = 0.0,
+    obi: float | None = None,
+    strict: bool = False,
+) -> str | None:
+    """Стоп и защита быстрого щупа. Плюс — ловушка вершины.
+
+    Подскок (candle/spark/pop): запас $0.36 и откат 0.45% (1.0% после пика +4%).
+    Убыток глубже −1.8% и BE после пика +1.2% (в жёстком +0.7%) — всегда.
+    Пробой open/полки — только если PROBE_SHELF_EXIT_ON.
+    Impulse: запас $0.48 и откат 1.50%. Медвежий стакан сжимает откат до 0.20%.
+
+    Пока ловушка не взведена: soft-выходы; подножка impulse/sprint/grind их не берёт.
+    Нет трапа и цена ниже входа ≥ PROBE_NO_TRAP_TIMEOUT_SEC — «срез».
+    Минус ≥ PROBE_CANDLE_STALE_SEC при уже взведённом пике — «застой» (карман2).
+    """
+    px = float(price or 0)
+    ent = float(entry or 0)
+    level = float(shelf or 0)
+    name = str(algo or "").strip().lower()
+    if px <= 0 or ent <= 0:
+        return None
+    gain = (px / ent - 1.0) * 100.0
+    fast = name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
+    if gain <= -cfg().probe_max_loss_pct:
+        return "стоп"
+    # Короткий стоп −1.8% на любой ноге щупа (не ждём 20м / −8%).
+    if gain <= -PROBE_FAST_LOSS_CAP_PCT + 1e-9:
+        return "полка"
+    if PROBE_SHELF_EXIT_ON and level > 0 and px <= level:
+        # Candle: INIT держался над open. Фитиль к open не продаём — только пробой.
+        if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+            floor = level * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0)
+            if px <= floor + 1e-12:
+                return "полка"
+        else:
+            return "полка"
+    high = max(float(peak or 0), px)
+    peak_gain = (high / ent - 1.0) * 100.0 if ent > 0 else 0.0
+    exit_px = min(px, float(bid)) if float(bid or 0) > 0 else px
+    exit_gain = (exit_px / ent - 1.0) * 100.0 if ent > 0 else 0.0
+    if name == PROBE_ALGO_PIN:
+        arm_pct = float(PROBE_PIN_ARM_PCT)
+        pullback_pct = float(PROBE_PIN_TRAIL_PCT)
+    else:
+        arm_pct = exit_trap_arm_pct(entry=ent, qty=qty, extra_usd=probe_trap_extra_usd(name))
+        pullback_pct = (
+            POCKET_EXIT_WALL_PULLBACK_PCT
+            if (obi is not None and float(obi) <= EXIT_TRAP_BEAR_OBI + 1e-12)
+            else probe_trap_pullback_pct(name, peak_gain)
+        )
+    if (
+        peak_gain >= arm_pct - 1e-6
+        and exit_px <= high * (1.0 - pullback_pct / 100.0) + 1e-12
+        and exit_gain >= float(PROBE_TRAP_MIN_EXIT_PCT) - 1e-6
+    ):
+        return "вершина"
+    # После пика +1.2% (жёсткий +0.7%) возврат к entry−0.1% — BE.
+    # Не «полка»: иначе journal/reentry/cooldown карают как слом поддержки.
+    be_peak = probe_fast_be_peak_pct(strict=bool(strict))
+    if (
+        peak_gain >= be_peak - 1e-9
+        and px <= ent * (1.0 - PROBE_FAST_BE_BUFFER_PCT / 100.0) + 1e-12
+    ):
+        return "безубыток"
+    if (
+        name in {PROBE_ALGO_IMPULSE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}
+        and float(opened_ts or 0) > 0
+        and now is not None
+        and float(now) - float(opened_ts) >= PROBE_FAIL_SCRATCH_SEC
+        and peak_gain < arm_pct - 1e-6
+    ):
+        if name in {PROBE_ALGO_CANDLE, PROBE_ALGO_SPARK, PROBE_ALGO_POP}:
+            floor = level * (1.0 - PROBE_CANDLE_SHELF_BREAK_PCT / 100.0) if level > 0 else 0.0
+            shelf_lost = level > 0 and px <= floor + 1e-12
+        else:
+            shelf_lost = level > 0 and px <= level + 1e-12
+        if shelf_lost:
+            return "срез"
+    # Трап не взвёлся и сидим в минусе глубже шума — не ждём 2ч «застой».
+    if (
+        float(opened_ts or 0) > 0
+        and now is not None
+        and float(now) - float(opened_ts) >= PROBE_NO_TRAP_TIMEOUT_SEC
+        and peak_gain < arm_pct - 1e-6
+        and gain <= -PROBE_NO_TRAP_MIN_LOSS_PCT + 1e-12
+    ):
+        return "срез"
+    # Плоский чоп без трапа: 45м потолок (gross ±0% всё ещё net −0.36% на комиссиях).
+    if (
+        float(opened_ts or 0) > 0
+        and now is not None
+        and float(now) - float(opened_ts) >= PROBE_NO_TRAP_MAX_STALE_SEC
+        and peak_gain < arm_pct - 1e-6
+        and gain < PROBE_NO_TRAP_MAX_STALE_GAIN_PCT - 1e-12
+    ):
+        return "срез"
+    if (
+        float(opened_ts or 0) > 0
+        and now is not None
+        and float(now) - float(opened_ts) >= PROBE_CANDLE_STALE_SEC
+        and gain <= 1e-12
+        and gain < arm_pct - 1e-6
+    ):
+        return "застой"
+    run = high >= ent * (1.0 + PROBE_RUN_PCT / 100.0)
+    footboard = name in {
+        PROBE_ALGO_CANDLE,
+        PROBE_ALGO_IMPULSE,
+        PROBE_ALGO_SPARK,
+        PROBE_ALGO_POP,
+        PROBE_ALGO_PIN,
+        PROBE_ALGO_SPRINT,
+        PROBE_ALGO_GRIND,
+    }
+    if not run and not footboard:
+        if float(entry_low or 0) > 0 and px <= float(entry_low):
+            return "дно"
+        scratch = float(arm_px or 0) or ent
+        if scratch > 0 and px <= scratch:
+            return "ожидание"
+    # candle/impulse/spark/pop/pin/grind: вход разрешён и без bull 15м —
+    # soft «тренд» не режем (MON: impulse + neutral → sell через 4с). Только полка/стоп/вершина.
+    if name in {
+        PROBE_ALGO_CANDLE,
+        PROBE_ALGO_IMPULSE,
+        PROBE_ALGO_SPARK,
+        PROBE_ALGO_POP,
+        PROBE_ALGO_PIN,
+        PROBE_ALGO_GRIND,
+    }:
+        return None
+    if run and trend15 == "bear":
+        return "тренд"
+    if not run and gain <= 0 and trend15 != "bull":
+        return "тренд"
+    return None
+
+
+def pocket_cash_reserve(equity: float, *, pocket_open: bool) -> float:
+    """Пока кармана нет, эти деньги не отдаём рукаву: они ждут просадку SOL."""
+    if pocket_open:
+        return 0.0
+    return btc_dip_quote(equity)
+
+
+def _arm_low(state: dict[str, Any] | None, price: float, now: float) -> dict[str, float]:
+    """Новое дно сбрасывает таймер: отскок считается только после паузы."""
+    px = float(price)
+    if state is None or px < float(state.get("low") or 0) - 1e-12:
+        return {"low": px, "ts": float(now)}
+    return {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+
+
+def _bounce_held(state: dict[str, Any], now: float | None, hold_sec: float) -> bool:
+    if now is None:
+        return True
+    return float(now) - float(state.get("ts") or 0) >= float(hold_sec)
+
+
+def alt_chase_too_far(state: dict[str, Any] | None, price: float) -> bool:
+    """Цена уже далеко от дна — покупать поздно, сетап сбрасываем."""
+    if not state:
+        return False
+    low = float(state.get("low") or 0)
+    px = float(price or 0)
+    if low <= 0 or px <= 0:
+        return False
+    return px >= low * (1.0 + cfg().sleeve_chase_pct / 100.0) - 1e-12
+
+
+def update_alt_arm(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    z: float | None,
+    now: float,
+) -> dict[str, float] | None:
+    """Сигнал z ≤ −2,5 запоминает дно. Близко к средней или chase — сигнал снимается."""
+    if z is None:
+        return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+    zf = float(z)
+    limits = cfg()
+    if state is not None and zf > limits.sleeve_cancel_z:
+        return None
+    px = float(price or 0)
+    if px <= 0:
+        return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+    if state is not None and alt_chase_too_far(state, px):
+        return None
+    if state is None:
+        if zf <= limits.sleeve_entry_z:
+            return {"low": px, "ts": float(now)}
+        return None
+    return _arm_low(state, px, now)
+
+
+def alt_bounce_ready(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    z: float | None,
+    now: float | None = None,
+) -> bool:
+    """Покупка рукава: +1,5% от дна, дно держится 5 минут, без догона выше chase, z ещё не у средней."""
+    limits = cfg()
+    if not state or z is None or float(z) > limits.sleeve_still_z:
+        return False
+    if not _bounce_held(state, now, limits.sleeve_hold_sec):
+        return False
+    low = float(state.get("low") or 0)
+    px = float(price or 0)
+    if low <= 0 or px <= 0:
+        return False
+    if alt_chase_too_far(state, px):
+        return False
+    return px >= low * (1.0 + limits.sleeve_bounce_pct / 100.0) - 1e-12
+
+
+def update_pocket_arm(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    day_chg: float | None,
+    now: float,
+) -> dict[str, float] | None:
+    """Сутки ≤ −3% запоминают дно. Выше порога сигнал снимается."""
+    if day_chg is None:
+        return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+    if float(day_chg) > cfg().pocket_day_pct:
+        return None
+    px = float(price or 0)
+    if px <= 0:
+        return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+    if state is None:
+        return {"low": px, "ts": float(now)}
+    return _arm_low(state, px, now)
+
+
+def pocket_entry_trends_ok(
+    *,
+    trend15: str,
+    trend1h: str,
+    week_chg: float | None,
+) -> bool:
+    """Карман SOL: не покупать в медвежьем 15m/1h и при неделе ≤ EXCLUDE_ENTER_CHG7."""
+    if trend15 == "bear" or trend1h == "bear":
+        return False
+    if week_chg is not None and float(week_chg) <= EXCLUDE_ENTER_CHG7:
+        return False
+    return True
+
+
+def pocket_bounce_ready(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    now: float | None = None,
+) -> bool:
+    """Покупка кармана: +1% от дна, и это дно уже 10 минут не обновлялось."""
+    limits = cfg()
+    if not state or not _bounce_held(state, now, limits.pocket_hold_sec):
+        return False
+    low = float(state.get("low") or 0)
+    px = float(price or 0)
+    if low <= 0 or px <= 0:
+        return False
+    return px >= low * (1.0 + limits.pocket_bounce_pct / 100.0) - 1e-12
+
+
+# Лента видит минимум чуть ниже low свечи Bybit. 0,5% — та же свеча, не другой откат.
+POCKET_DIP_LOW_SLACK_PCT = 0.5
+
+
+def _dip_candle(bar_low: float, floor: float) -> bool:
+    """Свеча напечатала это дно, с допуском на тик ленты ниже kline."""
+    if bar_low <= 0 or floor <= 0:
+        return False
+    return bar_low <= floor * (1.0 + POCKET_DIP_LOW_SLACK_PCT / 100.0) + 1e-12
+
+
+def _pocket_dip_index(bars: list[dict[str, Any]], low: float) -> int | None:
+    """Индекс свечи дна среди закрытых. None — дна в закрытых нет или открытая его обновляет."""
+    if len(bars) < 3 or float(low or 0) <= 0:
+        return None
+    floor = float(low)
+    if float(bars[-1].get("low") or 0) <= floor:
+        return None
+    closed = bars[:-1]
+    for i in range(len(closed) - 1, -1, -1):
+        if _dip_candle(float(closed[i].get("low") or 0), floor):
+            return i
+    return None
+
+
+def pocket_dip_pending(bars: list[dict[str, Any]], low: float) -> bool:
+    """Дно в последней закрытой свече, следующая ещё не закрылась. Взвод не снимать."""
+    idx = _pocket_dip_index(bars, low)
+    if idx is None:
+        return False
+    return idx == len(bars) - 2
+
+
+def pocket_dip_held(bars: list[dict[str, Any]], low: float) -> bool:
+    """Дно в закрытой свече, и хотя бы одна следующая закрытая не обновила его.
+
+    Раньше требовали «ровно последняя закрытая» — если 15м тренд ещё bear,
+    окно сгорало и карман вечно писал «жду закрытую свечу» (SOL 05:00–05:17).
+    Открытая свеча не должна быть ≤ дна (это уже в _pocket_dip_index).
+    """
+    if len(bars) < 3 or float(low or 0) <= 0:
+        return False
+    try:
+        floor = float(low)
+        idx = _pocket_dip_index(bars, low)
+        closed = bars[:-1]
+        # Нужна минимум одна закрытая после дна (не pending на последней закрытой).
+        if idx is None or idx >= len(closed) - 1:
+            return False
+        return all(float(bar.get("low") or 0) > floor for bar in closed[idx + 1 :])
+    except (TypeError, ValueError):
+        return False
+
+
+def pocket_swing(bars: list[dict[str, Any]], *, pullback_pct: float = POCKET_SWING_PCT) -> float | None:
+    """Дно отката, если цена хотя бы на pullback_pct ниже верха последних 4 часов.
+
+    bars — от старых к новым, последняя свеча может быть открытой.
+    """
+    if len(bars) < 4:
+        return None
+    closed = bars[:-1]
+    window = closed[-POCKET_SWING_BARS:]
+    if len(window) < 4:
+        return None
+    try:
+        high = max(float(bar["high"]) for bar in window)
+        peak_at = max(range(len(window)), key=lambda i: float(window[i]["high"]))
+        tail = list(window[peak_at:]) + [bars[-1]]
+        low = min(float(bar["low"]) for bar in tail)
+        price = float(bars[-1]["close"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if high <= 0 or low <= 0 or price <= 0:
+        return None
+    if (high - price) / high * 100.0 < float(pullback_pct):
+        return None
+    return low
+
+
+def update_pocket_swing_arm(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    swing_low: float | None,
+    now: float,
+    keep: bool = False,
+) -> dict[str, float] | None:
+    """Откат ≥3% запоминает дно. Отскок +1% ещё покупаем, даже если откат уже меньше 3%.
+
+    Сигнал снимается, когда цена ушла выше входа больше чем на 1 п.п.:
+    окно отскока пропущено. Пока ждём закрытие следующей свечи — не снимаем.
+    """
+    px = float(price or 0)
+    if swing_low is not None and float(swing_low) > 0:
+        if px <= 0:
+            return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+        seeded = state
+        if seeded is None or float(swing_low) < float(seeded.get("low") or 0) - 1e-12:
+            seeded = {"low": float(swing_low), "ts": float(now)}
+        return _arm_low(seeded, px, now)
+    if state is None or px <= 0:
+        return None if state is None else {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+    ceiling = float(state["low"]) * (1.0 + (cfg().pocket_bounce_pct + 1.0) / 100.0)
+    if px > ceiling and not keep:
+        return None
+    return {"low": float(state["low"]), "ts": float(state.get("ts") or now)}
+
+
+def update_pocket_exit_arm(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    entry: float,
+    now: float,
+    qty: float = 0.0,
+) -> dict[str, float] | None:
+    """Плюс ≥ +1.5% запоминает вершину. Новая вершина сбрасывает таймер.
+
+    Ниже порога ловушка ещё не взведена. Уже взведенная не снимается:
+    откат как раз и есть сигнал продажи.
+    """
+    px = float(price or 0)
+    ent = float(entry or 0)
+    if px <= 0 or ent <= 0:
+        if state is None:
+            return None
+        return {"high": float(state["high"]), "ts": float(state.get("ts") or now)}
+    gain = (px / ent - 1.0) * 100.0
+    if state is None:
+        need = max(
+            exit_trap_arm_pct(entry=ent, qty=qty),
+            float(PROBE_PIN_ARM_PCT),
+        )
+        if gain < need - 1e-6:
+            return None
+        return {"high": px, "ts": float(now)}
+    high = float(state.get("high") or 0)
+    if px > high + 1e-12:
+        return {"high": px, "ts": float(now)}
+    return {"high": high, "ts": float(state.get("ts") or now)}
+
+
+def pocket_exit_ready(
+    state: dict[str, Any] | None,
+    *,
+    price: float,
+    now: float | None = None,
+    entry: float = 0.0,
+    bid: float = 0.0,
+    obi: float | None = None,
+) -> bool:
+    """Продажа кармана: откат 1.2% от вершины, с учётом bid и дисбаланса стакана.
+
+    Без ожидания таймера режем сразу, если:
+    - в стакане медвежья плита (obi ≤ 0.28) и откат ≥ 0.20% от вершины;
+    - цена/bid откатила ≥ 1.2% от вершины;
+    - или цена/bid вернулась ≤ точки входа.
+    """
+    limits = cfg()
+    if not state:
+        return False
+    high = float(state.get("high") or 0)
+    raw_px = float(price or 0)
+    if high <= 0 or raw_px <= 0:
+        return False
+    px = min(raw_px, float(bid)) if float(bid or 0) > 0 else raw_px
+    bear_wall = obi is not None and float(obi) <= EXIT_TRAP_BEAR_OBI + 1e-12
+    if bear_wall and px <= high * (1.0 - POCKET_EXIT_WALL_PULLBACK_PCT / 100.0) + 1e-12:
+        return True
+    if px > high * (1.0 - limits.pocket_exit_pullback_pct / 100.0) + 1e-12:
+        return False
+    ent = float(entry or 0)
+    if ent > 0 and px <= ent + 1e-12:
+        return True
+    if px <= high * (1.0 - POCKET_EXIT_DEEP_PULLBACK_PCT / 100.0) + 1e-12:
+        return True
+    return _bounce_held(state, now, limits.pocket_exit_hold_sec)
+
+
+def position_basis(entry: float, anchor: float | None) -> float:
+    """Стоп и ловушка считаются от якоря, если он задан. Иначе от цены покупки."""
+    anc = float(anchor or 0)
+    if anc > 0:
+        return anc
+    return float(entry or 0)
+
+
+
+def watch_period_sec(**kwargs: Any) -> float:
+    return float(WATCH_PERIOD_CALM)

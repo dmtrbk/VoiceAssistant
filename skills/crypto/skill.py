@@ -31,7 +31,7 @@ class CryptoSkill(
     CryptoJournalMixin,
     BaseSkill,
 ):
-    """Спот Bybit: курс без ключа, сделки и авто — с ключом и тумблерами."""
+    """Спот Bybit: курс/портфель/журнал. Автоалго сняты (архив spot_desk_20261124)."""
 
     def __init__(self) -> None:
         self._api_key = ""

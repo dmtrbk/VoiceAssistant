@@ -1,0 +1,1572 @@
+# skills/crypto/common.py
+# Общие константы и помощники спота Bybit.
+
+
+import hashlib
+import hmac
+import json
+import logging
+import math
+import os
+import re
+import threading
+import time
+from datetime import datetime
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import requests
+from requests.adapters import HTTPAdapter
+
+from skills.text_utils import plural as _plural
+from skills.utils import send_telegram_notification, telegram_configured
+
+logger = logging.getLogger(__name__)
+
+_API_PROD = "https://api.bybit.com"
+_API_TEST = "https://api-testnet.bybit.com"
+_QUOTE = "USDT"
+_CACHE_SEC = 25.0
+_DESK_PERIOD_SEC = 6 * 60 * 60  # полный скор + ребаланс
+_WATCH_PERIOD_SEC = 12 * 60  # базовый дозор: стоп / тейк / новые альты к сохранённой цели
+_HTTP_POOL = 16  # параллельные тикеры/полосы дозора + голос на одной Session
+_DEFAULT_WATCH = ("BTC", "ETH")
+_STABLES = frozenset({"USDT", "USDC", "DAI", "FDUSD", "USDE"})
+_MIN_QUOTE = 5.0
+_MIN_TRADE_PCT = 0.02
+_SMALL_EQUITY = 50.0
+_AI_MAX_NAMES = 4
+# Запас под комиссию/пыль при market buy «на весь кэш» или хвост ребаланса.
+_BUY_CASH_BUFFER = 0.998
+# Лимитные заявки стола: maker 0.1% вместо taker 0.18%. Не исполнилась — добор IOC.
+_MAKER_WAIT_SEC = 24.0
+_MAKER_POLL_SEC = 1.5
+# Добор Limit IOC: потолок цены относительно ask/bid, без слепого Market.
+_IOC_MAX_SLIP_PCT = 0.35
+_IOC_CANCEL_WAIT_SEC = 3.0
+_TRADE_HISTORY_KEEP = 5000
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_HOLD_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_holds.json")
+_EXCLUDED_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_excluded.json")
+_BLACKLIST_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_blacklist.json")
+_BOUGHT_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_bought.json")
+_TRADE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trades.json")
+_DAILY_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_daily.json")
+_ALLOC_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_alloc.json")
+_TRAIL_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_trail.json")
+_EARN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_earn.json")
+_BTC_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_btc_dip.json")
+_SUI_DIP_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_ava_dip.json")
+_SECOND_POCKET_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_second_pocket.json")
+_PROBE_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe.json")
+_PROBE_PAPER_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe_paper.json")
+_PROBE_PIN_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_probe_pin.json")
+_ENTRY_ARM_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_entry_arm.json")
+_ANCHOR_PATH = os.path.join(_PROJECT_DIR, "jarvis_crypto_anchor.json")
+
+_ENCYCLOPEDIA = (
+    "что такое", "что значит", "кто такой", "кто такая",
+    "расскажи про", "объясни что",
+)
+_PRICE_HINTS = (
+    "сколько стоит", "какая цена", "цена на", "курс",
+    "как там", "что там", "что со ", "что с ", "котиров",
+)
+_STATUS_ASK = (
+    "что там", "как там", "покажи", "скажи", "сколько",
+    "какой ", "какая ", "какие ", "что с ", "что со ",
+    "состояние", "сводка", "котиров", "курс",
+)
+_YIELD_HINTS = (
+    "в плюсе", "в минусе", "прибыл", "убыт", "заработал",
+    "доход", "сколько я", "результат",
+)
+_BUY_HINTS = ("купи", "докупи", "возьми")
+_SELL_HINTS = ("продай",)
+_AUTO_HINTS = ("поторгуй", "поторгуйся", "сыграй на бирже")
+_ALLIN_HINTS = ("переложи", "вложи все", "вложи всё", "все в ", "всё в ")
+_MAX_HINTS = ("все", "всё", "весь", "всю", "целиком", "максимум", "полностью")
+_ADVICE_HINTS = (
+    "посоветуй", "рекомендаци", "какие монеты", "что купить",
+    "разбери сигнал", "пришли совет",
+)
+_JOURNAL_HINTS = ("дневник", "журнал сделок")
+_FOLLOWUP = (
+    "подробнее", "подробней", "первая", "вторая",
+    "ещё", "еще", "доллар", "в долларах",
+)
+_TOPIC_WORDS = ("крипта", "крипте", "криптой", "крипту", "крипты")
+_AMT_WORDS = {
+    "один": 1, "одна": 1, "одно": 1,
+    "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5,
+    "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10,
+    "пятнадцать": 15, "двадцать": 20, "тридцать": 30,
+    "пятьдесят": 50, "сто": 100, "двести": 200, "пятьсот": 500,
+}
+
+_COINS: dict[str, dict[str, Any]] = {
+    "BTC": {
+        "spoken": "Биткоин",
+        "words": (
+            "биткоин", "биткойн", "биток", "битка",
+            "биткоина", "биткоине", "биткоину", "биткоином", "биткоины",
+            "bitcoin",
+        ),
+        "short": ("btc", "бтц"),
+        "ambiguous": frozenset({"биток", "битка"}),
+    },
+    "ETH": {
+        "spoken": "Эфир",
+        "words": (
+            "эфир", "эфира", "эфире", "эфиру", "эфиром",
+            "эфириум", "эфириума", "эфириуме", "ethereum",
+        ),
+        "short": ("eth", "этх"),
+        "ambiguous": frozenset({"эфир", "эфира", "эфире", "эфиру", "эфиром"}),
+    },
+    "SOL": {
+        "spoken": "Солана",
+        "words": ("солана", "соланы", "солану", "солане", "solana"),
+        "short": ("sol",),
+        "ambiguous": frozenset(),
+    },
+    # Бывший Toncoin (TON): на Bybit спот теперь только GRAMUSDT.
+    "GRAM": {
+        "spoken": "Грам",
+        "words": ("грам", "грама", "граме", "граму", "gram", "тонкоин", "тон", "toncoin"),
+        "short": ("gram", "ton"),
+        "ambiguous": frozenset({"грам", "грама", "граме", "граму", "тон"}),
+    },
+    "XRP": {
+        "spoken": "Рипл",
+        "words": ("рипл", "рипла", "ripple"),
+        "short": ("xrp",),
+        "ambiguous": frozenset(),
+    },
+    "DOGE": {
+        "spoken": "Дож",
+        "words": ("дож", "догикоин", "dogecoin"),
+        "short": ("doge",),
+        "ambiguous": frozenset(),
+    },
+}
+
+_GECKO_IDS = {
+    "bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL",
+    "toncoin": "GRAM", "ton": "GRAM", "ripple": "XRP", "dogecoin": "DOGE",
+}
+
+_desk_loop_started = False
+_desk_init_lock = threading.Lock()
+_TRADE_LOCK = threading.RLock()
+
+
+def make_http_session() -> requests.Session:
+    """Общий HTTPS-пул: дозор бьёт в Bybit пачкой, голос не ждёт свободный слот."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": "VoiceAssistant/1.0"})
+    adapter = HTTPAdapter(
+        pool_connections=_HTTP_POOL,
+        pool_maxsize=_HTTP_POOL,
+        max_retries=0,
+        pool_block=False,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+def _format_pct(value: float) -> str:
+    rounded = round(value, 1)
+    if abs(rounded - int(rounded)) < 0.05:
+        shown = str(int(round(rounded)))
+    else:
+        shown = f"{rounded:.1f}".replace(".", ",")
+    if rounded > 0:
+        return f"плюс {shown} процента"
+    if rounded < 0:
+        return f"минус {shown.replace('-', '')} процента"
+    return "без изменения"
+
+
+def _format_usd(amount: float, signed: bool = False) -> str:
+    rounded = int(round(amount))
+    word = _plural(abs(rounded), "доллар", "доллара", "долларов")
+    if signed:
+        if rounded > 0:
+            return f"плюс {rounded} {word}"
+        if rounded < 0:
+            return f"минус {abs(rounded)} {word}"
+        return f"0 {word}"
+    if abs(amount) >= 1_000_000:
+        mln = amount / 1_000_000.0
+        shown = f"{mln:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+        return f"{shown} млн долларов"
+    return f"{rounded} {word}"
+
+
+def _format_rub(amount: float) -> str:
+    if amount >= 1_000_000:
+        mln = amount / 1_000_000.0
+        shown = f"{mln:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+        return f"{shown} млн рублей"
+    rounded = int(round(amount))
+    word = _plural(abs(rounded), "рубль", "рубля", "рублей")
+    return f"{rounded} {word}"
+
+
+def _qty_str(value: float, step: float, *, round_up: bool = False) -> str:
+    step = float(step or 0)
+    if step > 0:
+        units = value / step
+        if round_up:
+            value = math.ceil(units - 1e-12) * step
+        else:
+            value = math.floor(units + 1e-12) * step
+    if step >= 1:
+        return str(int(value))
+    text = f"{value:.8f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _price_str(value: float, tick: float, *, round_up: bool = False) -> str:
+    """Цена по шагу инструмента: покупку округляем вниз, продажу вверх — остаёмся maker'ом."""
+    tick = float(tick or 0)
+    if tick > 0:
+        units = value / tick
+        if round_up:
+            value = math.ceil(units - 1e-9) * tick
+        else:
+            value = math.floor(units + 1e-9) * tick
+    text = f"{value:.10f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _maker_orders_enabled() -> bool:
+    """Стол торгует лимитными заявками, пока явно не выключено."""
+    raw = (os.getenv("CRYPTO_MAKER_ORDERS") or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _earn_enabled() -> bool:
+    """Простаивающий кэш под проценты Bybit. Включается явно: нужно право Earn у ключа."""
+    raw = (os.getenv("CRYPTO_EARN") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _testnet() -> bool:
+    return (os.getenv("BYBIT_TESTNET") or os.getenv("CRYPTO_TESTNET") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _voice_trade_enabled() -> bool:
+    try:
+        from skill_settings import is_crypto_voice_trade_enabled
+        return is_crypto_voice_trade_enabled()
+    except Exception:
+        pass
+    raw = (os.getenv("CRYPTO_VOICE_TRADE") or os.getenv("BYBIT_VOICE_TRADE") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _auto_trade_enabled() -> bool:
+    try:
+        from skill_settings import is_crypto_auto_trade_enabled
+        return is_crypto_auto_trade_enabled()
+    except Exception:
+        pass
+    raw = (os.getenv("CRYPTO_AUTO_TRADE") or os.getenv("BYBIT_AUTO_TRADE") or "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+def _normalize_ticker(raw: str) -> str:
+    token = (raw or "").strip().upper()
+    mapped = _GECKO_IDS.get(token.lower(), "")
+    if mapped:
+        return mapped
+    if token.endswith(_QUOTE) and len(token) > 4:
+        token = token[: -len(_QUOTE)]
+    return token
+
+
+def _watchlist() -> list[str]:
+    raw = (os.getenv("CRYPTO_WATCHLIST") or "").strip()
+    if not raw:
+        return list(_DEFAULT_WATCH)
+    ids: list[str] = []
+    for part in raw.split(","):
+        ticker = _normalize_ticker(part)
+        if ticker and ticker not in _STABLES and ticker not in ids:
+            ids.append(ticker)
+    return ids or list(_DEFAULT_WATCH)
+
+
+def _spoken(ticker: str) -> str:
+    meta = _COINS.get(ticker.upper())
+    if meta:
+        return str(meta["spoken"])
+    return ticker.upper()
+
+
+def _read_ticker_set(path: str) -> set[str] | None:
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return set()
+    if isinstance(raw, dict):
+        raw = raw.get("tickers") or []
+    if not isinstance(raw, list):
+        return set()
+    return {_normalize_ticker(str(item)) for item in raw if str(item).strip()}
+
+
+def read_blacklist(path: str | None = None) -> set[str]:
+    """Постоянный чёрный список. Недельные исключения его не снимают."""
+    return _read_ticker_set(path or _BLACKLIST_PATH) or set()
+
+
+def _write_ticker_set(path: str, tickers: set[str]) -> None:
+    payload = {"tickers": sorted(tickers)}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал %s: %s", os.path.basename(path), exc)
+
+
+def read_alloc_state(path: str | None = None) -> dict[str, Any] | None:
+    """Последняя цель стола + метки дозора. None — файла нет / битый."""
+    path = path or _ALLOC_PATH
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    alloc_raw = raw.get("alloc") or {}
+    if not isinstance(alloc_raw, dict):
+        alloc_raw = {}
+    alloc: dict[str, float] = {}
+    for key, value in alloc_raw.items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or ticker in _STABLES:
+            continue
+        try:
+            pct = float(value)
+        except (TypeError, ValueError):
+            continue
+        if pct > 0:
+            alloc[ticker] = pct
+    watch_trades: list[float] = []
+    for item in raw.get("watch_trades") or []:
+        try:
+            watch_trades.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    ts = float(raw.get("ts") or 0)
+    return {
+        "alloc": alloc,
+        "why": str(raw.get("why") or ""),
+        "ts": ts,
+        "desk_ts": float(raw.get("desk_ts") or ts),
+        "watch_trades": watch_trades,
+    }
+
+
+def write_alloc_state(
+    alloc: dict[str, float],
+    *,
+    why: str = "",
+    watch_trades: list[float] | None = None,
+    desk_ts: float | None = None,
+    path: str | None = None,
+) -> None:
+    """desk_ts — время полного стола; дозор его не передаёт, и метка сохраняется."""
+    path = path or _ALLOC_PATH
+    now = time.time()
+    if desk_ts is None:
+        prev = read_alloc_state(path)
+        desk_ts = prev["desk_ts"] if prev else now
+    clean = {
+        _normalize_ticker(str(k)): float(v)
+        for k, v in (alloc or {}).items()
+        if _normalize_ticker(str(k)) and float(v) > 0
+    }
+    payload = {
+        "alloc": clean,
+        "why": str(why or ""),
+        "ts": now,
+        "desk_ts": float(desk_ts),
+        "watch_trades": list(watch_trades or [])[-20:],
+    }
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал цель стола: %s", exc)
+
+
+def _read_trail_payload(path: str) -> dict[str, Any]:
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def read_anchors(path: str | None = None) -> dict[str, float]:
+    """Цены, от которых заново считаются стоп и ловушка. Журнал покупок не меняется."""
+    path = path or _ANCHOR_PATH
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    source = raw.get("anchors") if isinstance(raw.get("anchors"), dict) else raw
+    out: dict[str, float] = {}
+    for key, value in source.items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or ticker in {"ANCHORS", "TS"}:
+            continue
+        try:
+            price = float(value.get("price") if isinstance(value, dict) else value)
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            out[ticker] = price
+    return out
+
+
+def write_anchors(anchors: dict[str, float], path: str | None = None) -> None:
+    path = path or _ANCHOR_PATH
+    clean = {
+        _normalize_ticker(str(key)): float(price)
+        for key, price in (anchors or {}).items()
+        if _normalize_ticker(str(key)) and float(price or 0) > 0
+    }
+    payload = {"anchors": {ticker: {"price": price} for ticker, price in sorted(clean.items())}, "ts": time.time()}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал отсчёт: %s", exc)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def read_sleeve_exits(path: str | None = None) -> dict[str, dict[str, float]]:
+    """Вершины рукава: тикер → high и время этой вершины."""
+    path = path or _TRAIL_PATH
+    raw = _read_trail_payload(path).get("sleeve_exits")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for key, value in raw.items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            high = float(value.get("high") or 0)
+            ts = float(value.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if high > 0:
+            out[ticker] = {"high": high, "ts": ts}
+    return out
+
+
+def write_sleeve_exits(arms: dict[str, dict[str, float]], path: str | None = None) -> None:
+    path = path or _TRAIL_PATH
+    prev = _read_trail_payload(path)
+    clean: dict[str, dict[str, float]] = {}
+    for key, value in (arms or {}).items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            high = float(value.get("high") or 0)
+        except (TypeError, ValueError):
+            continue
+        if high <= 0:
+            continue
+        clean[ticker] = {"high": high, "ts": float(value.get("ts") or 0)}
+    payload = {
+        "legs": prev.get("legs") if isinstance(prev.get("legs"), dict) else {},
+        "sleeve_exits": clean,
+        "ts": time.time(),
+    }
+    if isinstance(prev.get("sleeve_lows"), dict):
+        payload["sleeve_lows"] = prev["sleeve_lows"]
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал вершины рукава: %s", exc)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def read_sleeve_lows(path: str | None = None) -> dict[str, float]:
+    """Дно входа рукава: под него продаём, пока −7% не настал."""
+    path = path or _TRAIL_PATH
+    raw = _read_trail_payload(path).get("sleeve_lows")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key, value in raw.items():
+        ticker = _normalize_ticker(str(key))
+        try:
+            low = float(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if ticker and low > 0:
+            out[ticker] = low
+    return out
+
+
+def write_sleeve_lows(lows: dict[str, float], path: str | None = None) -> None:
+    path = path or _TRAIL_PATH
+    prev = _read_trail_payload(path)
+    clean: dict[str, float] = {}
+    for key, value in (lows or {}).items():
+        ticker = _normalize_ticker(str(key))
+        try:
+            low = float(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if ticker and low > 0:
+            clean[ticker] = low
+    payload: dict[str, Any] = {
+        "legs": prev.get("legs") if isinstance(prev.get("legs"), dict) else {},
+        "sleeve_lows": clean,
+        "ts": time.time(),
+    }
+    if isinstance(prev.get("sleeve_exits"), dict):
+        payload["sleeve_exits"] = prev["sleeve_exits"]
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал дно рукава: %s", exc)
+
+
+def read_trail_state(path: str | None = None) -> dict[str, dict[str, Any]]:
+    """high/entry/stop/armed по тикерам стола (peak храним в high)."""
+    path = path or _TRAIL_PATH
+    raw = _read_trail_payload(path)
+    legs_raw = raw.get("legs")
+    if not isinstance(legs_raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, value in legs_raw.items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            high = float(value.get("high") or value.get("peak") or 0)
+            entry = float(value.get("entry") or 0)
+            stop = float(value.get("stop") or 0)
+        except (TypeError, ValueError):
+            continue
+        if high <= 0 and entry <= 0:
+            continue
+        out[ticker] = {
+            "high": max(high, entry, 0.0),
+            "entry": max(entry, 0.0),
+            "stop": max(stop, 0.0),
+            "armed": bool(value.get("armed")),
+        }
+    return out
+
+
+def read_btc_dip(path: str | None = None) -> dict[str, float]:
+    """Отдельные $100 на просадку BTC. Пусто — кармана нет."""
+    path = path or _BTC_DIP_PATH
+    if not os.path.isfile(path):
+        return {"qty": 0.0, "entry": 0.0}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return {"qty": 0.0, "entry": 0.0}
+    if not isinstance(raw, dict):
+        return {"qty": 0.0, "entry": 0.0}
+    try:
+        qty = float(raw.get("qty") or 0)
+        entry = float(raw.get("entry") or 0)
+    except (TypeError, ValueError):
+        return {"qty": 0.0, "entry": 0.0}
+    if qty <= 0 or entry <= 0:
+        return {"qty": 0.0, "entry": 0.0}
+    try:
+        exit_high = float(raw.get("exit_high") or 0)
+        exit_ts = float(raw.get("exit_ts") or 0)
+        low = float(raw.get("low") or 0)
+        ticker = str(raw.get("ticker") or "").upper()
+    except (TypeError, ValueError):
+        exit_high = 0.0
+        exit_ts = 0.0
+        low = 0.0
+        ticker = ""
+    return {
+        "qty": qty,
+        "entry": entry,
+        "exit_high": max(exit_high, 0.0),
+        "exit_ts": exit_ts,
+        "low": max(low, 0.0),
+        "ticker": ticker if ticker in {"SUI", "AVA"} else "",
+    }
+
+
+def _parse_low_arm(raw: Any) -> dict[str, float] | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        low = float(raw.get("low") or 0)
+        ts = float(raw.get("ts") or 0)
+    except (TypeError, ValueError):
+        return None
+    if low <= 0:
+        return None
+    return {"low": low, "ts": ts}
+
+
+def _legacy_sui_dip_row(path: str | None = None) -> dict[str, Any]:
+    """Старый одиночный AVA/SUI файл — только для миграции."""
+    row = read_btc_dip(path or _SUI_DIP_PATH)
+    if float(row.get("qty") or 0) <= 0:
+        return {}
+    ticker = str(row.get("ticker") or "AVA").upper() or "AVA"
+    return {
+        "ticker": ticker,
+        "qty": float(row["qty"]),
+        "entry": float(row["entry"]),
+        "exit_high": float(row.get("exit_high") or 0),
+        "exit_ts": float(row.get("exit_ts") or 0),
+        "low": float(row.get("low") or 0),
+    }
+
+
+def _parse_second_pocket_leg(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    ticker = _normalize_ticker(str(raw.get("ticker") or ""))
+    try:
+        qty = float(raw.get("qty") or 0)
+        entry = float(raw.get("entry") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not ticker or qty <= 0 or entry <= 0:
+        return None
+    try:
+        exit_high = float(raw.get("exit_high") or 0)
+        exit_ts = float(raw.get("exit_ts") or 0)
+        low = float(raw.get("low") or 0)
+    except (TypeError, ValueError):
+        exit_high = 0.0
+        exit_ts = 0.0
+        low = 0.0
+    out: dict[str, Any] = {
+        "ticker": ticker,
+        "qty": qty,
+        "entry": entry,
+        "exit_high": max(exit_high, 0.0),
+        "exit_ts": exit_ts,
+        "low": max(low, 0.0),
+    }
+    if bool(raw.get("scratch")):
+        out["scratch"] = True
+    if bool(raw.get("unwind")):
+        out["unwind"] = True
+    sell_order = str(raw.get("sell_order") or "").strip()
+    if sell_order:
+        out["sell_order"] = sell_order
+        try:
+            out["sell_px"] = float(raw.get("sell_px") or 0)
+        except (TypeError, ValueError):
+            out["sell_px"] = 0.0
+    return out
+
+
+def read_second_pocket_legs(path: str | None = None) -> list[dict[str, Any]]:
+    """Ноги второго кармана (переданы с щупа). Любой тикер."""
+    path = path or _SECOND_POCKET_PATH
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except Exception:
+            raw = None
+        if isinstance(raw, dict):
+            rows = raw.get("legs")
+            if isinstance(rows, list):
+                out = []
+                for item in rows:
+                    leg = _parse_second_pocket_leg(item)
+                    if leg:
+                        out.append(leg)
+                if out:
+                    return out
+            # Одиночный формат в новом файле.
+            one = _parse_second_pocket_leg(raw)
+            if one:
+                return [one]
+    legacy = _legacy_sui_dip_row()
+    if legacy:
+        write_second_pocket_legs([legacy], path=path)
+        try:
+            if os.path.isfile(_SUI_DIP_PATH):
+                os.remove(_SUI_DIP_PATH)
+        except Exception:
+            pass
+        return [legacy]
+    return []
+
+
+def write_second_pocket_legs(
+    legs: list[dict[str, Any]],
+    path: str | None = None,
+) -> None:
+    path = path or _SECOND_POCKET_PATH
+    clean: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in legs or []:
+        leg = _parse_second_pocket_leg(raw)
+        if not leg:
+            continue
+        ticker = str(leg["ticker"])
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        row: dict[str, Any] = {
+            "ticker": ticker,
+            "qty": float(leg["qty"]),
+            "entry": float(leg["entry"]),
+        }
+        if float(leg.get("exit_high") or 0) > 0:
+            row["exit_high"] = float(leg["exit_high"])
+            row["exit_ts"] = float(leg.get("exit_ts") or 0)
+        if float(leg.get("low") or 0) > 0:
+            row["low"] = float(leg["low"])
+        if bool(leg.get("scratch")):
+            row["scratch"] = True
+        if bool(leg.get("unwind")):
+            row["unwind"] = True
+        if str(leg.get("sell_order") or "").strip():
+            row["sell_order"] = str(leg["sell_order"]).strip()
+            if float(leg.get("sell_px") or 0) > 0:
+                row["sell_px"] = float(leg["sell_px"])
+        clean.append(row)
+    if not clean:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("[Крипта] не стёр второй карман: %s", exc)
+        return
+    payload = {"legs": clean, "ts": time.time()}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал второй карман: %s", exc)
+
+
+def second_pocket_tickers(path: str | None = None) -> set[str]:
+    return {str(leg["ticker"]) for leg in read_second_pocket_legs(path)}
+
+
+def second_pocket_qty(ticker: str, path: str | None = None) -> float:
+    coin = _normalize_ticker(str(ticker or ""))
+    if not coin:
+        return 0.0
+    for leg in read_second_pocket_legs(path):
+        if str(leg["ticker"]) == coin:
+            return float(leg["qty"])
+    return 0.0
+
+
+def upsert_second_pocket_leg(
+    *,
+    ticker: str,
+    qty: float,
+    entry: float,
+    low: float = 0.0,
+    exit_high: float = 0.0,
+    exit_ts: float = 0.0,
+    scratch: bool = False,
+    max_legs: int | None = None,
+    path: str | None = None,
+) -> bool:
+    """Добавить/обновить ногу. False — карман полон и тикера ещё нет."""
+    coin = _normalize_ticker(str(ticker or ""))
+    if not coin or float(qty or 0) <= 0 or float(entry or 0) <= 0:
+        return False
+    from skills.crypto.desk_policy import pocket_from_probe_max
+
+    limit = int(pocket_from_probe_max() if max_legs is None else max_legs)
+    legs = read_second_pocket_legs(path)
+    found = None
+    for idx, leg in enumerate(legs):
+        if str(leg["ticker"]) == coin:
+            found = idx
+            break
+    if found is None and len(legs) >= max(1, limit):
+        return False
+    row: dict[str, Any] = {
+        "ticker": coin,
+        "qty": float(qty),
+        "entry": float(entry),
+        "low": max(0.0, float(low or 0)),
+        "exit_high": max(0.0, float(exit_high or 0)),
+        "exit_ts": float(exit_ts or 0),
+    }
+    if scratch:
+        row["scratch"] = True
+    if found is None:
+        legs.append(row)
+    else:
+        prev = legs[found]
+        # Добор той же монеты — средняя цена.
+        prev_qty = float(prev["qty"])
+        prev_entry = float(prev["entry"])
+        total = prev_qty + float(qty)
+        mid = (prev_qty * prev_entry + float(qty) * float(entry)) / total if total > 0 else float(entry)
+        row["qty"] = total
+        row["entry"] = mid
+        row["low"] = float(low or 0) or float(prev.get("low") or 0)
+        row["exit_high"] = max(float(exit_high or 0), float(prev.get("exit_high") or 0))
+        row["exit_ts"] = float(exit_ts or prev.get("exit_ts") or 0)
+        if scratch or bool(prev.get("scratch")):
+            row["scratch"] = True
+        if bool(prev.get("unwind")):
+            row["unwind"] = True
+        legs[found] = row
+    write_second_pocket_legs(legs, path=path)
+    return True
+
+
+def update_second_pocket_leg(
+    ticker: str,
+    *,
+    qty: float | None = None,
+    entry: float | None = None,
+    low: float | None = None,
+    exit_high: float | None = None,
+    exit_ts: float | None = None,
+    sell_order: str | None = None,
+    sell_px: float | None = None,
+    path: str | None = None,
+) -> None:
+    coin = _normalize_ticker(str(ticker or ""))
+    if not coin:
+        return
+    legs = read_second_pocket_legs(path)
+    out: list[dict[str, Any]] = []
+    for leg in legs:
+        if str(leg["ticker"]) != coin:
+            out.append(leg)
+            continue
+        if qty is not None and float(qty) <= 0:
+            continue
+        row = dict(leg)
+        if qty is not None:
+            row["qty"] = float(qty)
+        if entry is not None and float(entry) > 0:
+            row["entry"] = float(entry)
+        if low is not None:
+            row["low"] = max(0.0, float(low))
+        if exit_high is not None:
+            row["exit_high"] = max(0.0, float(exit_high))
+        if exit_ts is not None:
+            row["exit_ts"] = float(exit_ts)
+        if sell_order is not None:
+            note = str(sell_order or "").strip()
+            if note:
+                row["sell_order"] = note
+            else:
+                row.pop("sell_order", None)
+                row.pop("sell_px", None)
+        if sell_px is not None and float(sell_px or 0) > 0:
+            row["sell_px"] = float(sell_px)
+        out.append(row)
+    write_second_pocket_legs(out, path=path)
+
+
+def drop_second_pocket_leg(ticker: str, path: str | None = None) -> None:
+    coin = _normalize_ticker(str(ticker or ""))
+    if not coin:
+        return
+    legs = [leg for leg in read_second_pocket_legs(path) if str(leg["ticker"]) != coin]
+    write_second_pocket_legs(legs, path=path)
+
+
+def read_sui_dip(path: str | None = None) -> dict[str, float]:
+    """Совместимость: первая нога второго кармана (или пусто)."""
+    del path
+    legs = read_second_pocket_legs()
+    if not legs:
+        return {"qty": 0.0, "entry": 0.0}
+    # AVA/SUI раньше были единственными — предпочитаем их, иначе первую.
+    preferred = None
+    for leg in legs:
+        if str(leg["ticker"]) in {"SUI", "AVA"}:
+            preferred = leg
+            break
+    leg = preferred or legs[0]
+    return {
+        "qty": float(leg["qty"]),
+        "entry": float(leg["entry"]),
+        "exit_high": float(leg.get("exit_high") or 0),
+        "exit_ts": float(leg.get("exit_ts") or 0),
+        "low": float(leg.get("low") or 0),
+        "ticker": str(leg["ticker"]),
+    }
+
+
+def _empty_probe() -> dict[str, Any]:
+    return {
+        "ticker": "",
+        "qty": 0.0,
+        "entry": 0.0,
+        "shelf": 0.0,
+        "arm_ticker": "",
+        "arm_shelf": 0.0,
+        "arm_ts": 0.0,
+        "arm_px": 0.0,
+        "arm_algo": "",
+        "arms": [],
+        "peak": 0.0,
+        "low": 0.0,
+        "legs": [],
+    }
+
+
+def _probe_leg_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
+    ticker = _normalize_ticker(str(raw.get("ticker") or ""))
+    try:
+        qty = float(raw.get("qty") or 0)
+        entry = float(raw.get("entry") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not ticker or qty <= 0 or entry <= 0:
+        return None
+    def _num(key: str) -> float:
+        try:
+            return float(raw.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    return {
+        "ticker": ticker,
+        "qty": qty,
+        "entry": entry,
+        "shelf": _num("shelf"),
+        "arm_px": _num("arm_px"),
+        "peak": _num("peak"),
+        "low": _num("low"),
+        "ts": _num("ts"),
+        "algo": str(raw.get("algo") or "").strip().lower(),
+        "tp_order": str(raw.get("tp_order") or ""),
+        "tp_px": _num("tp_px"),
+    }
+
+
+def probe_legs(state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    if state is None:
+        state = read_probe()
+    return [dict(leg) for leg in (state.get("legs") or []) if float(leg.get("qty") or 0) > 0]
+
+
+def probe_tickers(state: dict[str, Any] | None = None) -> set[str]:
+    return {str(leg.get("ticker") or "") for leg in probe_legs(state) if leg.get("ticker")}
+
+
+def _arm_from_fields(
+    ticker: Any,
+    shelf: Any,
+    ts: Any = 0,
+    px: Any = 0,
+    algo: Any = "",
+) -> dict[str, Any] | None:
+    name = _normalize_ticker(str(ticker or ""))
+    try:
+        level = float(shelf or 0)
+        when = float(ts or 0)
+        price = float(px or 0)
+    except (TypeError, ValueError):
+        return None
+    if not name or level <= 0:
+        return None
+    return {
+        "ticker": name,
+        "shelf": level,
+        "ts": when,
+        "px": price,
+        "algo": str(algo or "").strip().lower(),
+    }
+
+
+def probe_arms(state: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Ожидания входа. Пока одно ждёт, второе может взвестись рядом."""
+    if state is None:
+        state = read_probe()
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in state.get("arms") or []:
+        if not isinstance(raw, dict):
+            continue
+        arm = _arm_from_fields(
+            raw.get("ticker"), raw.get("shelf"), raw.get("ts"), raw.get("px"), raw.get("algo"),
+        )
+        if not arm or arm["ticker"] in seen:
+            continue
+        seen.add(arm["ticker"])
+        out.append(arm)
+    return out
+
+
+def _sync_primary_arm(out: dict[str, Any], arms: list[dict[str, Any]]) -> None:
+    first = arms[0] if arms else {}
+    out["arm_ticker"] = str(first.get("ticker") or "")
+    out["arm_shelf"] = float(first.get("shelf") or 0)
+    out["arm_ts"] = float(first.get("ts") or 0)
+    out["arm_px"] = float(first.get("px") or 0)
+    out["arm_algo"] = str(first.get("algo") or "")
+    out["arms"] = arms
+
+
+def _flatten_probe(out: dict[str, Any]) -> dict[str, Any]:
+    first = (out.get("legs") or [{}])[0] if out.get("legs") else {}
+    out["ticker"] = str(first.get("ticker") or "")
+    out["qty"] = float(first.get("qty") or 0)
+    out["entry"] = float(first.get("entry") or 0)
+    out["shelf"] = float(first.get("shelf") or 0)
+    out["peak"] = float(first.get("peak") or 0)
+    out["low"] = float(first.get("low") or 0)
+    if not out.get("arm_ticker") and float(first.get("arm_px") or 0) > 0:
+        out["arm_px"] = float(first["arm_px"])
+    return out
+
+
+def read_probe(path: str | None = None) -> dict[str, Any]:
+    """Щуп: открытые ноги и ожидание над полкой."""
+    path = path or _PROBE_PATH
+    empty = _empty_probe()
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    out = _empty_probe()
+    arms: list[dict[str, Any]] = []
+    seen_arms: set[str] = set()
+    raw_arms = raw.get("arms")
+    if isinstance(raw_arms, list):
+        for item in raw_arms:
+            if not isinstance(item, dict):
+                continue
+            arm = _arm_from_fields(
+                item.get("ticker"), item.get("shelf"), item.get("ts"), item.get("px"), item.get("algo"),
+            )
+            if not arm or arm["ticker"] in seen_arms:
+                continue
+            seen_arms.add(arm["ticker"])
+            arms.append(arm)
+    if not arms:
+        legacy = _arm_from_fields(
+            raw.get("arm_ticker"),
+            raw.get("arm_shelf"),
+            raw.get("arm_ts"),
+            raw.get("arm_px"),
+            raw.get("arm_algo"),
+        )
+        if legacy:
+            arms.append(legacy)
+    _sync_primary_arm(out, arms)
+    legs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    raw_legs = raw.get("legs")
+    if isinstance(raw_legs, list):
+        source = [item for item in raw_legs if isinstance(item, dict)]
+    else:
+        source = [raw]
+    for item in source:
+        leg = _probe_leg_from_raw(item)
+        if not leg or leg["ticker"] in seen:
+            continue
+        seen.add(leg["ticker"])
+        legs.append(leg)
+    out["legs"] = legs
+    if not arms:
+        _sync_primary_arm(out, [])
+    _flatten_probe(out)
+    return out
+
+
+def write_probe(
+    *,
+    ticker: str = "",
+    qty: float = 0.0,
+    entry: float = 0.0,
+    shelf: float = 0.0,
+    arm_ticker: str = "",
+    arm_shelf: float = 0.0,
+    arm_ts: float = 0.0,
+    arm_px: float = 0.0,
+    arm_algo: str = "",
+    peak: float = 0.0,
+    low: float = 0.0,
+    ts: float = 0.0,
+    algo: str = "",
+    tp_order: str | None = None,
+    tp_px: float | None = None,
+    drop: str = "",
+    drop_arm: str = "",
+    clear_arm: bool = False,
+    path: str | None = None,
+) -> None:
+    path = path or _PROBE_PATH
+    empty_call = (
+        not _normalize_ticker(ticker)
+        and float(qty or 0) <= 0
+        and not _normalize_ticker(arm_ticker)
+        and float(arm_shelf or 0) <= 0
+        and not _normalize_ticker(drop)
+        and not _normalize_ticker(drop_arm)
+        and not clear_arm
+    )
+    if empty_call:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("[Крипта] не стёр щуп: %s", exc)
+        return
+    current = read_probe(path)
+    legs = probe_legs(current)
+    arms = probe_arms(current)
+    gone = _normalize_ticker(drop)
+    if gone:
+        legs = [leg for leg in legs if leg["ticker"] != gone]
+        arms = [arm for arm in arms if arm["ticker"] != gone]
+    name = _normalize_ticker(ticker)
+    if name and float(qty) > 0 and float(entry) > 0:
+        prev_algo = ""
+        prev_ts = 0.0
+        prev_tp_order = ""
+        prev_tp_px = 0.0
+        for leg in legs:
+            if leg["ticker"] == name:
+                prev_algo = str(leg.get("algo") or "")
+                prev_ts = float(leg.get("ts") or 0)
+                prev_tp_order = str(leg.get("tp_order") or "")
+                prev_tp_px = float(leg.get("tp_px") or 0)
+                break
+        legs = [leg for leg in legs if leg["ticker"] != name]
+        legs.append({
+            "ticker": name,
+            "qty": float(qty),
+            "entry": float(entry),
+            "shelf": float(shelf or 0),
+            "arm_px": float(arm_px or 0),
+            "peak": float(peak or 0),
+            "low": float(low or 0),
+            "ts": float(ts or prev_ts or time.time()),
+            "algo": str(algo or prev_algo or "").strip().lower(),
+            "tp_order": prev_tp_order if tp_order is None else str(tp_order),
+            "tp_px": prev_tp_px if tp_px is None else float(tp_px or 0),
+        })
+        arms = [arm for arm in arms if arm["ticker"] != name]
+    arm_name = _normalize_ticker(arm_ticker)
+    keep_arm = float(arm_shelf or 0) > 0 and arm_name
+    if _normalize_ticker(drop_arm):
+        arms = [arm for arm in arms if arm["ticker"] != _normalize_ticker(drop_arm)]
+    if clear_arm:
+        arms = []
+    if keep_arm:
+        from skills.crypto.desk_policy import PROBE_MAX_LEGS
+
+        arms = [arm for arm in arms if arm["ticker"] != arm_name]
+        if len(legs) + len(arms) < int(PROBE_MAX_LEGS):
+            arms.append({
+                "ticker": arm_name,
+                "shelf": float(arm_shelf),
+                "ts": float(arm_ts or 0),
+                "px": float(arm_px or 0),
+                "algo": str(arm_algo or "").strip().lower(),
+            })
+    _sync_primary_arm(current, arms)
+    payload: dict[str, Any] = {"legs": legs}
+    if current.get("arms"):
+        payload["arms"] = current["arms"]
+        payload["arm_ticker"] = current["arm_ticker"]
+        payload["arm_shelf"] = float(current["arm_shelf"])
+        payload["arm_ts"] = float(current.get("arm_ts") or 0)
+        if float(current.get("arm_px") or 0) > 0:
+            payload["arm_px"] = float(current["arm_px"])
+        if current.get("arm_algo"):
+            payload["arm_algo"] = str(current["arm_algo"])
+    if legs:
+        first = legs[0]
+        payload["ticker"] = first["ticker"]
+        payload["qty"] = first["qty"]
+        payload["entry"] = first["entry"]
+        payload["shelf"] = first["shelf"]
+        payload["peak"] = first["peak"]
+        if float(first.get("arm_px") or 0) > 0 and not payload.get("arm_ticker"):
+            payload["arm_px"] = float(first["arm_px"])
+        if float(first.get("low") or 0) > 0:
+            payload["low"] = float(first["low"])
+    if not payload.get("legs") and not payload.get("arms"):
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("[Крипта] не стёр щуп: %s", exc)
+        return
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал щуп: %s", exc)
+
+
+def read_probe_pin(path: str | None = None) -> dict[str, Any]:
+    """Мягкий автопин щупа: тикер и время выбора."""
+    path = path or _PROBE_PIN_PATH
+    empty = {"ticker": "", "ts": 0.0, "score": 0.0, "forced": False}
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    ticker = _normalize_ticker(raw.get("ticker"))
+    try:
+        ts = float(raw.get("ts") or 0)
+        score = float(raw.get("score") or 0)
+    except (TypeError, ValueError):
+        ts = 0.0
+        score = 0.0
+    if not ticker:
+        return empty
+    return {
+        "ticker": ticker,
+        "ts": ts,
+        "score": score,
+        "forced": bool(raw.get("forced")),
+    }
+
+
+def write_probe_pin(
+    ticker: str = "",
+    ts: float = 0.0,
+    score: float = 0.0,
+    forced: bool = False,
+    path: str | None = None,
+) -> None:
+    path = path or _PROBE_PIN_PATH
+    name = _normalize_ticker(ticker)
+    if not name:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("[Крипта] не стёр пин щупа: %s", exc)
+        return
+    payload = {
+        "ticker": name,
+        "ts": float(ts or 0),
+        "score": float(score or 0),
+        "forced": bool(forced),
+    }
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал пин щупа: %s", exc)
+
+
+def write_sui_dip(
+    qty: float,
+    entry: float,
+    path: str | None = None,
+    *,
+    exit_high: float = 0.0,
+    exit_ts: float = 0.0,
+    low: float = 0.0,
+    ticker: str = "",
+) -> None:
+    """Совместимость: пишет одну ногу во второй карман (по умолчанию AVA)."""
+    del path
+    coin = str(ticker or "AVA").upper() or "AVA"
+    if float(qty or 0) <= 0 or float(entry or 0) <= 0:
+        drop_second_pocket_leg(coin)
+        # Старый одиночный файл больше не используем.
+        try:
+            if os.path.isfile(_SUI_DIP_PATH):
+                os.remove(_SUI_DIP_PATH)
+        except Exception:
+            pass
+        return
+    legs = [leg for leg in read_second_pocket_legs() if str(leg["ticker"]) != coin]
+    legs.append(
+        {
+            "ticker": coin,
+            "qty": float(qty),
+            "entry": float(entry),
+            "exit_high": float(exit_high or 0),
+            "exit_ts": float(exit_ts or 0),
+            "low": float(low or 0),
+        }
+    )
+    write_second_pocket_legs(legs)
+
+
+def read_entry_arms(path: str | None = None) -> dict[str, Any]:
+    """Ожидание отскока: дно альта или кармана, пока заявку не ставим."""
+    path = path or _ENTRY_ARM_PATH
+    empty: dict[str, Any] = {"alts": {}, "pocket": None, "ava": None}
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception:
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    alts: dict[str, dict[str, float]] = {}
+    for key, value in (raw.get("alts") or {}).items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            low = float(value.get("low") or 0)
+            ts = float(value.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if low <= 0:
+            continue
+        alts[ticker] = {"low": low, "ts": ts}
+    pocket = _parse_low_arm(raw.get("pocket"))
+    ava = _parse_low_arm(raw.get("ava"))
+    return {"alts": alts, "pocket": pocket, "ava": ava}
+
+
+_KEEP_SUI = object()
+
+
+def write_entry_arms(
+    alts: dict[str, dict[str, Any]],
+    pocket: dict[str, Any] | None,
+    path: str | None = None,
+    *,
+    sui: Any = _KEEP_SUI,
+) -> None:
+    path = path or _ENTRY_ARM_PATH
+    # Без аргумента sui ждёт SUI не трогаем. None или False снимает ожидание.
+    if sui is _KEEP_SUI and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                prev = json.load(handle)
+        except Exception:
+            prev = {}
+        sui = _parse_low_arm(prev.get("ava") if isinstance(prev, dict) else None)
+    elif not sui:
+        sui = None
+    clean: dict[str, dict[str, float]] = {}
+    for key, value in (alts or {}).items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            low = float(value.get("low") or 0)
+        except (TypeError, ValueError):
+            continue
+        if low <= 0:
+            continue
+        clean[ticker] = {"low": low, "ts": float(value.get("ts") or 0)}
+    payload: dict[str, Any] = {"alts": clean}
+    if pocket and float(pocket.get("low") or 0) > 0:
+        payload["pocket"] = {"low": float(pocket["low"]), "ts": float(pocket.get("ts") or 0)}
+    if isinstance(sui, dict) and float(sui.get("low") or 0) > 0:
+        payload["ava"] = {"low": float(sui["low"]), "ts": float(sui.get("ts") or 0)}
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал ожидание входа: %s", exc)
+
+
+def write_btc_dip(
+    qty: float,
+    entry: float,
+    path: str | None = None,
+    *,
+    exit_high: float = 0.0,
+    exit_ts: float = 0.0,
+    low: float = 0.0,
+    ticker: str = "",
+) -> None:
+    path = path or _BTC_DIP_PATH
+    if qty <= 0 or entry <= 0:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception as exc:
+            logger.warning("[Крипта] не стёр карман BTC: %s", exc)
+        return
+    payload: dict[str, Any] = {"qty": float(qty), "entry": float(entry), "ts": time.time()}
+    if float(exit_high or 0) > 0:
+        payload["exit_high"] = float(exit_high)
+        payload["exit_ts"] = float(exit_ts or 0)
+    if float(low or 0) > 0:
+        payload["low"] = float(low)
+    coin = str(ticker or "").upper()
+    if coin in {"SUI", "AVA"}:
+        payload["ticker"] = coin
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал карман BTC: %s", exc)
+
+
+def write_trail_state(
+    legs: dict[str, dict[str, Any]],
+    path: str | None = None,
+) -> None:
+    path = path or _TRAIL_PATH
+    clean: dict[str, dict[str, Any]] = {}
+    for key, value in (legs or {}).items():
+        ticker = _normalize_ticker(str(key))
+        if not ticker or not isinstance(value, dict):
+            continue
+        try:
+            high = float(value.get("high") or value.get("peak") or 0)
+            entry = float(value.get("entry") or 0)
+            stop = float(value.get("stop") or 0)
+        except (TypeError, ValueError):
+            continue
+        if high <= 0 and entry <= 0:
+            continue
+        row: dict[str, Any] = {
+            "high": max(high, entry, 0.0),
+            "entry": max(entry, 0.0),
+            "armed": bool(value.get("armed")),
+        }
+        if stop > 0:
+            row["stop"] = stop
+        clean[ticker] = row
+    prev = _read_trail_payload(path)
+    payload: dict[str, Any] = {"legs": clean, "ts": time.time()}
+    if isinstance(prev.get("sleeve_exits"), dict):
+        payload["sleeve_exits"] = prev["sleeve_exits"]
+    if isinstance(prev.get("sleeve_lows"), dict):
+        payload["sleeve_lows"] = prev["sleeve_lows"]
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        logger.warning("[Крипта] не записал трейл: %s", exc)
+
+
+def _extract_json_object(raw: str) -> dict[str, Any] | None:
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for index, char in enumerate(raw[start:], start):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    payload = json.loads(raw[start : index + 1])
+                except json.JSONDecodeError:
+                    return None
+                return payload if isinstance(payload, dict) else None
+    return None
+
+
+def parse_ai_alloc(raw: str, allowed: set[str]) -> tuple[dict[str, float], str]:
+    """Разбор JSON ИИ. Только тикеры из allowed. why — короткий текст."""
+    payload = _extract_json_object(raw or "") or {}
+    why = str(payload.get("why") or "").strip()
+    alloc_raw = payload.get("alloc")
+    if not isinstance(alloc_raw, dict):
+        alloc_raw = {key: val for key, val in payload.items() if key != "why"}
+    cleaned: dict[str, float] = {}
+    for key, val in alloc_raw.items():
+        ticker = _normalize_ticker(str(key))
+        if ticker not in allowed or ticker in _STABLES:
+            continue
+        try:
+            pct = float(val)
+        except (TypeError, ValueError):
+            continue
+        if pct > 0:
+            cleaned[ticker] = pct
+    if not cleaned:
+        return {}, why
+    total = sum(cleaned.values())
+    if total <= 0:
+        return {}, why
+    return {key: round((val / total) * 100.0, 1) for key, val in cleaned.items()}, why
+
+
+def _min_trade_usd(equity: float) -> float:
+    return max(equity * _MIN_TRADE_PCT, _MIN_QUOTE)
+
+
+def _leveraged(symbol: str) -> bool:
+    upper = symbol.upper()
+    return upper.endswith(("UP", "DOWN", "3L", "3S", "5L", "5S"))

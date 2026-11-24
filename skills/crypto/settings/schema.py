@@ -33,7 +33,7 @@ class DeskSettings:
     sleeve_exit_pullback_pct: float = 0.5
     sleeve_exit_hold_sec: float = 2 * 60
     sleeve_stop_pct: float = 4.0
-    probe_on: bool = True
+    probe_on: bool = False  # спот-алго в архиве; мониторинг/выходы без новых входов
     probe_paper: bool = False  # True — широкий скан без боевых стопов; журнал paper; Buy нет
     ai_radar_on: bool = False  # Фоновый ИИ-радар кандидатов щупа (Groq)
     probe_usd: float = 40.0
