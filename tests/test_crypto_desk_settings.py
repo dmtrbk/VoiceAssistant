@@ -175,6 +175,8 @@ class TestLinearSettings(unittest.TestCase):
         self.assertEqual(data.symbols, "ZECUSDT,HYPEUSDT")
         self.assertEqual(data.sizing_mode, "fixed")
         self.assertEqual(data.leg_usd, 40.0)
+        self.assertEqual(data.start_equity_usd, 120.0)
+        self.assertLess(data.kill_equity_floor_usd, data.start_equity_usd)
         tuned = linear_store.update(leg_usd=55, sizing_mode="risk_clamp", paper=False)
         self.assertEqual(tuned.leg_usd, 55.0)
         self.assertEqual(tuned.sizing_mode, "risk_clamp")

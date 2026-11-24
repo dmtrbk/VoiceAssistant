@@ -435,19 +435,25 @@ def is_crypto_auto_trade_enabled() -> bool:
 
 
 def set_crypto_auto_trade(enabled: bool) -> None:
+    """Тумблер Linear-контура (раньше — спот-авто). Старт/стоп фона в процессе ассистента."""
     global _crypto_auto_trade
     _ensure_loaded()
     with _lock:
         _crypto_auto_trade = bool(enabled)
     os.environ["CRYPTO_AUTO_TRADE"] = "true" if enabled else "false"
     _persist()
-    if enabled:
-        try:
+    try:
+        if enabled:
             from skills import crypto_skill
+
             crypto_skill.start_background()
-        except Exception as exc:
-            logging.debug("[Настройки] Старт автоторговли крипты: %s", exc)
-    logging.info("[Настройки] Автоторговля крипты: %s", "вкл" if enabled else "выкл")
+        else:
+            from skills.crypto.linear.service import ensure_stopped
+
+            ensure_stopped()
+    except Exception as exc:
+        logging.debug("[Настройки] Linear фон: %s", exc)
+    logging.info("[Настройки] Linear-контур: %s", "вкл" if enabled else "выкл")
 
 
 def is_crypto_voice_trade_enabled() -> bool:

@@ -30,7 +30,8 @@ class LinearSettings:
     leg_max_usd: float = 50.0
     uta_reserve_usd: float = 120.0
     kill_daily_loss_usd: float = 8.0
-    kill_equity_floor_usd: float = 125.0
+    kill_equity_floor_usd: float = 100.0
+    start_equity_usd: float = 120.0  # paper: виртуальный баланс
     postonly_policy: str = "reprice_1tick"  # reprice_1tick | skip
     desk_enabled: bool = True  # paper/live loop intent (runner / future tray)
 
@@ -50,6 +51,7 @@ _LIMITS = {
     "uta_reserve_usd": (50.0, 500.0),
     "kill_daily_loss_usd": (2.0, 40.0),
     "kill_equity_floor_usd": (50.0, 500.0),
+    "start_equity_usd": (50.0, 500.0),
 }
 
 
@@ -121,6 +123,7 @@ def status_line() -> str:
     sizing = "фикс $" + f"{data.leg_usd:.0f}" if data.sizing_mode == "fixed" else "risk-clamp"
     parts = [
         f"Linear {mode}",
+        f"старт ${data.start_equity_usd:.0f}",
         f"Core {data.symbols}",
         sizing,
     ]
@@ -149,6 +152,7 @@ def to_linear_config():
         uta_trade_reserve_usd=float(data.uta_reserve_usd),
         kill_daily_loss_usd=float(data.kill_daily_loss_usd),
         kill_equity_floor_usd=float(data.kill_equity_floor_usd),
+        start_equity_usd=float(data.start_equity_usd),
         postonly_reject_policy=str(data.postonly_policy),
     )
     cfg.runtime_dir.mkdir(parents=True, exist_ok=True)

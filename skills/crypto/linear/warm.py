@@ -56,7 +56,8 @@ def fetch_klines_paginated(
         all_rows.extend(batch)
         oldest = int(batch[-1][0])
         cursor_end = oldest - 1
-        time.sleep(0.04)
+        # throttle в BybitRest; доп. пауза между страницами warm
+        time.sleep(0.12)
         if len(batch) < 1000:
             break
     by_ts = {int(r[0]): r for r in all_rows}
@@ -85,6 +86,8 @@ def warm_universe(rest: BybitRest, cfg: LinearConfig) -> dict[str, dict[str, pd.
     if cfg.shadow_enabled:
         syms |= set(cfg.shadow_symbols)
     out: dict[str, dict[str, pd.DataFrame]] = {}
-    for sym in sorted(syms):
+    for i, sym in enumerate(sorted(syms)):
+        if i:
+            time.sleep(0.4)  # перед следующим символом — дать остыть IP-лимиту
         out[sym] = warm_symbol(rest, cfg, sym)
     return out

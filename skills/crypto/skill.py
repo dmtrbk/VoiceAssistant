@@ -31,7 +31,11 @@ class CryptoSkill(
     CryptoJournalMixin,
     BaseSkill,
 ):
-    """Спот Bybit: курс/портфель/журнал. Автоалго сняты (архив spot_desk_20261124)."""
+    """Спот Bybit: курс/портфель/журнал + фон Linear (paper/live) при desk_enabled.
+
+    Спот-алго сняты (архив spot_desk_20261124). Linear стартует из start_background
+    вместе с ассистентом — Cursor для стола не нужен.
+    """
 
     def __init__(self) -> None:
         self._api_key = ""

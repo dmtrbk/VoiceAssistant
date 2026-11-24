@@ -189,6 +189,7 @@ QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox {{
             self._set_spin("target_risk_usd", data.target_risk_usd)
             self._set_spin("leg_min_usd", data.leg_min_usd)
             self._set_spin("leg_max_usd", data.leg_max_usd)
+            self._set_spin("start_equity_usd", data.start_equity_usd)
             self._set_spin("uta_reserve_usd", data.uta_reserve_usd)
             self._set_spin("kill_daily_loss_usd", data.kill_daily_loss_usd)
             self._set_spin("kill_equity_floor_usd", data.kill_equity_floor_usd)
@@ -332,8 +333,12 @@ QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox {{
             "Верхняя граница размера в risk_clamp.",
         )
         self._add_spin(
+            col, "start_equity_usd", "Старт equity", "$", 50, 500, 10, 0,
+            "Paper: виртуальный баланс (без реальных средств). Live игнор — берём с биржи.",
+        )
+        self._add_spin(
             col, "uta_reserve_usd", "UTA резерв", "$", 50, 500, 10, 0,
-            "Не трогать под Earn/резерв; торговый буфер UTA.",
+            "Не трогать под Earn/резерв; торговый буфер UTA (live).",
         )
         self._add_spin(
             col, "kill_daily_loss_usd", "Kill день", "$", 2, 40, 1, 0,
@@ -341,7 +346,7 @@ QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox {{
         )
         self._add_spin(
             col, "kill_equity_floor_usd", "Kill equity", "$", 50, 500, 5, 0,
-            "Пол equity: ниже порога контур останавливается.",
+            "Пол equity: должен быть ниже старта (иначе paper сразу kill).",
         )
         self._add_combo(
             col,
@@ -573,9 +578,18 @@ QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox {{
         if self._syncing:
             return
         linear_store.update(desk_enabled=checked)
+        try:
+            from skills.crypto.linear.service import ensure_started, ensure_stopped
+
+            if checked:
+                ensure_started()
+            else:
+                ensure_stopped()
+        except Exception:
+            pass
         self._status.setText(self._combined_status())
         self._hint.setText(
-            "Контур linear включён (runner / фон)."
+            "Контур linear включён — фон ассистента (без Cursor)."
             if checked
             else "Контур linear выключен — новых сигналов нет."
         )

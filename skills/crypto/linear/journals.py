@@ -36,6 +36,36 @@ class LinearJournals:
     def event(self, row: dict[str, Any]) -> None:
         self._append(self.cfg.path(f"{self.prefix}_events.jsonl"), row)
 
+    def session_start(self, *, equity: float, extra: dict[str, Any] | None = None) -> None:
+        """Маркер старта сессии — чтобы потом найти кусок прогона в jsonl."""
+        row: dict[str, Any] = {
+            "type": "session_start",
+            "paper": bool(self.cfg.paper),
+            "equity": float(equity),
+            "symbols": list(self.cfg.symbols),
+            "shadow": bool(self.cfg.shadow_enabled),
+            "sizing_mode": self.cfg.sizing_mode,
+            "leg_usd": self.cfg.leg_usd,
+            "kill_daily_loss_usd": self.cfg.kill_daily_loss_usd,
+            "kill_equity_floor_usd": self.cfg.kill_equity_floor_usd,
+            "runtime_dir": str(self.cfg.runtime_dir),
+        }
+        if extra:
+            row.update(extra)
+        self.event(row)
+
+    def daily_snapshot(self, *, equity: float, day_pnl: float, open_n: int, kill: bool) -> None:
+        self._append(
+            self.cfg.path(f"{self.prefix}_daily.jsonl"),
+            {
+                "type": "daily_snap",
+                "equity": float(equity),
+                "day_realized_pnl": float(day_pnl),
+                "open_plus_pending": int(open_n),
+                "kill": bool(kill),
+            },
+        )
+
     def read_signals_since(self, since_ms: int, *, shadow: bool = False) -> list[dict[str, Any]]:
         name = "shadow_aave_signals.jsonl" if shadow else f"{self.prefix}_signals.jsonl"
         path = self.cfg.path(name)

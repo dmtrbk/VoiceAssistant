@@ -83,6 +83,19 @@ class LinearDesk:
                     min_usd_map=min_usd,
                 )
 
+        if self._stop:
+            logger.info("[linear] stop during warm — выход")
+            return
+
+        start_eq = float(self.paper.equity) if self.paper else float(self.cfg.start_equity_usd)
+        self.journals.session_start(equity=start_eq)
+        self.journals.daily_snapshot(
+            equity=start_eq,
+            day_pnl=0.0,
+            open_n=0,
+            kill=False,
+        )
+
         self.tape.set_symbols(want)
         self.tape.set_handlers(on_kline_closed=self._on_kline, on_trade=self._on_trade)
         self.tape.start()
@@ -252,6 +265,15 @@ class LinearDesk:
                 if self.cfg.paper and self.paper:
                     eq = self.paper.equity
                 self.portfolio.update_equity(eq)
+                # раз в час — снимок equity в daily jsonl
+                utc = datetime.now(timezone.utc)
+                if utc.minute == 0:
+                    self.journals.daily_snapshot(
+                        equity=eq,
+                        day_pnl=self.portfolio.state.day_realized_pnl,
+                        open_n=self.portfolio.open_plus_pending(),
+                        kill=self.portfolio.state.kill,
+                    )
             time.sleep(0.2)
 
 

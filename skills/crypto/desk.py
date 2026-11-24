@@ -221,6 +221,12 @@ class CryptoDeskMixin:
 
     def on_disabled(self) -> None:
         self._desk_enabled.clear()
+        try:
+            from skills.crypto.linear.service import ensure_stopped
+
+            ensure_stopped()
+        except Exception as exc:
+            logger.debug("[Крипта] linear stop: %s", exc)
 
     def on_enabled(self) -> None:
         self._desk_enabled.set()
@@ -228,6 +234,12 @@ class CryptoDeskMixin:
 
     def start_background(self) -> None:
         self._ensure_desk_loop()
+        try:
+            from skills.crypto.linear.service import ensure_started
+
+            ensure_started()
+        except Exception as exc:
+            logger.warning("[Крипта] linear фон: %s", exc)
 
     def _run_advisor(self, channel: str = "voice") -> str:
         import crypto_advisor

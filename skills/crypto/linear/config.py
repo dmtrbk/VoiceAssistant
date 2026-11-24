@@ -51,8 +51,8 @@ class LinearConfig:
     slip_exit: float = 0.0002
 
     kill_daily_loss_usd: float = 8.0
-    kill_equity_floor_usd: float = 125.0
-    start_equity_usd: float = 160.0
+    kill_equity_floor_usd: float = 100.0  # ниже start (paper $120), иначе мгновенный kill
+    start_equity_usd: float = 120.0  # paper: виртуальный старт без реальных средств
 
     # warm bars (not calendar days alone)
     warm_bars_15m: int = 4500

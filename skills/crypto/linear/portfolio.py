@@ -19,8 +19,8 @@ class PortfolioState:
     pending_entries: dict[str, dict[str, Any]] = field(default_factory=dict)
     day_key: str = ""
     day_realized_pnl: float = 0.0
-    equity: float = 160.0
-    peak_equity: float = 160.0
+    equity: float = 120.0
+    peak_equity: float = 120.0
     kill: bool = False
     kill_reason: str = ""
 

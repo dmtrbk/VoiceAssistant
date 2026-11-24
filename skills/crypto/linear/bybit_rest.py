@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any
 
@@ -15,6 +16,12 @@ import requests
 from skills.crypto.common import _API_PROD, _API_TEST, _testnet
 
 logger = logging.getLogger(__name__)
+
+# Публичный IP-лимит Bybit легко ловит warm (много kline). Держим ~6–8 req/s.
+_MIN_GAP_SEC = 0.15
+_RATE_LOCK = threading.Lock()
+_LAST_CALL = 0.0
+_RATE_CODES = frozenset({10006, 10018})  # too many visits / rate limit
 
 
 class BybitRest:
@@ -29,13 +36,41 @@ class BybitRest:
     def host(self) -> str:
         return _API_TEST if self.testnet else _API_PROD
 
-    def public_get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        r = self.session.get(f"{self.host}{path}", params=params or {}, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        if int(data.get("retCode") or 0) != 0:
-            raise RuntimeError(f"{path} {data.get('retCode')} {data.get('retMsg')}")
+    def _throttle(self) -> None:
+        global _LAST_CALL
+        with _RATE_LOCK:
+            now = time.monotonic()
+            wait = _MIN_GAP_SEC - (now - _LAST_CALL)
+            if wait > 0:
+                time.sleep(wait)
+            _LAST_CALL = time.monotonic()
+
+    def _check(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
+        code = int(data.get("retCode") or 0)
+        if code != 0:
+            raise RuntimeError(f"{path} {code} {data.get('retMsg')}")
         return data
+
+    def _is_rate_limited(self, exc: BaseException) -> bool:
+        text = str(exc)
+        return any(str(c) in text for c in _RATE_CODES) or "rate limit" in text.lower() or "too many" in text.lower()
+
+    def public_get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        last: BaseException | None = None
+        for attempt in range(8):
+            self._throttle()
+            try:
+                r = self.session.get(f"{self.host}{path}", params=params or {}, timeout=30)
+                r.raise_for_status()
+                return self._check(path, r.json())
+            except Exception as exc:
+                last = exc
+                if not self._is_rate_limited(exc) or attempt >= 7:
+                    raise
+                delay = min(30.0, 1.0 * (2**attempt))
+                logger.warning("[linear] rate-limit %s, sleep %.1fs (%d/8)", path, delay, attempt + 1)
+                time.sleep(delay)
+        raise RuntimeError(str(last))
 
     def signed(
         self,
@@ -46,33 +81,42 @@ class BybitRest:
         if not self.api_key or not self.api_secret:
             raise RuntimeError("BYBIT_API_KEY/SECRET required for signed calls")
         params = dict(params or {})
-        ts = str(int(time.time() * 1000))
-        recv = "5000"
-        if method.upper() == "GET":
-            query = "&".join(f"{k}={params[k]}" for k in sorted(params))
-            payload = f"{ts}{self.api_key}{recv}{query}"
-            sign = hmac.new(self.api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-            headers = {
-                "X-BAPI-API-KEY": self.api_key,
-                "X-BAPI-SIGN": sign,
-                "X-BAPI-TIMESTAMP": ts,
-                "X-BAPI-RECV-WINDOW": recv,
-            }
-            r = self.session.get(f"{self.host}{path}", params=params, headers=headers, timeout=30)
-        else:
-            body = json.dumps(params, separators=(",", ":"))
-            payload = f"{ts}{self.api_key}{recv}{body}"
-            sign = hmac.new(self.api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-            headers = {
-                "X-BAPI-API-KEY": self.api_key,
-                "X-BAPI-SIGN": sign,
-                "X-BAPI-TIMESTAMP": ts,
-                "X-BAPI-RECV-WINDOW": recv,
-                "Content-Type": "application/json",
-            }
-            r = self.session.post(f"{self.host}{path}", data=body, headers=headers, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        if int(data.get("retCode") or 0) != 0:
-            raise RuntimeError(f"{path} {data.get('retCode')} {data.get('retMsg')}")
-        return data
+        last: BaseException | None = None
+        for attempt in range(6):
+            self._throttle()
+            ts = str(int(time.time() * 1000))
+            recv = "5000"
+            try:
+                if method.upper() == "GET":
+                    query = "&".join(f"{k}={params[k]}" for k in sorted(params))
+                    payload = f"{ts}{self.api_key}{recv}{query}"
+                    sign = hmac.new(self.api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+                    headers = {
+                        "X-BAPI-API-KEY": self.api_key,
+                        "X-BAPI-SIGN": sign,
+                        "X-BAPI-TIMESTAMP": ts,
+                        "X-BAPI-RECV-WINDOW": recv,
+                    }
+                    r = self.session.get(f"{self.host}{path}", params=params, headers=headers, timeout=30)
+                else:
+                    body = json.dumps(params, separators=(",", ":"))
+                    payload = f"{ts}{self.api_key}{recv}{body}"
+                    sign = hmac.new(self.api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+                    headers = {
+                        "X-BAPI-API-KEY": self.api_key,
+                        "X-BAPI-SIGN": sign,
+                        "X-BAPI-TIMESTAMP": ts,
+                        "X-BAPI-RECV-WINDOW": recv,
+                        "Content-Type": "application/json",
+                    }
+                    r = self.session.post(f"{self.host}{path}", data=body, headers=headers, timeout=30)
+                r.raise_for_status()
+                return self._check(path, r.json())
+            except Exception as exc:
+                last = exc
+                if not self._is_rate_limited(exc) or attempt >= 5:
+                    raise
+                delay = min(30.0, 1.0 * (2**attempt))
+                logger.warning("[linear] rate-limit signed %s, sleep %.1fs", path, delay)
+                time.sleep(delay)
+        raise RuntimeError(str(last))
