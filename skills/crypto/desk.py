@@ -2978,18 +2978,21 @@ class CryptoDeskMixin:
             logger.warning("[Крипта] дневной отчёт: %s", exc)
 
     def _desk_loop(self) -> None:
-        """Базовый слой без алго-входов.
+        """Базовый слой без спот-торговли и без spot WS.
 
-        Живут: WS-лента, reconcile с биржей, Earn-парковка, дневной журнал/отчёт.
-        Сняты: щуп/карманы/ребаланс-заявки (архив `_archive/spot_desk_20261124/`).
-        Обёртки Limit IOC / post-only в trades.py не трогаем — нужны linear-контуру.
+        Живут: reconcile с биржей, Earn-парковка, дневной журнал/отчёт.
+        Сняты: spot-лента (SOL/щуп/карманы), автоалго (архив `_archive/spot_desk_20261124/`).
+        Публичный поток рынка — только linear (`skills.crypto.linear`).
         """
-        try:
-            self._ensure_tape()
-            self._sync_tape_symbols()
-        except Exception as exc:
-            logger.warning("[Крипта] лента старт: %s", exc)
-        logger.info("[Крипта] базовый слой: лента/reconcile/earn/журнал (без автоалго)")
+        # Спот-ленту не поднимаем: не торгуем спот, kline.240 SOL только шумел в лог.
+        tape = getattr(self, "_bybit_tape", None)
+        if tape is not None:
+            try:
+                tape.stop()
+            except Exception:
+                pass
+            self._bybit_tape = None
+        logger.info("[Крипта] базовый слой: reconcile/earn/журнал (без spot WS и автоалго)")
         self._desk_stop.wait(5)
         next_report = time.time() + _DESK_PERIOD_SEC
         next_base = time.time() + 60.0  # reconcile + earn раз в минуту
@@ -3000,22 +3003,9 @@ class CryptoDeskMixin:
                 continue
             now = time.time()
             wake_at = min(next_report, next_base)
-            tape = getattr(self, "_bybit_tape", None)
-            while time.time() < wake_at:
-                remaining = min(5.0, wake_at - time.time())
-                if remaining <= 0:
-                    break
-                if tape is not None:
-                    fired = tape.wait(remaining)
-                    if self._desk_stop.is_set():
-                        return
-                    if fired:
-                        tape.consume_signals()
-                        break
-                elif self._desk_stop.wait(remaining):
-                    return
-                if not self._desk_ready():
-                    break
+            remaining = max(0.5, wake_at - now)
+            if self._desk_stop.wait(min(5.0, remaining)):
+                return
             if not self._desk_ready():
                 continue
             now = time.time()
@@ -3032,10 +3022,6 @@ class CryptoDeskMixin:
                     self._earn_park_idle()
                 except Exception as exc:
                     logger.warning("[Крипта] earn park: %s", exc)
-                try:
-                    self._sync_tape_symbols()
-                except Exception as exc:
-                    logger.warning("[Крипта] лента sync: %s", exc)
                 next_base = time.time() + 60.0
             if now >= next_report:
                 try:
@@ -3043,6 +3029,3 @@ class CryptoDeskMixin:
                 except Exception as exc:
                     logger.warning("[Крипта] отчёт: %s", exc)
                 next_report = time.time() + _DESK_PERIOD_SEC
-        tape = getattr(self, "_bybit_tape", None)
-        if tape is not None:
-            tape.stop()

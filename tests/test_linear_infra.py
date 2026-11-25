@@ -13,7 +13,6 @@ from skills.crypto.linear.journals import LinearJournals
 from skills.crypto.linear.paper_engine import PaperEngine
 from skills.crypto.linear.portfolio import PortfolioGuard
 from skills.crypto.linear.strategy_core import Signal
-from skills.crypto.linear.warm import merge_ohlc_tail
 import pandas as pd
 
 
@@ -103,32 +102,42 @@ class TestLinearInfra(unittest.TestCase):
         self.assertTrue(shadow.portfolio.state.kill)
         self.assertFalse(core.portfolio.state.kill)
 
-    def test_merge_ohlc_tail_incremental_no_full_rewarm(self):
-        base = pd.DataFrame(
-            {
-                "ts": [1000, 2000, 3000],
-                "open": [1, 2, 3],
-                "high": [1, 2, 3],
-                "low": [1, 2, 3],
-                "close": [1, 2, 3],
-                "volume": [1, 1, 1],
-                "turnover": [1, 1, 1],
-            }
-        )
-        tail = pd.DataFrame(
-            {
-                "ts": [3000, 4000],
-                "open": [3, 4],
-                "high": [3, 4],
-                "low": [3, 4],
-                "close": [3.5, 4],
-                "volume": [1, 1],
-                "turnover": [1, 1],
-            }
-        )
-        out = merge_ohlc_tail(base, tail, cap=10)
-        self.assertEqual(list(out["ts"]), [1000, 2000, 3000, 4000])
-        self.assertEqual(float(out.iloc[2]["close"]), 3.5)
+    def test_htf_rollup_from_15m_no_rest(self):
+        from skills.crypto.linear.desk_linear import LinearDesk, _15M, _BAR_MS
+
+        desk = LinearDesk(self.cfg)
+        t0 = 1_700_000_000_000
+        # выровнять к началу часа
+        t0 = (t0 // _BAR_MS["1h"]) * _BAR_MS["1h"]
+        rows = []
+        for i in range(4):
+            ts = t0 + i * _15M
+            rows.append(
+                {
+                    "ts": ts,
+                    "open": 10 + i,
+                    "high": 11 + i,
+                    "low": 9 + i,
+                    "close": 10.5 + i,
+                    "volume": 1.0,
+                    "turnover": 1.0,
+                }
+            )
+        desk.ohlc["ZECUSDT"] = {
+            "15m": pd.DataFrame(rows),
+            "1h": pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume", "turnover"]),
+            "4h": pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume", "turnover"]),
+        }
+        desk._rollup_htf_from_15m("ZECUSDT", "1h")
+        h1 = desk.ohlc["ZECUSDT"]["1h"]
+        self.assertEqual(len(h1), 1)
+        self.assertEqual(int(h1.iloc[0]["ts"]), t0)
+        self.assertEqual(float(h1.iloc[0]["open"]), 10.0)
+        self.assertEqual(float(h1.iloc[0]["close"]), 13.5)
+        self.assertEqual(float(h1.iloc[0]["high"]), 14.0)
+        # повтор — дедуп
+        desk._rollup_htf_from_15m("ZECUSDT", "1h")
+        self.assertEqual(len(desk.ohlc["ZECUSDT"]["1h"]), 1)
 
     def test_bar_dedupe_mark_seen(self):
         from skills.crypto.linear.desk_linear import LinearDesk

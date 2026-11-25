@@ -31,10 +31,10 @@ class CryptoSkill(
     CryptoJournalMixin,
     BaseSkill,
 ):
-    """Спот Bybit: курс/портфель/журнал + фон Linear (paper/live) при desk_enabled.
+    """Bybit: курс/портфель/журнал + фон Linear (paper/live) при desk_enabled.
 
-    Спот-алго сняты (архив spot_desk_20261124). Linear стартует из start_background
-    вместе с ассистентом — Cursor для стола не нужен.
+    Спот-алго и spot WS сняты (архив spot_desk_20261124). Linear — единственный
+    рыночный поток; start_background поднимает его с ассистентом.
     """
 
     def __init__(self) -> None:

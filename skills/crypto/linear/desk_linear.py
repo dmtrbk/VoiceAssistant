@@ -20,11 +20,12 @@ from .paper_engine import PaperEngine
 from .portfolio import PortfolioGuard
 from .strategy_core import StrategyParams, build_features, signal_at_bar
 from .stream_linear import LinearPublicTape
-from .warm import fetch_klines_tail, merge_ohlc_tail, warm_universe
+from .warm import warm_universe
 
 logger = logging.getLogger(__name__)
 
 _BAR_MS = {"15m": 15 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000}
+_15M = _BAR_MS["15m"]
 
 
 class LinearDesk:
@@ -53,6 +54,7 @@ class LinearDesk:
         self._bar_lock = threading.Lock()
         # дедуп: (symbol, timeframe, last_closed_bar_ts)
         self._seen_bars: dict[tuple[str, str], int] = {}
+        self._last_confirm_slot: str = ""
 
     def start(self) -> None:
         logger.info(
@@ -178,11 +180,11 @@ class LinearDesk:
 
             self._append_bar(symbol, "15m", bar)
 
-            # 2) инкрементальный HTF (limit=5), без полной перекачки
-            if ts % 3_600_000 == 0:
-                self._refresh_htf_incremental(symbol, "1h", "60")
-            if ts % 14_400_000 == 0:
-                self._refresh_htf_incremental(symbol, "4h", "240")
+            # 2) HTF из локальных 15m — без REST (борьба с 10006 на :00/:15)
+            if (ts + _15M) % _BAR_MS["1h"] == 0:
+                self._rollup_htf_from_15m(symbol, "1h")
+            if (ts + _15M) % _BAR_MS["4h"] == 0:
+                self._rollup_htf_from_15m(symbol, "4h")
 
             self.features[symbol] = build_features(
                 self.ohlc[symbol]["15m"],
@@ -200,29 +202,44 @@ class LinearDesk:
                 return
             self._emit_signal(symbol)
 
-    def _refresh_htf_incremental(self, symbol: str, key: str, interval: str) -> None:
-        """Только хвост limit=5; полная перекачка запрещена в рантайме."""
+    def _rollup_htf_from_15m(self, symbol: str, key: str) -> None:
+        """Собрать закрытый 1h/4h бар из уже известных 15m — без Bybit REST."""
         try:
-            cap = self.cfg.warm_bars_1h if key == "1h" else self.cfg.warm_bars_4h
-            tail = fetch_klines_tail(self.rest, symbol, interval, limit=5)
-            if len(tail) == 0:
+            df15 = self.ohlc[symbol]["15m"]
+            period = _BAR_MS[key]
+            need = period // _15M
+            if len(df15) < need:
                 return
-            last_ts = int(tail.iloc[-1]["ts"])
-            if not self._mark_seen(symbol, key, last_ts):
+            last_ts = int(df15.iloc[-1]["ts"])
+            # закрытый HTF bucket: конец последнего 15m = начало + period
+            bucket_end = last_ts + _15M
+            if bucket_end % period != 0:
                 return
-            prev = self.ohlc[symbol][key]
-            # дыра: если хвост не продолжает prev — один REST limit=5 уже есть; лог
-            if len(prev) and last_ts - int(prev.iloc[-1]["ts"]) > _BAR_MS[key] * 2:
-                logger.warning(
-                    "[linear] HTF gap %s %s prev=%s new=%s — merge tail only",
+            bucket_open = bucket_end - period
+            if not self._mark_seen(symbol, key, bucket_open):
+                return
+            chunk = df15[(df15["ts"] >= bucket_open) & (df15["ts"] < bucket_end)]
+            if len(chunk) < need:
+                logger.debug(
+                    "[linear] HTF rollup skip %s %s: got %d/%d 15m",
                     symbol,
                     key,
-                    int(prev.iloc[-1]["ts"]),
-                    last_ts,
+                    len(chunk),
+                    need,
                 )
-            self.ohlc[symbol][key] = merge_ohlc_tail(prev, tail, cap=cap)
+                return
+            row = {
+                "ts": int(bucket_open),
+                "open": float(chunk.iloc[0]["open"]),
+                "high": float(chunk["high"].max()),
+                "low": float(chunk["low"].min()),
+                "close": float(chunk.iloc[-1]["close"]),
+                "volume": float(chunk["volume"].sum()),
+                "turnover": float(chunk["turnover"].sum()) if "turnover" in chunk.columns else 0.0,
+            }
+            self._append_bar(symbol, key, row)
         except Exception as exc:
-            logger.warning("[linear] refresh %s %s: %s", symbol, key, exc)
+            logger.warning("[linear] HTF rollup %s %s: %s", symbol, key, exc)
 
     def _emit_signal(self, symbol: str) -> None:
         df = self.features.get(symbol)
@@ -252,11 +269,29 @@ class LinearDesk:
             self.shadow.on_signal(sig, bbo_bid=bid, bbo_ask=ask, last=last)
 
     def _rest_confirm_poll(self) -> None:
-        """Fallback: на границе 15m подтянуть закрытый бар (limit=2), без warm."""
+        """Fallback один раз на 15m-слот: REST только по символам без WS-бара.
+
+        Раньше цикл секунд 2–12 × 4 символа → десятки kline/слот и 10006.
+        """
         now = datetime.now(timezone.utc)
-        if now.minute % 15 != 0 or now.second < 2 or now.second > 12:
+        if now.minute % 15 != 0 or now.second < 8 or now.second > 14:
             return
-        for sym in set(self.cfg.symbols) | set(self.cfg.shadow_symbols) | {self.cfg.btc_symbol}:
+        slot = now.strftime("%Y-%m-%d %H:%M")
+        if slot == self._last_confirm_slot:
+            return
+        # ожидаемый open ts только что закрытого 15m
+        expect_ts = (int(now.timestamp() * 1000) // _15M - 1) * _15M
+        want = set(self.cfg.symbols) | set(self.cfg.shadow_symbols) | {self.cfg.btc_symbol}
+        missing = []
+        for sym in sorted(want):
+            seen = self._seen_bars.get((sym.upper(), "15m"))
+            if seen is None or int(seen) < expect_ts:
+                missing.append(sym)
+        if not missing:
+            self._last_confirm_slot = slot
+            return
+        logger.info("[linear] REST confirm fallback %s missing=%s", slot, missing)
+        for sym in missing:
             try:
                 data = self.rest.public_get(
                     "/v5/market/kline",
@@ -278,6 +313,7 @@ class LinearDesk:
                 self._handle_closed_15m(sym, bar)
             except Exception as exc:
                 logger.warning("[linear] REST confirm %s: %s", sym, exc)
+        self._last_confirm_slot = slot
 
     def _funding_tick(self) -> None:
         now = datetime.now(timezone.utc)
