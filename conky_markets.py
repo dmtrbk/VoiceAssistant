@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # conky_markets.py
 # Две строки рынков: дневной +/- биржи (Т-Инвест) и крипты (Bybit).
-# Обе: день / заработано (ASCII `/`), только цифры. Рисует сфера; Conky — тот же текст.
-# Вторая цифра крипты — реальные деньги: закрытые сделки + проценты Earn, без бумажной переоценки.
+# Обе: день / справа счёт (ASCII `/`), только цифры. Рисует сфера; Conky — тот же текст.
+# Крипта paper: слева результат paper-стола, справа totalEquity Bybit (asset-overview, ~160$).
+# Крипта live: слева P&L за сегодня UTC (+% как на Bybit), справа тот же totalEquity.
 # Цвета из ~/.conky: плюс c0c0c0 (system), минус 888888 (comands default).
 # Кэш 5 мин, сразу после сделки (дневник новее кэша). Стол заявок не запускает.
 
@@ -116,21 +117,32 @@ def asset_amount(value: float | None, suffix: str) -> tuple[str, str]:
     return f"{body} {suffix}", COLOR_PLUS
 
 
+def pct_amount(value: float | None) -> str:
+    """Процент P&L за сегодня как на Bybit: 0.88%."""
+    if value is None:
+        return ""
+    return f"{value:.2f}%".replace("-0.00", "0.00")
+
+
 def caption_rows(
     stocks: float | None,
     crypto: float | None,
     stocks_value: float | None = None,
     crypto_value: float | None = None,
+    crypto_pct: float | None = None,
 ) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
-    """Биржа сверху, крипта снизу. Слева день, справа весь счёт."""
+    """Биржа сверху, крипта снизу. Слева день/результат, справа весь счёт Bybit."""
     slash = (" / ", COLOR_PLUS)
     stocks_row = (
         caption_amount(stocks, "₽"),
         slash,
         asset_amount(stocks_value, "₽"),
     )
+    day_text, day_color = caption_amount(crypto, "$")
+    if crypto is not None and crypto_pct is not None:
+        day_text = f"{day_text} ({pct_amount(crypto_pct)})"
     crypto_row = (
-        caption_amount(crypto, "$"),
+        (day_text, day_color),
         slash,
         asset_amount(crypto_value, "$"),
     )
@@ -143,16 +155,29 @@ def render_lines(
     *,
     stocks_life: float | None = None,
     crypto_life: float | None = None,
+    stocks_value: float | None = None,
+    crypto_value: float | None = None,
+    crypto_pct: float | None = None,
 ) -> str:
+    """Текст Conky: биржа день/с покупки; крипта результат|today / totalEquity."""
     stocks_day = f"${{color {color_for(stocks)}}}{signed_amount(stocks, '₽')}"
-    if stocks_life is not None:
-        stocks_life_s = f"${{color {color_for(stocks_life)}}}{signed_amount(stocks_life, '₽')}"
+    stocks_right = stocks_life
+    if stocks_right is not None:
+        stocks_life_s = f"${{color {color_for(stocks_right)}}}{signed_amount(stocks_right, '₽')}"
         stocks_line = f"{stocks_day} / {stocks_life_s}"
     else:
         stocks_line = stocks_day
     day = f"${{color {color_for(crypto)}}}{signed_amount(crypto, '$$')}"
-    # День / с покупки — ASCII-слэш: Candara не рисует ∑.
-    if crypto_life is not None:
+    if crypto is not None and crypto_pct is not None:
+        day = f"{day} ({pct_amount(crypto_pct)})"
+    # Справа — totalEquity Bybit (без знака); fallback на lifetime — со знаком.
+    if crypto_value is not None:
+        shown = int(round(crypto_value))
+        body = f"{abs(shown):,}".replace(",", " ")
+        sign = "-" if shown < 0 else ""
+        right = f"${{color {color_for(crypto_value)}}}{sign}{body} $$"
+        crypto_line = f"{day} / {right}"
+    elif crypto_life is not None:
         life = f"${{color {color_for(crypto_life)}}}{signed_amount(crypto_life, '$$')}"
         crypto_line = f"{day} / {life}"
     else:
@@ -307,7 +332,8 @@ def _stocks_day_and_life() -> tuple[float, float] | None:
 
 _CRYPTO_DAY_WINDOW = 24 * 60 * 60
 # Смена формулы дня крипты: старый кэш без этой метки пересчитывается.
-_CRYPTO_DAY_REV = 2
+# 3: paper=результат linear, live=Bybit today P&L; справа asset-overview totalEquity.
+_CRYPTO_DAY_REV = 3
 
 
 def _price_before_window(price: float, chg_pct: float) -> float | None:
@@ -481,8 +507,60 @@ def fetch_stocks_value() -> float | None:
         return None
 
 
+def _linear_is_paper() -> bool:
+    try:
+        from skills.crypto.linear.settings_store import current
+
+        return bool(current().paper)
+    except Exception:
+        return True
+
+
+def paper_linear_result() -> float | None:
+    """Результат paper-стола: equity − start (realized; открытые без MTM)."""
+    try:
+        from skills.crypto.linear.config import default_config
+        from skills.crypto.linear.settings_store import current
+
+        settings = current()
+        if not settings.paper:
+            return None
+        start = float(settings.start_equity_usd)
+        cfg = default_config(paper=True)
+        path = cfg.path("paper_daily.jsonl")
+        equity = None
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("type") == "daily_snap" and row.get("equity") is not None:
+                    equity = float(row["equity"])
+        if equity is None:
+            # запасной путь: сумма закрытий
+            trades = cfg.path("paper_trades.jsonl")
+            realized = 0.0
+            if trades.is_file():
+                for line in trades.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if str(row.get("event") or "") == "close":
+                        realized += float(row.get("pnl") or 0)
+            return realized
+        return equity - start
+    except Exception:
+        return None
+
+
 def fetch_crypto_value() -> float | None:
-    """Весь счёт Bybit: монеты, стейблы и проценты Earn."""
+    """Весь счёт Bybit (Funding + UTA + CopyTrading + …) — как «160» на обзоре активов."""
     try:
         from skills.crypto import CryptoSkill
 
@@ -490,10 +568,60 @@ def fetch_crypto_value() -> float | None:
         skill._reload_env()
         if not skill._api_key:
             return None
-        cash, positions = skill._wallet()
-        return float(cash) + sum(float(item.get("value") or 0) for item in positions)
+        data = skill._signed(
+            "GET",
+            "/v5/asset/asset-overview",
+            {"valuationCurrency": "USD"},
+        )
+        total = (data.get("result") or {}).get("totalEquity")
+        if total is None or total == "":
+            return None
+        return float(total)
     except Exception:
         return None
+
+
+def _utc_day_key(now: float | None = None) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(time.time() if now is None else now))
+
+
+def bybit_today_pnl(
+    total_equity: float | None,
+    *,
+    cache_path: str | None = None,
+) -> tuple[float | None, float | None, float | None]:
+    """P&L за сегодня UTC ≈ equity − база на 00:00 (как на обзоре Bybit).
+
+    Возвращает (pnl, pct, basis_equity). База хранится в pnl-кэше между обновлениями.
+    Первый запуск дня без вчерашней базы → pnl=0 до следующего UTC-дня.
+    """
+    if total_equity is None:
+        return None, None, None
+    cache_path = cache_path or PNL_CACHE_PATH
+    day = _utc_day_key()
+    raw = _read_pnl_raw(cache_path) or {}
+    basis_day = str(raw.get("crypto_basis_day") or "")
+    prev_total = raw.get("crypto_value")
+    basis_raw = raw.get("crypto_basis_equity")
+    total = float(total_equity)
+    if basis_day == day and basis_raw is not None:
+        try:
+            basis = float(basis_raw)
+        except (TypeError, ValueError):
+            basis = total
+    elif basis_day and basis_day != day and prev_total is not None:
+        # Полночь UTC: вчерашний total ≈ equity на 00:00.
+        try:
+            basis = float(prev_total)
+        except (TypeError, ValueError):
+            basis = total
+    else:
+        basis = total
+    if basis <= 0:
+        return 0.0, 0.0, basis
+    pnl = total - basis
+    pct = (pnl / basis) * 100.0
+    return pnl, pct, basis
 
 
 def fetch_stocks_life() -> float | None:
@@ -504,7 +632,14 @@ def fetch_stocks_life() -> float | None:
         return None
 
 
-def fetch_day_pnl() -> tuple[float | None, float | None]:
+def fetch_day_pnl(
+    *,
+    crypto_value: float | None = None,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Биржа день; крипта: paper-результат или Bybit today P&L.
+
+    Возврат: stocks, crypto, crypto_pct (live), crypto_basis_equity (live).
+    """
     from dotenv import load_dotenv
 
     load_dotenv(os.path.join(_PROJECT_DIR, ".env"))
@@ -512,15 +647,25 @@ def fetch_day_pnl() -> tuple[float | None, float | None]:
         stocks = stocks_day_pnl()
     except Exception:
         stocks = None
+    crypto_pct: float | None = None
+    crypto_basis: float | None = None
     try:
-        crypto = crypto_day_pnl()
+        if _linear_is_paper():
+            crypto = paper_linear_result()
+            if crypto is None:
+                crypto = 0.0
+        else:
+            total = crypto_value if crypto_value is not None else fetch_crypto_value()
+            crypto, crypto_pct, crypto_basis = bybit_today_pnl(total)
     except Exception:
         crypto = None
+        crypto_pct = None
+        crypto_basis = None
     try:
         crypto_lifetime_pnl(refresh=True)
     except Exception:
         pass
-    return stocks, crypto
+    return stocks, crypto, crypto_pct, crypto_basis
 
 
 def fetch_crypto_life() -> float | None:
@@ -532,7 +677,8 @@ def fetch_crypto_life() -> float | None:
 
 
 def fetch_lines() -> str:
-    stocks, crypto = fetch_day_pnl()
+    crypto_value = fetch_crypto_value()
+    stocks, crypto, _pct, _basis = fetch_day_pnl(crypto_value=crypto_value)
     return render_lines(
         stocks,
         crypto,
@@ -623,6 +769,13 @@ def read_value_cache(cache_path: str | None = None) -> tuple[float | None, float
     return _num_field(raw, "stocks_value"), _num_field(raw, "crypto_value")
 
 
+def read_crypto_pct_cache(cache_path: str | None = None) -> float | None:
+    raw = _read_pnl_raw(cache_path)
+    if raw is None:
+        return None
+    return _num_field(raw, "crypto_pct")
+
+
 def write_pnl_cache(
     stocks: float | None,
     crypto: float | None,
@@ -632,9 +785,17 @@ def write_pnl_cache(
     *,
     stocks_value: float | None = None,
     crypto_value: float | None = None,
+    crypto_pct: float | None = None,
+    crypto_basis_day: str | None = None,
+    crypto_basis_equity: float | None = None,
     day_stale: bool = False,
 ) -> None:
     cache_path = cache_path or PNL_CACHE_PATH
+    prev = _read_pnl_raw(cache_path) or {}
+    if crypto_basis_day is None:
+        crypto_basis_day = prev.get("crypto_basis_day")
+    if crypto_basis_equity is None:
+        crypto_basis_equity = prev.get("crypto_basis_equity")
     payload = {
         "stocks": stocks,
         "crypto": crypto,
@@ -642,6 +803,9 @@ def write_pnl_cache(
         "crypto_life": crypto_life,
         "stocks_value": stocks_value,
         "crypto_value": crypto_value,
+        "crypto_pct": crypto_pct,
+        "crypto_basis_day": crypto_basis_day,
+        "crypto_basis_equity": crypto_basis_equity,
         "crypto_day_rev": _CRYPTO_DAY_REV,
         "day_stale": day_stale,
     }
@@ -658,12 +822,16 @@ def _store(
     crypto_life: float | None = None,
     stocks_value: float | None = None,
     crypto_value: float | None = None,
+    crypto_pct: float | None = None,
     *,
+    crypto_basis_day: str | None = None,
+    crypto_basis_equity: float | None = None,
     fetch_missing_life: bool = True,
 ) -> str:
     remembered_day = read_pnl_cache() or (None, None)
     remembered_stocks, remembered_crypto = read_life_cache()
     remembered_stock_value, remembered_crypto_value = read_value_cache()
+    remembered_pct = read_crypto_pct_cache()
     day_stale = False
     if stocks is None:
         stocks = remembered_day[0]
@@ -689,11 +857,16 @@ def _store(
         crypto_value = fetch_crypto_value()
     if crypto_value is None:
         crypto_value = remembered_crypto_value
+    if crypto_pct is None and not _linear_is_paper():
+        crypto_pct = remembered_pct
     text = render_lines(
         stocks,
         crypto,
         stocks_life=stocks_life,
         crypto_life=crypto_life,
+        stocks_value=stocks_value,
+        crypto_value=crypto_value,
+        crypto_pct=crypto_pct,
     )
     try:
         write_cache(text)
@@ -707,6 +880,9 @@ def _store(
             crypto_life,
             stocks_value=stocks_value,
             crypto_value=crypto_value,
+            crypto_pct=crypto_pct,
+            crypto_basis_day=crypto_basis_day,
+            crypto_basis_equity=crypto_basis_equity,
             day_stale=day_stale,
         )
     except Exception:
@@ -720,14 +896,19 @@ def load_text() -> str:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         if cache_is_fresh():
             return read_cache()
-        stocks, crypto = fetch_day_pnl()
+        crypto_value = fetch_crypto_value()
+        stocks, crypto, crypto_pct, basis_eq = fetch_day_pnl(crypto_value=crypto_value)
+        paper = _linear_is_paper()
         return _store(
             stocks,
             crypto,
             stocks_life=fetch_stocks_life(),
             crypto_life=fetch_crypto_life(),
             stocks_value=fetch_stocks_value(),
-            crypto_value=fetch_crypto_value(),
+            crypto_value=crypto_value,
+            crypto_pct=None if paper else crypto_pct,
+            crypto_basis_day=None if paper else _utc_day_key(),
+            crypto_basis_equity=None if paper else basis_eq,
         )
 
 
@@ -741,8 +922,17 @@ def load_day_pnl() -> tuple[float | None, float | None]:
             if cached is not None:
                 return cached
             # Старый кэш только с текстом Conky — пересчитаем пару чисел.
-        stocks, crypto = fetch_day_pnl()
-        _store(stocks, crypto)
+        crypto_value = fetch_crypto_value()
+        stocks, crypto, crypto_pct, basis_eq = fetch_day_pnl(crypto_value=crypto_value)
+        paper = _linear_is_paper()
+        _store(
+            stocks,
+            crypto,
+            crypto_value=crypto_value,
+            crypto_pct=None if paper else crypto_pct,
+            crypto_basis_day=None if paper else _utc_day_key(),
+            crypto_basis_equity=None if paper else basis_eq,
+        )
         return stocks, crypto
 
 

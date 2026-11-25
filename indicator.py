@@ -58,6 +58,7 @@ STATUS_COLORS = {
 _ORB_SIDE = 150
 _CAPTION_TOP = 99
 _CAPTION_SAMPLE = "+12 345 ₽ / 123 456 ₽"
+_CAPTION_SAMPLE_CRYPTO = "+12 $ (0.88%) / 12 345 $"
 _PLATE_BAR_W = 8
 
 class OrbWidget(QWidget):
@@ -86,7 +87,7 @@ class OrbWidget(QWidget):
         self._dragged = False
         self.settings_window = None
         self.chat_window = None
-        self._pnl = (None, None, None, None)
+        self._pnl = (None, None, None, None, None)
         self._pnl_at = 0.0
         self._refreshing = False
         self._refresh_not_before = 0.0
@@ -125,14 +126,21 @@ class OrbWidget(QWidget):
         if self._form == "plate":
             self._caption_font.setPointSize(12)
             metrics = QFontMetrics(self._caption_font)
-            text_w = metrics.horizontalAdvance(_CAPTION_SAMPLE)
+            text_w = max(
+                metrics.horizontalAdvance(_CAPTION_SAMPLE),
+                metrics.horizontalAdvance(_CAPTION_SAMPLE_CRYPTO),
+            )
             width = 10 + _PLATE_BAR_W + 10 + text_w + 12
             height = 8 + metrics.height() * 2 + 8
             self.setFixedSize(width, height)
             return
         self._caption_font.setPointSize(10)
         metrics = QFontMetrics(self._caption_font)
-        width = max(_ORB_SIDE, metrics.horizontalAdvance(_CAPTION_SAMPLE) + 16)
+        text_w = max(
+            metrics.horizontalAdvance(_CAPTION_SAMPLE),
+            metrics.horizontalAdvance(_CAPTION_SAMPLE_CRYPTO),
+        )
+        width = max(_ORB_SIDE, text_w + 16)
         self.setFixedSize(width, _ORB_SIDE)
 
     def _place_corner(self) -> None:
@@ -162,7 +170,8 @@ class OrbWidget(QWidget):
 
             day = conky_markets.read_pnl_cache() or (None, None)
             value = conky_markets.read_value_cache()
-            nxt = (day[0], day[1], value[0], value[1])
+            pct = conky_markets.read_crypto_pct_cache()
+            nxt = (day[0], day[1], value[0], value[1], pct)
         except Exception:
             return
         if nxt != self._pnl:
@@ -288,7 +297,10 @@ class OrbWidget(QWidget):
 
         painter.setFont(self._caption_font)
         metrics = painter.fontMetrics()
-        rows = conky_markets.caption_rows(*self._pnl)
+        stocks, crypto, stocks_value, crypto_value, crypto_pct = self._pnl
+        rows = conky_markets.caption_rows(
+            stocks, crypto, stocks_value, crypto_value, crypto_pct=crypto_pct
+        )
         pad_x, pad_y = 10, 8
         bar_w, gap = _PLATE_BAR_W, 10
         text_h = metrics.height() * 2
@@ -315,8 +327,10 @@ class OrbWidget(QWidget):
     def _paint_caption(self, painter: QPainter) -> None:
         import conky_markets
 
-        stocks, crypto, stocks_life, crypto_life = self._pnl
-        rows = conky_markets.caption_rows(stocks, crypto, stocks_life, crypto_life)
+        stocks, crypto, stocks_value, crypto_value, crypto_pct = self._pnl
+        rows = conky_markets.caption_rows(
+            stocks, crypto, stocks_value, crypto_value, crypto_pct=crypto_pct
+        )
         painter.setFont(self._caption_font)
         metrics = painter.fontMetrics()
         baseline = _CAPTION_TOP + metrics.ascent()

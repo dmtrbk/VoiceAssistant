@@ -113,6 +113,66 @@ class TestConkyMarkets(unittest.TestCase):
         zero, _crypto = conky_markets.caption_rows(0, None, None, None)
         self.assertEqual(zero[0], ("0 ₽", "c0c0c0"))
 
+    def test_caption_rows_live_pct(self):
+        _stocks, crypto = conky_markets.caption_rows(1, 1.41, 2000, 160.38, crypto_pct=0.88)
+        self.assertEqual(crypto[0], ("+1 $ (0.88%)", "c0c0c0"))
+        self.assertEqual(crypto[2], ("160 $", "c0c0c0"))
+
+    def test_bybit_today_pnl_rolls_basis(self):
+        import os
+        import tempfile
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "pnl.json")
+        conky_markets.write_pnl_cache(
+            0,
+            0,
+            cache_path=path,
+            crypto_value=158.97,
+            crypto_basis_day="2099-01-01",
+            crypto_basis_equity=158.97,
+        )
+        with mock.patch.object(conky_markets, "_utc_day_key", return_value="2099-01-02"):
+            pnl, pct, basis = conky_markets.bybit_today_pnl(160.38, cache_path=path)
+        self.assertAlmostEqual(basis, 158.97)
+        self.assertAlmostEqual(pnl, 1.41, places=2)
+        self.assertAlmostEqual(pct, 1.41 / 158.97 * 100.0, places=2)
+
+    def test_paper_result_from_daily_snap(self):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runtime = Path(tmp.name)
+        (runtime / "paper_daily.jsonl").write_text(
+            '{"type":"daily_snap","equity":120.65}\n',
+            encoding="utf-8",
+        )
+
+        class _Cfg:
+            def path(self, name: str):
+                return runtime / name
+
+        class _Settings:
+            paper = True
+            start_equity_usd = 120.0
+
+        with (
+            mock.patch.object(conky_markets, "_linear_is_paper", return_value=True),
+            mock.patch(
+                "skills.crypto.linear.settings_store.current",
+                return_value=_Settings(),
+            ),
+            mock.patch(
+                "skills.crypto.linear.config.default_config",
+                return_value=_Cfg(),
+            ),
+        ):
+            self.assertAlmostEqual(conky_markets.paper_linear_result(), 0.65)
+
     def test_select_line(self):
         text = conky_markets.render_lines(1, -2)
         self.assertEqual(conky_markets.select_line(text, "stocks"), "${color c0c0c0}+1 ₽")
