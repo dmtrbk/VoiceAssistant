@@ -99,10 +99,12 @@ class LinearPublicTape:
                         "volume": float(row.get("volume") or 0),
                         "confirm": True,
                     }
+                    # только очередь — обработка в desk main loop (дедуп WS/REST)
                     self.closed_klines.append((sym, bar))
                     self._kline_wake.set()
                     if self._on_kline:
                         self._on_kline(sym, bar)
+
             elif topic.startswith("publicTrade."):
                 sym = topic.split(".")[-1].upper()
                 for row in data.get("data") or []:

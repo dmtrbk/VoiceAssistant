@@ -10,6 +10,15 @@
 `linear.service` в daemon-потоке Джарвиса. Закрытие Cursor стол не роняет.
 Выкл: тумблер «Linear-контур» или навык Крипта off.
 
+Warm истории — **один раз** на старте. В рантайме HTF только `limit=5` (без полной перекачки).
+Pending TTL = 2×15m до новых сигналов. Core/Shadow — отдельные portfolio.
+
+Проверки:
+```bash
+.venv/bin/python -m unittest tests.test_linear_infra -v
+.venv/bin/python -m skills.crypto.linear.runner --audit --hours 30 --both
+```
+
 Ручной CLI (отладка, без ассистента):
 
 ```bash

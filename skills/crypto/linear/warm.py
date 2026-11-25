@@ -1,4 +1,4 @@
-"""REST warm-up истории kline с пагинацией (отсечение незакрытой свечи)."""
+"""REST warm-up истории kline с пагинацией + инкрементальный tail."""
 
 from __future__ import annotations
 
@@ -56,14 +56,12 @@ def fetch_klines_paginated(
         all_rows.extend(batch)
         oldest = int(batch[-1][0])
         cursor_end = oldest - 1
-        # throttle в BybitRest; доп. пауза между страницами warm
         time.sleep(0.12)
         if len(batch) < 1000:
             break
     by_ts = {int(r[0]): r for r in all_rows}
     rows = [by_ts[k] for k in sorted(by_ts)]
     if drop_unclosed and rows:
-        # бар закрыт, если open_ts + period <= now
         now = int(time.time() * 1000)
         rows = [r for r in rows if int(r[0]) + period <= now]
     if len(rows) > want_bars:
@@ -71,6 +69,47 @@ def fetch_klines_paginated(
     df = _rows_to_df(rows)
     logger.info("[linear] warm %s %s → %d bars", symbol, interval, len(df))
     return df
+
+
+def fetch_klines_tail(
+    rest: BybitRest,
+    symbol: str,
+    interval: str,
+    *,
+    limit: int = 5,
+    drop_unclosed: bool = True,
+) -> pd.DataFrame:
+    """Короткий хвост для инкрементального HTF/LTF (без полной перекачки)."""
+    period = _INTERVAL_MS[interval]
+    data = rest.public_get(
+        "/v5/market/kline",
+        {
+            "category": "linear",
+            "symbol": symbol,
+            "interval": interval,
+            "limit": max(2, min(200, int(limit))),
+        },
+    )
+    batch = data.get("result", {}).get("list") or []
+    rows = list(reversed(batch))  # API: newest first → asc
+    if drop_unclosed and rows:
+        now = int(time.time() * 1000)
+        rows = [r for r in rows if int(r[0]) + period <= now]
+    return _rows_to_df(rows)
+
+
+def merge_ohlc_tail(existing: pd.DataFrame, tail: pd.DataFrame, *, cap: int) -> pd.DataFrame:
+    """Склеить хвост в существующий DF, дедуп по ts, обрезать до cap."""
+    if tail is None or len(tail) == 0:
+        return existing
+    if existing is None or len(existing) == 0:
+        out = tail.copy()
+    else:
+        out = pd.concat([existing, tail], ignore_index=True)
+        out = out.drop_duplicates("ts", keep="last").sort_values("ts").reset_index(drop=True)
+    if len(out) > cap + 50:
+        out = out.iloc[-cap:].reset_index(drop=True)
+    return out
 
 
 def warm_symbol(rest: BybitRest, cfg: LinearConfig, symbol: str) -> dict[str, pd.DataFrame]:
@@ -82,12 +121,13 @@ def warm_symbol(rest: BybitRest, cfg: LinearConfig, symbol: str) -> dict[str, pd
 
 
 def warm_universe(rest: BybitRest, cfg: LinearConfig) -> dict[str, dict[str, pd.DataFrame]]:
+    """Один раз на старте: полная история. В работе — только fetch_klines_tail."""
     syms = set(cfg.symbols) | {cfg.btc_symbol}
     if cfg.shadow_enabled:
         syms |= set(cfg.shadow_symbols)
     out: dict[str, dict[str, pd.DataFrame]] = {}
     for i, sym in enumerate(sorted(syms)):
         if i:
-            time.sleep(0.4)  # перед следующим символом — дать остыть IP-лимиту
+            time.sleep(0.4)
         out[sym] = warm_symbol(rest, cfg, sym)
     return out

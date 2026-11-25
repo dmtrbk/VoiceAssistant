@@ -207,7 +207,6 @@ class LinearExecutor:
         st = self.orders.get(symbol.upper())
         if not st or st.status != "pending":
             return
-        # query fill
         filled = self._query_filled(st)
         self.cancel_order(st.entry_order_id, st.symbol)
         if filled > 0:
@@ -215,6 +214,18 @@ class LinearExecutor:
         else:
             st.status = "cancelled"
             self.orders.pop(symbol.upper(), None)
+            logger.info("[linear] live TTL cancel %s", symbol)
+
+    def expire_pendings_at_bar(self, closed_bar_ts: int) -> list[str]:
+        """Снять live pending с TTL до новых сигналов (зеркало paper)."""
+        cancelled: list[str] = []
+        for sym, st in list(self.orders.items()):
+            if st.status != "pending":
+                continue
+            if int(closed_bar_ts) >= int(st.expire_bar_ts):
+                self.on_ttl_expire(sym)
+                cancelled.append(sym)
+        return cancelled
 
     def _query_filled(self, st: LiveOrderState) -> float:
         try:
@@ -247,6 +258,9 @@ class LinearExecutor:
         for row in (data.get("result") or {}).get("list") or []:
             sym = str(row.get("symbol") or "").upper()
             pos_map[sym] = abs(float(row.get("size") or 0))
+
+        now_bar = (int(time.time() * 1000) // (15 * 60_000)) * (15 * 60_000)
+        self.expire_pendings_at_bar(now_bar)
 
         for sym, st in list(self.orders.items()):
             size = pos_map.get(sym, 0.0)

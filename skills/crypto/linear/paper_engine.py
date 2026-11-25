@@ -150,9 +150,8 @@ class PaperEngine:
         pend = self.book.pending.get(symbol.upper())
         if not pend:
             return
-        # если crossed_at_place и политика skip — уже не тут
         side = pend.signal.side
-        through = self.cfg.fill_through_pct
+        through = float(self.cfg.fill_through_pct)
         if side == "long":
             hit = price < pend.limit_px * (1.0 - through)
         else:
@@ -161,34 +160,53 @@ class PaperEngine:
             return
         self._fill_entry(pend, fill_px=pend.limit_px, ts_ms=ts_ms)
 
+    def expire_pendings_at_bar(self, closed_bar_ts: int) -> list[str]:
+        """Снять pending с TTL до оценки новых сигналов.
+
+        bars_since_created = (closed_bar_ts - created_bar_ts) / 15m.
+        При >= entry_ttl_bars_15m (по умолчанию 2) — cancel и освобождение слота.
+        """
+        cancelled: list[str] = []
+        period = 15 * 60_000
+        for sym, pend in list(self.book.pending.items()):
+            if closed_bar_ts <= pend.created_bar_ts:
+                continue
+            bars_since = (int(closed_bar_ts) - int(pend.created_bar_ts)) // period
+            pend.bars_lived = int(bars_since)
+            if bars_since >= int(pend.expire_after_bars):
+                self.book.pending.pop(sym, None)
+                self.portfolio.clear_pending(sym)
+                cancelled.append(sym)
+                self.journals.event(
+                    {
+                        "type": "ttl_cancel",
+                        "symbol": sym,
+                        "shadow": self.shadow,
+                        "created_bar_ts": pend.created_bar_ts,
+                        "closed_bar_ts": closed_bar_ts,
+                        "bars_since": bars_since,
+                    }
+                )
+        return cancelled
+
     def on_bar_close_15m(self, symbol: str, bar: dict[str, float]) -> None:
-        """TTL countdown + внутрибарный S1 по high/low если не было trade-stream."""
+        """OHLC S1 fill + SL/TP. TTL снимается отдельно через expire_pendings_at_bar."""
         sym = symbol.upper()
         pend = self.book.pending.get(sym)
         if pend:
-            # fallback fill по OHLC бара (S1)
             if limit_filled(
                 pend.signal.side,
                 pend.limit_px,
                 low=float(bar["low"]),
                 high=float(bar["high"]),
-                through_pct=self.cfg.fill_through_pct,
+                through_pct=float(self.cfg.fill_through_pct),
             ):
                 self._fill_entry(pend, fill_px=pend.limit_px, ts_ms=int(bar.get("ts") or 0))
-            else:
-                pend.bars_lived += 1
-                if pend.bars_lived >= pend.expire_after_bars:
-                    self.book.pending.pop(sym, None)
-                    self.portfolio.clear_pending(sym)
-                    self.journals.event(
-                        {"type": "ttl_cancel", "symbol": sym, "shadow": self.shadow}
-                    )
 
         pos = self.book.positions.get(sym)
         if not pos:
             return
-        lo, hi, c = float(bar["low"]), float(bar["high"]), float(bar["close"])
-        # SL first if both
+        lo, hi = float(bar["low"]), float(bar["high"])
         hit_sl = (pos.side == "long" and lo <= pos.sl) or (pos.side == "short" and hi >= pos.sl)
         hit_tp = (pos.side == "long" and hi >= pos.tp) or (pos.side == "short" and lo <= pos.tp)
         if hit_sl:

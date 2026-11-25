@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,31 @@ from typing import Any
 from .config import LinearConfig
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_NAMES = (
+    "paper_signals.jsonl",
+    "paper_trades.jsonl",
+    "paper_events.jsonl",
+    "paper_daily.jsonl",
+    "shadow_aave_signals.jsonl",
+    "shadow_aave_trades.jsonl",
+)
+
+
+def archive_runtime_journals(runtime_dir: Path, *, tag: str = "pre_clean") -> Path:
+    """Сдвинуть текущие jsonl в archive/<tag>-<stamp>/ для чистого прогона."""
+    runtime_dir = Path(runtime_dir)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest = runtime_dir / "archive" / f"{tag}-{stamp}"
+    dest.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    for name in _RUNTIME_NAMES:
+        src = runtime_dir / name
+        if src.is_file() and src.stat().st_size > 0:
+            shutil.move(str(src), str(dest / name))
+            moved += 1
+    logger.info("[linear] archived %d journals → %s", moved, dest)
+    return dest
 
 
 class LinearJournals:

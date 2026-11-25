@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--audit", action="store_true", help="run parity audit and exit")
     ap.add_argument("--hours", type=int, default=48)
     ap.add_argument("--shadow", action="store_true")
+    ap.add_argument("--both", action="store_true", help="audit Core+Shadow")
+    ap.add_argument("--journal-dir", default=None)
     ap.add_argument("--sizing", choices=["fixed", "risk_clamp"], default=None)
     ap.add_argument(
         "--equity",
@@ -36,7 +38,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         from .audit_parity import run_audit
 
-        return run_audit(hours=args.hours, shadow=args.shadow)
+        return run_audit(
+            hours=args.hours,
+            shadow=args.shadow,
+            both=args.both or args.shadow,
+            journal_dir=args.journal_dir,
+        )
 
     from .config import default_config
     from .desk_linear import LinearDesk

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -19,9 +20,11 @@ from .paper_engine import PaperEngine
 from .portfolio import PortfolioGuard
 from .strategy_core import StrategyParams, build_features, signal_at_bar
 from .stream_linear import LinearPublicTape
-from .warm import warm_universe
+from .warm import fetch_klines_tail, merge_ohlc_tail, warm_universe
 
 logger = logging.getLogger(__name__)
+
+_BAR_MS = {"15m": 15 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000}
 
 
 class LinearDesk:
@@ -30,7 +33,9 @@ class LinearDesk:
         self.rest = BybitRest(testnet=self.cfg.testnet)
         self.instruments = InstrumentCache(self.rest.public_get)
         self.account = AccountGuard(self.rest, self.cfg)
+        # Core и Shadow — полностью изолированные portfolio/equity/kill
         self.portfolio = PortfolioGuard(self.cfg)
+        self.shadow_portfolio = PortfolioGuard(self.cfg)
         self.journals = LinearJournals(self.cfg, prefix="paper" if self.cfg.paper else "live")
         self.executor = LinearExecutor(self.rest, self.cfg, self.instruments, self.account)
         self.tape = LinearPublicTape(testnet=self.cfg.testnet)
@@ -44,6 +49,10 @@ class LinearDesk:
         self.shadow: PaperEngine | None = None
         self._stop = False
         self._last_reconcile = 0.0
+        self._last_daily_hour: str = ""
+        self._bar_lock = threading.Lock()
+        # дедуп: (symbol, timeframe, last_closed_bar_ts)
+        self._seen_bars: dict[tuple[str, str], int] = {}
 
     def start(self) -> None:
         logger.info(
@@ -61,7 +70,7 @@ class LinearDesk:
         if not self.cfg.paper:
             self.account.ensure_modes(self.cfg.symbols)
 
-        logger.info("[linear] warming REST history…")
+        logger.info("[linear] warming REST history (once)…")
         self.ohlc = warm_universe(self.rest, self.cfg)
         self._rebuild_features()
 
@@ -73,11 +82,9 @@ class LinearDesk:
         if self.cfg.paper:
             self.paper = PaperEngine(self.cfg, self.portfolio, self.journals, min_usd_map=min_usd)
             if self.cfg.shadow_enabled:
-                # отдельный portfolio для shadow, чтобы не блокировать Core-2
-                shadow_port = PortfolioGuard(self.cfg)
                 self.shadow = PaperEngine(
                     self.cfg,
-                    shadow_port,
+                    self.shadow_portfolio,
                     self.journals,
                     shadow=True,
                     min_usd_map=min_usd,
@@ -89,15 +96,20 @@ class LinearDesk:
 
         start_eq = float(self.paper.equity) if self.paper else float(self.cfg.start_equity_usd)
         self.journals.session_start(equity=start_eq)
-        self.journals.daily_snapshot(
-            equity=start_eq,
-            day_pnl=0.0,
-            open_n=0,
-            kill=False,
-        )
+        try:
+            self.journals.daily_snapshot(
+                equity=start_eq,
+                day_pnl=0.0,
+                open_n=0,
+                kill=False,
+            )
+            self._last_daily_hour = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+        except Exception:
+            logger.exception("[linear] daily-snap on start failed")
 
         self.tape.set_symbols(want)
-        self.tape.set_handlers(on_kline_closed=self._on_kline, on_trade=self._on_trade)
+        # Только очередь: обработка баров — в main loop (дедуп WS vs REST)
+        self.tape.set_handlers(on_kline_closed=None, on_trade=self._on_trade)
         self.tape.start()
         self._loop()
 
@@ -120,17 +132,26 @@ class LinearDesk:
             "volume": float(bar.get("volume") or 0),
             "turnover": float(bar.get("turnover") or 0),
         }
-        # replace if same ts else append
         if len(df) and int(df.iloc[-1]["ts"]) == row["ts"]:
             df.iloc[-1] = row
         else:
             self.ohlc[symbol][interval] = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-            # trim
-            cap = {"15m": self.cfg.warm_bars_15m, "1h": self.cfg.warm_bars_1h, "4h": self.cfg.warm_bars_4h}[
-                interval
-            ]
+            cap = {
+                "15m": self.cfg.warm_bars_15m,
+                "1h": self.cfg.warm_bars_1h,
+                "4h": self.cfg.warm_bars_4h,
+            }[interval]
             if len(self.ohlc[symbol][interval]) > cap + 50:
                 self.ohlc[symbol][interval] = self.ohlc[symbol][interval].iloc[-cap:].reset_index(drop=True)
+
+    def _mark_seen(self, symbol: str, timeframe: str, bar_ts: int) -> bool:
+        """True если бар новый и помечен; False если уже обрабатывали."""
+        key = (symbol.upper(), timeframe)
+        prev = self._seen_bars.get(key)
+        if prev is not None and int(bar_ts) <= int(prev):
+            return False
+        self._seen_bars[key] = int(bar_ts)
+        return True
 
     def _on_trade(self, symbol: str, price: float, ts_ms: int) -> None:
         if self.paper:
@@ -138,37 +159,68 @@ class LinearDesk:
         if self.shadow and symbol in self.cfg.shadow_symbols:
             self.shadow.on_public_trade(symbol, price, ts_ms)
 
-    def _on_kline(self, symbol: str, bar: dict[str, Any]) -> None:
-        if symbol not in self.ohlc:
-            return
-        self._append_bar(symbol, "15m", bar)
-        # roll HTF if boundary
-        ts = int(bar["ts"])
-        if ts % 3_600_000 == 0:
-            self._refresh_htf(symbol, "1h", "60")
-        if ts % 14_400_000 == 0:
-            self._refresh_htf(symbol, "4h", "240")
-        self.features[symbol] = build_features(
-            self.ohlc[symbol]["15m"],
-            self.ohlc[symbol]["1h"],
-            self.ohlc[symbol]["4h"],
-        )
-        if self.paper:
-            self.paper.on_bar_close_15m(symbol, bar)
-        if self.shadow and symbol in set(self.cfg.shadow_symbols) | {self.cfg.btc_symbol}:
-            self.shadow.on_bar_close_15m(symbol, bar)
+    def _handle_closed_15m(self, symbol: str, bar: dict[str, Any]) -> None:
+        """Единая обработка закрытой 15m (WS или REST) под lock + дедуп."""
+        with self._bar_lock:
+            if symbol not in self.ohlc:
+                return
+            ts = int(bar["ts"])
+            if not self._mark_seen(symbol, "15m", ts):
+                return
 
-        # signal only for working / shadow symbols (not BTC alone)
-        if symbol == self.cfg.btc_symbol:
-            return
-        self._emit_signal(symbol)
+            # 1) TTL всех pending ДО сигналов на этом баре
+            if self.paper:
+                self.paper.expire_pendings_at_bar(ts)
+            if self.shadow:
+                self.shadow.expire_pendings_at_bar(ts)
+            if not self.cfg.paper:
+                self.executor.expire_pendings_at_bar(ts)
 
-    def _refresh_htf(self, symbol: str, key: str, interval: str) -> None:
+            self._append_bar(symbol, "15m", bar)
+
+            # 2) инкрементальный HTF (limit=5), без полной перекачки
+            if ts % 3_600_000 == 0:
+                self._refresh_htf_incremental(symbol, "1h", "60")
+            if ts % 14_400_000 == 0:
+                self._refresh_htf_incremental(symbol, "4h", "240")
+
+            self.features[symbol] = build_features(
+                self.ohlc[symbol]["15m"],
+                self.ohlc[symbol]["1h"],
+                self.ohlc[symbol]["4h"],
+            )
+
+            # 3) fills / SL-TP на этом символе
+            if self.paper:
+                self.paper.on_bar_close_15m(symbol, bar)
+            if self.shadow and symbol in set(self.cfg.shadow_symbols) | {self.cfg.btc_symbol}:
+                self.shadow.on_bar_close_15m(symbol, bar)
+
+            if symbol == self.cfg.btc_symbol:
+                return
+            self._emit_signal(symbol)
+
+    def _refresh_htf_incremental(self, symbol: str, key: str, interval: str) -> None:
+        """Только хвост limit=5; полная перекачка запрещена в рантайме."""
         try:
-            from .warm import fetch_klines_paginated
-
-            want = self.cfg.warm_bars_1h if key == "1h" else self.cfg.warm_bars_4h
-            self.ohlc[symbol][key] = fetch_klines_paginated(self.rest, symbol, interval, want)
+            cap = self.cfg.warm_bars_1h if key == "1h" else self.cfg.warm_bars_4h
+            tail = fetch_klines_tail(self.rest, symbol, interval, limit=5)
+            if len(tail) == 0:
+                return
+            last_ts = int(tail.iloc[-1]["ts"])
+            if not self._mark_seen(symbol, key, last_ts):
+                return
+            prev = self.ohlc[symbol][key]
+            # дыра: если хвост не продолжает prev — один REST limit=5 уже есть; лог
+            if len(prev) and last_ts - int(prev.iloc[-1]["ts"]) > _BAR_MS[key] * 2:
+                logger.warning(
+                    "[linear] HTF gap %s %s prev=%s new=%s — merge tail only",
+                    symbol,
+                    key,
+                    int(prev.iloc[-1]["ts"]),
+                    last_ts,
+                )
+            self.ohlc[symbol][key] = merge_ohlc_tail(prev, tail, cap=cap)
         except Exception as exc:
             logger.warning("[linear] refresh %s %s: %s", symbol, key, exc)
 
@@ -200,11 +252,10 @@ class LinearDesk:
             self.shadow.on_signal(sig, bbo_bid=bid, bbo_ask=ask, last=last)
 
     def _rest_confirm_poll(self) -> None:
-        """Fallback: на HH:MM:02 UTC после :00/:15/:30/:45 проверить закрытие."""
+        """Fallback: на границе 15m подтянуть закрытый бар (limit=2), без warm."""
         now = datetime.now(timezone.utc)
-        if now.minute % 15 != 0 or now.second < 2 or now.second > 8:
+        if now.minute % 15 != 0 or now.second < 2 or now.second > 12:
             return
-        # debounce via last bar ts
         for sym in set(self.cfg.symbols) | set(self.cfg.shadow_symbols) | {self.cfg.btc_symbol}:
             try:
                 data = self.rest.public_get(
@@ -214,7 +265,6 @@ class LinearDesk:
                 rows = data.get("result", {}).get("list") or []
                 if len(rows) < 2:
                     continue
-                # rows[0] newest possibly unclosed; rows[1] closed
                 closed = rows[1]
                 bar = {
                     "ts": int(closed[0]),
@@ -225,10 +275,7 @@ class LinearDesk:
                     "volume": float(closed[5]),
                     "confirm": True,
                 }
-                cur = self.ohlc.get(sym, {}).get("15m")
-                if cur is not None and len(cur) and int(cur.iloc[-1]["ts"]) == bar["ts"]:
-                    continue
-                self._on_kline(sym, bar)
+                self._handle_closed_15m(sym, bar)
             except Exception as exc:
                 logger.warning("[linear] REST confirm %s: %s", sym, exc)
 
@@ -243,37 +290,66 @@ class LinearDesk:
             if self.shadow:
                 self.shadow.on_funding(sym, rate, slot)
 
+    def _maybe_daily_snap(self, eq: float) -> None:
+        utc = datetime.now(timezone.utc)
+        hour_key = utc.strftime("%Y-%m-%d-%H")
+        if hour_key == self._last_daily_hour:
+            return
+        # пишем в первую минуту часа или если час уже сменился (догон после блока)
+        try:
+            self.journals.daily_snapshot(
+                equity=eq,
+                day_pnl=self.portfolio.state.day_realized_pnl,
+                open_n=self.portfolio.open_plus_pending(),
+                kill=self.portfolio.state.kill,
+            )
+            if self.shadow:
+                self.journals.event(
+                    {
+                        "type": "shadow_snap",
+                        "equity": self.shadow.equity,
+                        "day_realized_pnl": self.shadow_portfolio.state.day_realized_pnl,
+                        "open_plus_pending": self.shadow_portfolio.open_plus_pending(),
+                        "kill": self.shadow_portfolio.state.kill,
+                    }
+                )
+            self._last_daily_hour = hour_key
+        except Exception:
+            logger.exception("[linear] daily-snap failed hour=%s", hour_key)
+
     def _loop(self) -> None:
         logger.info("[linear] desk loop running")
         while not self._stop:
             self.tape.wait_kline(timeout=1.0)
             for sym, bar in self.tape.pop_closed():
-                # already handled via callback if set; avoid double if callback used
-                pass
-            self._rest_confirm_poll()
-            self._funding_tick()
+                try:
+                    self._handle_closed_15m(sym, bar)
+                except Exception:
+                    logger.exception("[linear] handle bar %s failed", sym)
+            try:
+                self._rest_confirm_poll()
+            except Exception:
+                logger.exception("[linear] rest confirm poll failed")
+            try:
+                self._funding_tick()
+            except Exception:
+                logger.exception("[linear] funding tick failed")
             now = time.time()
             if now - self._last_reconcile >= 60:
                 self._last_reconcile = now
-                if not self.cfg.paper:
-                    self.executor.reconcile()
-                    # Earn: не уводить резерв
-                    parkable = self.account.earn_respect_reserve()
-                    self.journals.event({"type": "earn_reserve_free", "usd": parkable})
-                snap = self.account.wallet_snapshot()
-                eq = float(snap.get("totalEquity") or self.portfolio.state.equity)
-                if self.cfg.paper and self.paper:
-                    eq = self.paper.equity
-                self.portfolio.update_equity(eq)
-                # раз в час — снимок equity в daily jsonl
-                utc = datetime.now(timezone.utc)
-                if utc.minute == 0:
-                    self.journals.daily_snapshot(
-                        equity=eq,
-                        day_pnl=self.portfolio.state.day_realized_pnl,
-                        open_n=self.portfolio.open_plus_pending(),
-                        kill=self.portfolio.state.kill,
-                    )
+                try:
+                    if not self.cfg.paper:
+                        self.executor.reconcile()
+                        parkable = self.account.earn_respect_reserve()
+                        self.journals.event({"type": "earn_reserve_free", "usd": parkable})
+                    snap = self.account.wallet_snapshot()
+                    eq = float(snap.get("totalEquity") or self.portfolio.state.equity)
+                    if self.cfg.paper and self.paper:
+                        eq = self.paper.equity
+                    self.portfolio.update_equity(eq)
+                    self._maybe_daily_snap(eq)
+                except Exception:
+                    logger.exception("[linear] reconcile/snap cycle failed")
             time.sleep(0.2)
 
 
