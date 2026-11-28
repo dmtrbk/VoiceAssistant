@@ -26,6 +26,7 @@ class LinearPublicTape:
         self._on_kline: Callable[[str, dict[str, Any]], None] | None = None
         self._on_trade: Callable[[str, float, int], None] | None = None
         self._kline_wake = threading.Event()
+        self._kline_lock = threading.Lock()
         self.closed_klines: list[tuple[str, dict[str, Any]]] = []
 
     def set_handlers(
@@ -61,9 +62,10 @@ class LinearPublicTape:
         return ok
 
     def pop_closed(self) -> list[tuple[str, dict[str, Any]]]:
-        out = list(self.closed_klines)
-        self.closed_klines.clear()
-        return out
+        with self._kline_lock:
+            out = list(self.closed_klines)
+            self.closed_klines.clear()
+            return out
 
     def _topics(self) -> list[str]:
         topics = []
@@ -100,7 +102,8 @@ class LinearPublicTape:
                         "confirm": True,
                     }
                     # только очередь — обработка в desk main loop (дедуп WS/REST)
-                    self.closed_klines.append((sym, bar))
+                    with self._kline_lock:
+                        self.closed_klines.append((sym, bar))
                     self._kline_wake.set()
                     if self._on_kline:
                         self._on_kline(sym, bar)

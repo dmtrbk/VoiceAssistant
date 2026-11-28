@@ -24,6 +24,7 @@ from .paper_engine import PaperEngine
 from .portfolio import PortfolioGuard
 from .strategy_core import StrategyParams, build_features, signal_at_bar
 from .stream_linear import LinearPublicTape
+from .stream_private import LinearPrivateTape
 from .warm import warm_universe
 
 logger = logging.getLogger(__name__)
@@ -59,8 +60,15 @@ class LinearDesk:
         self.portfolio = PortfolioGuard(self.cfg)
         self.shadow_portfolio = PortfolioGuard(self.cfg)
         self.journals = LinearJournals(self.cfg, prefix="paper" if self.cfg.paper else "live")
-        self.executor = LinearExecutor(self.rest, self.cfg, self.instruments, self.account)
+        self.executor = LinearExecutor(
+            self.rest,
+            self.cfg,
+            self.instruments,
+            self.account,
+            portfolio=self.portfolio,
+        )
         self.tape = LinearPublicTape(testnet=self.cfg.testnet)
+        self.private_tape: LinearPrivateTape | None = None
         self.params = StrategyParams(
             er4h_median_mode=self.cfg.er4h_median_mode,
             tp_r=self.cfg.tp_r,
@@ -124,12 +132,37 @@ class LinearDesk:
             restored = self._restore_paper_books()
             if restored:
                 self._replay_paper_catchup()
+        else:
+            # live: поднять позиции/ордера с биржи + private WS для мгновенного protect
+            try:
+                self.executor.bootstrap_from_exchange(self.cfg.symbols)
+            except Exception:
+                logger.exception("[linear] bootstrap_from_exchange failed")
+            self.private_tape = LinearPrivateTape(
+                api_key=self.rest.api_key,
+                api_secret=self.rest.api_secret,
+                testnet=self.cfg.testnet,
+            )
+            self.private_tape.set_handlers(
+                on_order=self.executor.on_private_order,
+                on_execution=self.executor.on_private_execution,
+            )
+            self.private_tape.start()
 
         if self._stop:
             logger.info("[linear] stop during warm — выход")
             return
 
-        start_eq = float(self.paper.equity) if self.paper else float(self.cfg.start_equity_usd)
+        if self.cfg.paper and self.paper:
+            start_eq = float(self.paper.equity)
+        elif not self.cfg.paper:
+            try:
+                start_eq = float(self.account.wallet_snapshot().get("totalEquity") or self.cfg.start_equity_usd)
+            except Exception:
+                start_eq = float(self.cfg.start_equity_usd)
+            self.portfolio.update_equity(start_eq)
+        else:
+            start_eq = float(self.cfg.start_equity_usd)
         self.journals.session_start(
             equity=start_eq,
             extra={
@@ -163,6 +196,8 @@ class LinearDesk:
         except Exception:
             logger.exception("[linear] persist on stop failed")
         self.tape.stop()
+        if self.private_tape is not None:
+            self.private_tape.stop()
 
     def _wire_paper_persist(self) -> None:
         if self.paper:
@@ -238,8 +273,9 @@ class LinearDesk:
                         "volume": float(row.get("volume") or 0),
                         "confirm": True,
                     }
-                    eng.expire_pendings_at_bar(int(bar["ts"]))
+                    # fill/SL на баре → затем TTL (не наоборот)
                     eng.on_bar_close_15m(sym, bar)
+                    eng.expire_pendings_at_bar(int(bar["ts"]))
                     if sym not in eng.book.positions and sym not in eng.book.pending:
                         break
             self._persist_one(shadow=bool(eng.shadow))
@@ -303,19 +339,16 @@ class LinearDesk:
         *,
         emit_signal: bool,
     ) -> bool:
-        """Append + HTF + expire/fills. emit_signal=False для gap-heal (без торговли задним числом)."""
+        """Append + HTF + fills → TTL expire → signal.
+
+        emit_signal=False для gap-heal (без торговли задним числом).
+        Порядок: on_bar_close (OHLC fill/SL) → expire_pendings → emit.
+        """
         if symbol not in self.ohlc:
             return False
         ts = int(bar["ts"])
         if not self._mark_seen(symbol, "15m", ts):
             return False
-
-        if self.paper:
-            self.paper.expire_pendings_at_bar(ts)
-        if self.shadow:
-            self.shadow.expire_pendings_at_bar(ts)
-        if not self.cfg.paper:
-            self.executor.expire_pendings_at_bar(ts)
 
         self._append_bar(symbol, "15m", bar)
 
@@ -330,11 +363,21 @@ class LinearDesk:
             self.ohlc[symbol]["4h"],
         )
 
+        # 1) OHLC fill / SL-TP на этом баре
         if self.paper:
             self.paper.on_bar_close_15m(symbol, bar)
         if self.shadow and symbol in set(self.cfg.shadow_symbols) | {self.cfg.btc_symbol}:
             self.shadow.on_bar_close_15m(symbol, bar)
 
+        # 2) TTL после проверки fill на 2-м баре жизни
+        if self.paper:
+            self.paper.expire_pendings_at_bar(ts)
+        if self.shadow:
+            self.shadow.expire_pendings_at_bar(ts)
+        if not self.cfg.paper:
+            self.executor.expire_pendings_at_bar(ts)
+
+        # 3) новые сигналы только после освобождения слотов
         if emit_signal and symbol != self.cfg.btc_symbol:
             self._emit_signal(symbol)
         return True
@@ -578,6 +621,7 @@ class LinearDesk:
             if self.cfg.paper and self.paper:
                 self.paper.on_signal(sig, bbo_bid=bid, bbo_ask=ask, last=last)
             elif not self.cfg.paper:
+                # PortfolioGuard: can_add / pending — внутри LinearExecutor
                 self.executor.place_entry_postonly(sig, bar_ts=sig.bar_ts, bbo_bid=bid, bbo_ask=ask)
 
         if (
@@ -594,7 +638,8 @@ class LinearDesk:
         без шторма 4×kline каждый слот. После восстановления — gap-heal через handle.
         """
         now = datetime.now(timezone.utc)
-        if now.minute % 15 != 0 or now.second < 8 or now.second > 14:
+        # нижняя граница :08; верхнюю убрали — от повторов защищает _last_confirm_slot
+        if now.minute % 15 != 0 or now.second < 8:
             return
         wall = time.time()
         if wall < self._confirm_backoff_until:

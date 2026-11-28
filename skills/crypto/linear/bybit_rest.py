@@ -88,7 +88,9 @@ class BybitRest:
             recv = "5000"
             try:
                 if method.upper() == "GET":
-                    query = "&".join(f"{k}={params[k]}" for k in sorted(params))
+                    # порядок ключей в подписи и в URL должен совпадать (иначе 10004)
+                    ordered = sorted(params.items(), key=lambda kv: str(kv[0]))
+                    query = "&".join(f"{k}={v}" for k, v in ordered)
                     payload = f"{ts}{self.api_key}{recv}{query}"
                     sign = hmac.new(self.api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
                     headers = {
@@ -97,7 +99,12 @@ class BybitRest:
                         "X-BAPI-TIMESTAMP": ts,
                         "X-BAPI-RECV-WINDOW": recv,
                     }
-                    r = self.session.get(f"{self.host}{path}", params=params, headers=headers, timeout=30)
+                    r = self.session.get(
+                        f"{self.host}{path}",
+                        params=ordered,
+                        headers=headers,
+                        timeout=30,
+                    )
                 else:
                     body = json.dumps(params, separators=(",", ":"))
                     payload = f"{ts}{self.api_key}{recv}{body}"

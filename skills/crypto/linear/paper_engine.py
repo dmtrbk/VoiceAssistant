@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -51,7 +52,8 @@ class PaperBook:
     pending: dict[str, PaperPending] = field(default_factory=dict)
     positions: dict[str, PaperPos] = field(default_factory=dict)
     realized: float = 0.0
-    last_funding_slot: str = ""
+    # per-symbol: иначе первый тикер из tape.funding «съедает» слот для всех
+    last_funding_by_symbol: dict[str, str] = field(default_factory=dict)
 
 
 class PaperEngine:
@@ -72,6 +74,7 @@ class PaperEngine:
         self.book = PaperBook()
         self.equity = cfg.start_equity_usd
         self._on_book_changed: Any | None = None
+        self._lock = threading.RLock()
 
     def set_persist_hook(self, hook: Any) -> None:
         """Вызывается после мутации book (fill/close/ttl/signal)."""
@@ -87,6 +90,17 @@ class PaperEngine:
             logger.exception("[linear] paper persist hook failed shadow=%s", self.shadow)
 
     def on_signal(
+        self,
+        sig: Signal,
+        *,
+        bbo_bid: float,
+        bbo_ask: float,
+        last: float,
+    ) -> None:
+        with self._lock:
+            self._on_signal_unlocked(sig, bbo_bid=bbo_bid, bbo_ask=bbo_ask, last=last)
+
+    def _on_signal_unlocked(
         self,
         sig: Signal,
         *,
@@ -162,87 +176,98 @@ class PaperEngine:
 
     def on_public_trade(self, symbol: str, price: float, ts_ms: int) -> None:
         """S1: fill только при пробитии limit на >= fill_through_pct."""
-        pend = self.book.pending.get(symbol.upper())
-        if not pend:
-            return
-        side = pend.signal.side
-        through = float(self.cfg.fill_through_pct)
-        if side == "long":
-            hit = price < pend.limit_px * (1.0 - through)
-        else:
-            hit = price > pend.limit_px * (1.0 + through)
-        if not hit:
-            return
-        self._fill_entry(pend, fill_px=pend.limit_px, ts_ms=ts_ms)
+        with self._lock:
+            pend = self.book.pending.get(symbol.upper())
+            if not pend:
+                return
+            side = pend.signal.side
+            through = float(self.cfg.fill_through_pct)
+            if side == "long":
+                hit = price < pend.limit_px * (1.0 - through)
+            else:
+                hit = price > pend.limit_px * (1.0 + through)
+            if not hit:
+                return
+            self._fill_entry(pend, fill_px=pend.limit_px, ts_ms=ts_ms)
 
     def expire_pendings_at_bar(self, closed_bar_ts: int) -> list[str]:
-        """Снять pending с TTL до оценки новых сигналов.
+        """Снять pending с TTL после OHLC-fill на этом баре, до новых сигналов.
 
         bars_since_created = (closed_bar_ts - created_bar_ts) / 15m.
         При >= entry_ttl_bars_15m (по умолчанию 2) — cancel и освобождение слота.
         """
-        cancelled: list[str] = []
-        period = 15 * 60_000
-        for sym, pend in list(self.book.pending.items()):
-            if closed_bar_ts <= pend.created_bar_ts:
-                continue
-            bars_since = (int(closed_bar_ts) - int(pend.created_bar_ts)) // period
-            pend.bars_lived = int(bars_since)
-            if bars_since >= int(pend.expire_after_bars):
-                self.book.pending.pop(sym, None)
-                self.portfolio.clear_pending(sym)
-                cancelled.append(sym)
-                self.journals.event(
-                    {
-                        "type": "ttl_cancel",
-                        "symbol": sym,
-                        "shadow": self.shadow,
-                        "created_bar_ts": pend.created_bar_ts,
-                        "closed_bar_ts": closed_bar_ts,
-                        "bars_since": bars_since,
-                    }
-                )
-        if cancelled:
-            self._persist()
-        return cancelled
+        with self._lock:
+            cancelled: list[str] = []
+            period = 15 * 60_000
+            for sym, pend in list(self.book.pending.items()):
+                if closed_bar_ts <= pend.created_bar_ts:
+                    continue
+                bars_since = (int(closed_bar_ts) - int(pend.created_bar_ts)) // period
+                pend.bars_lived = int(bars_since)
+                if bars_since >= int(pend.expire_after_bars):
+                    self.book.pending.pop(sym, None)
+                    self.portfolio.clear_pending(sym)
+                    cancelled.append(sym)
+                    self.journals.event(
+                        {
+                            "type": "ttl_cancel",
+                            "symbol": sym,
+                            "shadow": self.shadow,
+                            "created_bar_ts": pend.created_bar_ts,
+                            "closed_bar_ts": closed_bar_ts,
+                            "bars_since": bars_since,
+                        }
+                    )
+            if cancelled:
+                self._persist()
+            return cancelled
 
     def on_bar_close_15m(self, symbol: str, bar: dict[str, float]) -> None:
         """OHLC S1 fill + SL/TP. TTL снимается отдельно через expire_pendings_at_bar."""
-        sym = symbol.upper()
-        pend = self.book.pending.get(sym)
-        if pend:
-            if limit_filled(
-                pend.signal.side,
-                pend.limit_px,
-                low=float(bar["low"]),
-                high=float(bar["high"]),
-                through_pct=float(self.cfg.fill_through_pct),
-            ):
-                self._fill_entry(pend, fill_px=pend.limit_px, ts_ms=int(bar.get("ts") or 0))
+        with self._lock:
+            sym = symbol.upper()
+            pend = self.book.pending.get(sym)
+            if pend:
+                if limit_filled(
+                    pend.signal.side,
+                    pend.limit_px,
+                    low=float(bar["low"]),
+                    high=float(bar["high"]),
+                    through_pct=float(self.cfg.fill_through_pct),
+                ):
+                    self._fill_entry(pend, fill_px=pend.limit_px, ts_ms=int(bar.get("ts") or 0))
 
-        pos = self.book.positions.get(sym)
-        if not pos:
-            return
-        lo, hi = float(bar["low"]), float(bar["high"])
-        hit_sl = (pos.side == "long" and lo <= pos.sl) or (pos.side == "short" and hi >= pos.sl)
-        hit_tp = (pos.side == "long" and hi >= pos.tp) or (pos.side == "short" and lo <= pos.tp)
-        if hit_sl:
-            exit_px = pos.sl * (1 - self.cfg.slip_exit) if pos.side == "long" else pos.sl * (1 + self.cfg.slip_exit)
-            self._close(pos, exit_px, int(bar["ts"]), "sl", taker=True)
-        elif hit_tp:
-            self._close(pos, pos.tp, int(bar["ts"]), "tp", taker=False)
+            pos = self.book.positions.get(sym)
+            if not pos:
+                return
+            lo, hi = float(bar["low"]), float(bar["high"])
+            hit_sl = (pos.side == "long" and lo <= pos.sl) or (pos.side == "short" and hi >= pos.sl)
+            hit_tp = (pos.side == "long" and hi >= pos.tp) or (pos.side == "short" and lo <= pos.tp)
+            if hit_sl:
+                exit_px = (
+                    pos.sl * (1 - self.cfg.slip_exit)
+                    if pos.side == "long"
+                    else pos.sl * (1 + self.cfg.slip_exit)
+                )
+                self._close(pos, exit_px, int(bar["ts"]), "sl", taker=True)
+            elif hit_tp:
+                self._close(pos, pos.tp, int(bar["ts"]), "tp", taker=False)
 
     def on_funding(self, symbol: str, rate: float, slot: str) -> None:
-        if slot == self.book.last_funding_slot:
-            return
-        # применяем ко всем позициям символа; slot глобальный
-        for sym, pos in list(self.book.positions.items()):
-            if symbol and sym != symbol.upper():
-                continue
-            notion = pos.entry * pos.qty
-            cash = -notion * rate if pos.side == "long" else notion * rate
-            pos.funding += cash
-        self.book.last_funding_slot = slot
+        """Начислить funding одной монете. Слот хранится per-symbol."""
+        with self._lock:
+            sym = (symbol or "").upper()
+            if not sym:
+                return
+            if self.book.last_funding_by_symbol.get(sym) == slot:
+                return
+            pos = self.book.positions.get(sym)
+            if pos is not None:
+                notion = pos.entry * pos.qty
+                cash = -notion * rate if pos.side == "long" else notion * rate
+                pos.funding += cash
+                self._persist()
+            self.book.last_funding_by_symbol[sym] = slot
 
     def maybe_funding_tick(self, now_ms: int | None = None) -> None:
         now = time.gmtime((now_ms or int(time.time() * 1000)) / 1000)

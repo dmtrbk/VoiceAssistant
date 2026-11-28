@@ -104,7 +104,7 @@ def dump_engine(engine: Any) -> dict[str, Any]:
             "pending": pending,
             "positions": positions,
             "realized": float(book.realized),
-            "last_funding_slot": str(book.last_funding_slot or ""),
+            "last_funding_by_symbol": dict(book.last_funding_by_symbol or {}),
         },
         "portfolio": {
             "open_positions": dict(st.open_positions),
@@ -154,11 +154,16 @@ def load_into_engine(engine: Any, payload: dict[str, Any] | None) -> bool:
                 slip=float(raw.get("slip") or 0),
                 open_ts=int(raw.get("open_ts") or 0),
             )
+        funding_map = book_raw.get("last_funding_by_symbol")
+        if not isinstance(funding_map, dict):
+            # миграция со старого глобального слота
+            legacy = str(book_raw.get("last_funding_slot") or "")
+            funding_map = {s: legacy for s in positions} if legacy else {}
         engine.book = PaperBook(
             pending=pending,
             positions=positions,
             realized=float(book_raw.get("realized") or 0),
-            last_funding_slot=str(book_raw.get("last_funding_slot") or ""),
+            last_funding_by_symbol={str(k).upper(): str(v) for k, v in funding_map.items()},
         )
         engine.equity = float(payload.get("equity") or engine.cfg.start_equity_usd)
 

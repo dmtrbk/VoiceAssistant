@@ -379,6 +379,198 @@ class TestLinearInfra(unittest.TestCase):
         # сигнал только на live (spy считает вызовы emit) — gap без emit
         self.assertEqual(emit_n["n"], 1)
 
+    def test_funding_applies_to_all_open_symbols_same_slot(self):
+        """TZ7: итерация tape.funding по 4 тикерам не должна глотать funding остальных."""
+        from skills.crypto.linear.paper_engine import PaperPos
+        from skills.crypto.linear.strategy_core import Signal
+
+        eng = self._engine()
+        slot = "2026-100-8"
+        for sym, entry, qty in (("ZECUSDT", 100.0, 0.4), ("HYPEUSDT", 50.0, 0.8)):
+            sig = Signal(
+                symbol=sym,
+                side="short",
+                bar_ts=1,
+                limit_px=entry,
+                sl=entry * 1.02,
+                tp=entry * 0.95,
+                risk_px=entry * 0.02,
+                atr15=1.0,
+                er_4h=0.3,
+                confirm_close=entry,
+            )
+            eng.book.positions[sym] = PaperPos(
+                signal=sig,
+                side="short",
+                qty=qty,
+                entry=entry,
+                sl=sig.sl,
+                tp=sig.tp,
+                leg_usd=40.0,
+                open_ts=1,
+            )
+
+        # как desk._funding_tick: BTC → ZEC → HYPE → AAVE
+        rates = {
+            "BTCUSDT": 0.0001,
+            "ZECUSDT": 0.0002,
+            "HYPEUSDT": 0.0003,
+            "AAVEUSDT": 0.0004,
+        }
+        for sym, rate in rates.items():
+            eng.on_funding(sym, rate, slot)
+
+        zec = eng.book.positions["ZECUSDT"]
+        hype = eng.book.positions["HYPEUSDT"]
+        # short: cash = notion * rate
+        self.assertAlmostEqual(zec.funding, 100.0 * 0.4 * 0.0002, places=10)
+        self.assertAlmostEqual(hype.funding, 50.0 * 0.8 * 0.0003, places=10)
+        self.assertEqual(eng.book.last_funding_by_symbol["ZECUSDT"], slot)
+        self.assertEqual(eng.book.last_funding_by_symbol["HYPEUSDT"], slot)
+        # повтор того же slot — no-op
+        eng.on_funding("ZECUSDT", 0.01, slot)
+        self.assertAlmostEqual(zec.funding, 100.0 * 0.4 * 0.0002, places=10)
+
+    def test_replay_fill_on_ttl_bar_before_expire(self):
+        """TZ7: на баре created+2×15m OHLC-fill до TTL (порядок on_bar → expire)."""
+        from skills.crypto.linear.desk_linear import LinearDesk, _15M
+
+        desk = LinearDesk(self.cfg)
+        eng = self._engine()
+        desk.paper = eng
+        t0 = 1_700_000_000_000
+        period = _15M
+        eng.on_signal(_sig("HYPEUSDT", t0, side="short", limit=100.0), bbo_bid=99, bbo_ask=100.5, last=100)
+        self.assertIn("HYPEUSDT", eng.book.pending)
+
+        # warm OHLC: бар1 без S1-пробития; бар2 (created+2×15m) — fill до TTL
+        cols = ["ts", "open", "high", "low", "close", "volume", "turnover"]
+        import pandas as pd
+
+        bars = []
+        for i in range(1, 3):
+            ts = t0 + i * period
+            # through=0.0002 → short fill iff high > 100.02
+            hi = 100.5 if i == 2 else 100.01
+            bars.append(
+                {
+                    "ts": ts,
+                    "open": 100.0,
+                    "high": hi,
+                    "low": 99.5,
+                    "close": 100.0,
+                    "volume": 1.0,
+                    "turnover": 1.0,
+                }
+            )
+        desk.ohlc["HYPEUSDT"] = {
+            "15m": pd.DataFrame(bars),
+            "1h": pd.DataFrame(columns=cols),
+            "4h": pd.DataFrame(columns=cols),
+        }
+        desk._replay_paper_catchup()
+        self.assertIn("HYPEUSDT", eng.book.positions)
+        self.assertNotIn("HYPEUSDT", eng.book.pending)
+
+    def test_signed_get_sends_sorted_query_params(self):
+        """TZ7: signed GET передаёт params в алфавитном порядке (= подпись)."""
+        from skills.crypto.linear.bybit_rest import BybitRest
+
+        rest = BybitRest(testnet=False, api_key="k", api_secret="s")
+        captured: dict = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"retCode": 0, "result": {}}
+
+        def fake_get(url, params=None, headers=None, timeout=30):
+            captured["params"] = params
+            captured["url"] = url
+            return _Resp()
+
+        rest.session.get = fake_get  # type: ignore[method-assign]
+        # порядок вставки: category, symbol, orderId — не алфавит (o < s)
+        rest.signed(
+            "GET",
+            "/v5/order/realtime",
+            {"category": "linear", "symbol": "ZECUSDT", "orderId": "abc"},
+        )
+        params = captured["params"]
+        self.assertIsInstance(params, list)
+        keys = [k for k, _ in params]
+        self.assertEqual(keys, sorted(keys))
+        self.assertEqual(keys, ["category", "orderId", "symbol"])
+
+    def test_live_reconcile_ttl_uses_closed_bar_not_open(self):
+        """TZ7B: TTL в reconcile по closed_bar_ts (не текущему open) — 2 бара, не 1."""
+        from skills.crypto.linear.execution import LinearExecutor, LiveOrderState, closed_15m_bar_ts, _15M
+        from skills.crypto.linear.strategy_core import Signal
+
+        t0 = (1_700_000_000_000 // _15M) * _15M
+        # «сейчас» = внутри бара t0+2×15m (второй бар жизни ещё открыт)
+        now_ms = t0 + 2 * _15M + 60_000
+        closed = closed_15m_bar_ts(now_ms)
+        self.assertEqual(closed, t0 + _15M)  # последний закрытый = бар №1
+        # expire_bar = created + 2×15m → ещё рано
+        expire = t0 + 2 * _15M
+        self.assertLess(closed, expire)
+        # старый баг: now_open = t0+2×15m >= expire → ложная отмена
+        now_open = (now_ms // _15M) * _15M
+        self.assertGreaterEqual(now_open, expire)
+
+        # smoke: expire_pendings с closed не трогает pending до 2-го закрытого
+        from skills.crypto.linear.bybit_rest import BybitRest
+        from skills.crypto.linear.account import AccountGuard
+        from skills.crypto.linear.instruments import InstrumentCache
+        from skills.crypto.linear.portfolio import PortfolioGuard
+
+        rest = BybitRest(testnet=True, api_key="k", api_secret="s")
+        cfg = self.cfg
+        cfg.paper = False
+        port = PortfolioGuard(cfg)
+        ex = LinearExecutor(rest, cfg, InstrumentCache(rest.public_get), AccountGuard(rest, cfg), portfolio=port)
+        sig = _sig("ZECUSDT", t0)
+        st = LiveOrderState(
+            symbol="ZECUSDT",
+            side="Sell",
+            signal=sig,
+            entry_order_id="x",
+            created_bar_ts=t0,
+            expire_bar_ts=expire,
+            status="pending",
+        )
+        ex.orders["ZECUSDT"] = st
+        port.set_pending("ZECUSDT", {"limit": 100})
+        # не ходим в сеть: подменим on_ttl_expire
+        called = {"n": 0}
+        ex.on_ttl_expire = lambda sym: called.__setitem__("n", called["n"] + 1)  # type: ignore
+        ex.expire_pendings_at_bar(closed)
+        self.assertEqual(called["n"], 0)
+        ex.expire_pendings_at_bar(expire)
+        self.assertEqual(called["n"], 1)
+
+    def test_live_place_entry_respects_portfolio_kill(self):
+        """TZ7B: live вход блокируется PortfolioGuard (kill / max slots)."""
+        from skills.crypto.linear.execution import LinearExecutor
+        from skills.crypto.linear.bybit_rest import BybitRest
+        from skills.crypto.linear.account import AccountGuard
+        from skills.crypto.linear.instruments import InstrumentCache
+        from skills.crypto.linear.portfolio import PortfolioGuard
+
+        cfg = self.cfg
+        cfg.paper = False
+        port = PortfolioGuard(cfg)
+        port.state.kill = True
+        port.state.kill_reason = "test"
+        rest = BybitRest(testnet=True, api_key="k", api_secret="s")
+        ex = LinearExecutor(rest, cfg, InstrumentCache(lambda *a, **k: {}), AccountGuard(rest, cfg), portfolio=port)
+        out = ex.place_entry_postonly(_sig("ZECUSDT", 1), bar_ts=1, bbo_bid=99, bbo_ask=101)
+        self.assertIsNone(out)
+        self.assertEqual(ex.orders, {})
+
 
 if __name__ == "__main__":
     unittest.main()
