@@ -71,6 +71,20 @@ class PaperEngine:
         self.min_usd_map = min_usd_map or {}
         self.book = PaperBook()
         self.equity = cfg.start_equity_usd
+        self._on_book_changed: Any | None = None
+
+    def set_persist_hook(self, hook: Any) -> None:
+        """Вызывается после мутации book (fill/close/ttl/signal)."""
+        self._on_book_changed = hook
+
+    def _persist(self) -> None:
+        hook = self._on_book_changed
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception:
+            logger.exception("[linear] paper persist hook failed shadow=%s", self.shadow)
 
     def on_signal(
         self,
@@ -144,6 +158,7 @@ class PaperEngine:
             },
             shadow=self.shadow,
         )
+        self._persist()
 
     def on_public_trade(self, symbol: str, price: float, ts_ms: int) -> None:
         """S1: fill только при пробитии limit на >= fill_through_pct."""
@@ -187,6 +202,8 @@ class PaperEngine:
                         "bars_since": bars_since,
                     }
                 )
+        if cancelled:
+            self._persist()
         return cancelled
 
     def on_bar_close_15m(self, symbol: str, bar: dict[str, float]) -> None:
@@ -266,6 +283,7 @@ class PaperEngine:
             },
             shadow=self.shadow,
         )
+        self._persist()
 
     def _close(self, pos: PaperPos, exit_px: float, ts_ms: int, reason: str, *, taker: bool) -> None:
         fee_rate = self.cfg.taker_fee if taker else self.cfg.maker_fee
@@ -300,3 +318,4 @@ class PaperEngine:
             },
             shadow=self.shadow,
         )
+        self._persist()

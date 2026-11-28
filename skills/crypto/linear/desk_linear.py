@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -16,6 +19,7 @@ from .config import LinearConfig, default_config
 from .execution import LinearExecutor
 from .instruments import InstrumentCache
 from .journals import LinearJournals
+from . import paper_book_store as book_store
 from .paper_engine import PaperEngine
 from .portfolio import PortfolioGuard
 from .strategy_core import StrategyParams, build_features, signal_at_bar
@@ -26,6 +30,23 @@ logger = logging.getLogger(__name__)
 
 _BAR_MS = {"15m": 15 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000}
 _15M = _BAR_MS["15m"]
+_MSK = ZoneInfo("Europe/Moscow")
+_NET_ERR_MARKERS = (
+    "nameresolution",
+    "failed to resolve",
+    "name resolution",
+    "nodename nor servname",
+    "temporary failure in name resolution",
+    "max retries exceeded",
+    "connection aborted",
+    "connection reset",
+    "connect timeout",
+    "timed out",
+    "network is unreachable",
+    "connection refused",
+)
+_NET_BACKOFF_SEC = 300.0  # тихий cooldown 5 мин
+_NET_ALERT_SEC = 20 * 60  # алерт если сеть/WS молчит дольше
 
 
 class LinearDesk:
@@ -55,6 +76,14 @@ class LinearDesk:
         # дедуп: (symbol, timeframe, last_closed_bar_ts)
         self._seen_bars: dict[tuple[str, str], int] = {}
         self._last_confirm_slot: str = ""
+        # после DNS/connect ошибок — не долбить REST confirm каждый :15
+        self._confirm_backoff_until: float = 0.0
+        self._gap_heal_pause_sec: float = 0.15
+        self._net_down_since: float = 0.0
+        self._net_alert_sent: bool = False
+        self._last_bar_wall: float = time.time()
+        self._tg_daily_day: str = ""
+        self._persist_lock = threading.Lock()
 
     def start(self) -> None:
         logger.info(
@@ -91,19 +120,31 @@ class LinearDesk:
                     shadow=True,
                     min_usd_map=min_usd,
                 )
+            self._wire_paper_persist()
+            restored = self._restore_paper_books()
+            if restored:
+                self._replay_paper_catchup()
 
         if self._stop:
             logger.info("[linear] stop during warm — выход")
             return
 
         start_eq = float(self.paper.equity) if self.paper else float(self.cfg.start_equity_usd)
-        self.journals.session_start(equity=start_eq)
+        self.journals.session_start(
+            equity=start_eq,
+            extra={
+                "open_plus_pending": self.portfolio.open_plus_pending(),
+                "shadow_open_plus_pending": (
+                    self.shadow_portfolio.open_plus_pending() if self.shadow else 0
+                ),
+            },
+        )
         try:
             self.journals.daily_snapshot(
                 equity=start_eq,
-                day_pnl=0.0,
-                open_n=0,
-                kill=False,
+                day_pnl=float(self.portfolio.state.day_realized_pnl),
+                open_n=self.portfolio.open_plus_pending(),
+                kill=bool(self.portfolio.state.kill),
             )
             self._last_daily_hour = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
         except Exception:
@@ -117,7 +158,91 @@ class LinearDesk:
 
     def stop(self) -> None:
         self._stop = True
+        try:
+            self._persist_paper_books()
+        except Exception:
+            logger.exception("[linear] persist on stop failed")
         self.tape.stop()
+
+    def _wire_paper_persist(self) -> None:
+        if self.paper:
+            self.paper.set_persist_hook(lambda: self._persist_one(shadow=False))
+        if self.shadow:
+            self.shadow.set_persist_hook(lambda: self._persist_one(shadow=True))
+
+    def _persist_one(self, *, shadow: bool) -> None:
+        with self._persist_lock:
+            eng = self.shadow if shadow else self.paper
+            if eng is None:
+                return
+            path = book_store.shadow_path(self.cfg.runtime_dir) if shadow else book_store.core_path(
+                self.cfg.runtime_dir
+            )
+            book_store.save_engine(eng, path)
+
+    def _persist_paper_books(self) -> None:
+        if self.paper:
+            self._persist_one(shadow=False)
+        if self.shadow:
+            self._persist_one(shadow=True)
+
+    def _restore_paper_books(self) -> bool:
+        ok = False
+        if self.paper:
+            raw = book_store.try_load(book_store.core_path(self.cfg.runtime_dir))
+            if book_store.load_into_engine(self.paper, raw):
+                logger.info(
+                    "[linear] restored core book: pos=%d pending=%d equity=%.2f",
+                    len(self.paper.book.positions),
+                    len(self.paper.book.pending),
+                    self.paper.equity,
+                )
+                ok = True
+        if self.shadow:
+            raw = book_store.try_load(book_store.shadow_path(self.cfg.runtime_dir))
+            if book_store.load_into_engine(self.shadow, raw):
+                logger.info(
+                    "[linear] restored shadow book: pos=%d pending=%d equity=%.2f",
+                    len(self.shadow.book.positions),
+                    len(self.shadow.book.pending),
+                    self.shadow.equity,
+                )
+                ok = True
+        return ok
+
+    def _replay_paper_catchup(self) -> None:
+        """После рестарта: прогнать warm 15m по открытым/pending (SL первым, без сигналов)."""
+        for eng in (self.paper, self.shadow):
+            if eng is None:
+                continue
+            syms = set(eng.book.positions) | set(eng.book.pending)
+            for sym in sorted(syms):
+                df = self.ohlc.get(sym, {}).get("15m")
+                if df is None or df.empty:
+                    continue
+                pos = eng.book.positions.get(sym)
+                pend = eng.book.pending.get(sym)
+                since = 0
+                if pos is not None:
+                    since = max(since, int(pos.open_ts or pos.signal.bar_ts))
+                if pend is not None:
+                    since = max(since, int(pend.created_bar_ts))
+                rows = df[df["ts"].astype(int) > since]
+                for _, row in rows.iterrows():
+                    bar = {
+                        "ts": int(row["ts"]),
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": float(row.get("volume") or 0),
+                        "confirm": True,
+                    }
+                    eng.expire_pendings_at_bar(int(bar["ts"]))
+                    eng.on_bar_close_15m(sym, bar)
+                    if sym not in eng.book.positions and sym not in eng.book.pending:
+                        break
+            self._persist_one(shadow=bool(eng.shadow))
 
     def _rebuild_features(self) -> None:
         for sym, frames in self.ohlc.items():
@@ -161,46 +286,240 @@ class LinearDesk:
         if self.shadow and symbol in self.cfg.shadow_symbols:
             self.shadow.on_public_trade(symbol, price, ts_ms)
 
-    def _handle_closed_15m(self, symbol: str, bar: dict[str, Any]) -> None:
-        """Единая обработка закрытой 15m (WS или REST) под lock + дедуп."""
-        with self._bar_lock:
-            if symbol not in self.ohlc:
-                return
-            ts = int(bar["ts"])
-            if not self._mark_seen(symbol, "15m", ts):
-                return
+    def _last_15m_ts(self, symbol: str) -> int | None:
+        key = (symbol.upper(), "15m")
+        seen = self._seen_bars.get(key)
+        if seen is not None:
+            return int(seen)
+        df = self.ohlc.get(symbol, {}).get("15m")
+        if df is not None and len(df):
+            return int(df.iloc[-1]["ts"])
+        return None
 
-            # 1) TTL всех pending ДО сигналов на этом баре
-            if self.paper:
-                self.paper.expire_pendings_at_bar(ts)
-            if self.shadow:
-                self.shadow.expire_pendings_at_bar(ts)
-            if not self.cfg.paper:
-                self.executor.expire_pendings_at_bar(ts)
+    def _ingest_closed_15m(
+        self,
+        symbol: str,
+        bar: dict[str, Any],
+        *,
+        emit_signal: bool,
+    ) -> bool:
+        """Append + HTF + expire/fills. emit_signal=False для gap-heal (без торговли задним числом)."""
+        if symbol not in self.ohlc:
+            return False
+        ts = int(bar["ts"])
+        if not self._mark_seen(symbol, "15m", ts):
+            return False
 
-            self._append_bar(symbol, "15m", bar)
+        if self.paper:
+            self.paper.expire_pendings_at_bar(ts)
+        if self.shadow:
+            self.shadow.expire_pendings_at_bar(ts)
+        if not self.cfg.paper:
+            self.executor.expire_pendings_at_bar(ts)
 
-            # 2) HTF из локальных 15m — без REST (борьба с 10006 на :00/:15)
-            if (ts + _15M) % _BAR_MS["1h"] == 0:
-                self._rollup_htf_from_15m(symbol, "1h")
-            if (ts + _15M) % _BAR_MS["4h"] == 0:
-                self._rollup_htf_from_15m(symbol, "4h")
+        self._append_bar(symbol, "15m", bar)
 
+        if (ts + _15M) % _BAR_MS["1h"] == 0:
+            self._rollup_htf_from_15m(symbol, "1h")
+        if (ts + _15M) % _BAR_MS["4h"] == 0:
+            self._rollup_htf_from_15m(symbol, "4h")
+
+        self.features[symbol] = build_features(
+            self.ohlc[symbol]["15m"],
+            self.ohlc[symbol]["1h"],
+            self.ohlc[symbol]["4h"],
+        )
+
+        if self.paper:
+            self.paper.on_bar_close_15m(symbol, bar)
+        if self.shadow and symbol in set(self.cfg.shadow_symbols) | {self.cfg.btc_symbol}:
+            self.shadow.on_bar_close_15m(symbol, bar)
+
+        if emit_signal and symbol != self.cfg.btc_symbol:
+            self._emit_signal(symbol)
+        return True
+
+    @staticmethod
+    def _is_net_error(exc: BaseException) -> bool:
+        low = str(exc).lower()
+        if any(m in low for m in _NET_ERR_MARKERS):
+            return True
+        return isinstance(exc, (ConnectionError, TimeoutError, OSError))
+
+    def _enter_net_backoff(self, reason: str) -> None:
+        now = time.time()
+        if self._net_down_since <= 0:
+            self._net_down_since = now
+        self._confirm_backoff_until = now + _NET_BACKOFF_SEC
+        logger.warning(
+            "[linear] net backoff %.0fs (%s) down_since=%.0f",
+            _NET_BACKOFF_SEC,
+            reason,
+            self._net_down_since,
+        )
+
+    def _probe_network(self) -> bool:
+        """Лёгкий /v5/market/time — один запрос вместо шторма kline."""
+        try:
+            self.rest.public_get("/v5/market/time", {})
+            return True
+        except Exception as exc:
+            logger.debug("[linear] market/time probe fail: %s", exc)
+            return False
+
+    def _fetch_gap_klines_15m(self, symbol: str, *, limit: int) -> list[dict[str, Any]]:
+        """Один REST kline.15 → список закрытых баров (asc)."""
+        data = self.rest.public_get(
+            "/v5/market/kline",
+            {
+                "category": "linear",
+                "symbol": symbol,
+                "interval": "15",
+                "limit": max(2, min(1000, int(limit))),
+            },
+        )
+        rows = data.get("result", {}).get("list") or []
+        # API newest-first
+        out: list[dict[str, Any]] = []
+        now_ms = int(time.time() * 1000)
+        for row in reversed(rows):
+            ts = int(row[0])
+            if ts + _15M > now_ms:
+                continue
+            out.append(
+                {
+                    "ts": ts,
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]),
+                    "turnover": float(row[6]) if len(row) > 6 else 0.0,
+                    "confirm": True,
+                }
+            )
+        return out
+
+    def _rebuild_htf_from_15m(self, symbol: str) -> None:
+        """Полная пересборка 1h/4h с нуля на непрерывном 15m (после gap-heal)."""
+        if symbol not in self.ohlc:
+            return
+        df15 = self.ohlc[symbol]["15m"]
+        if df15 is None or df15.empty:
+            return
+        for key in ("1h", "4h"):
+            period = _BAR_MS[key]
+            need = period // _15M
+            rows: list[dict[str, Any]] = []
+            open_ts = (int(df15.iloc[0]["ts"]) // period) * period
+            if open_ts < int(df15.iloc[0]["ts"]):
+                open_ts += period
+            last_end = int(df15.iloc[-1]["ts"]) + _15M
+            while open_ts + period <= last_end:
+                be = open_ts + period
+                chunk = df15[(df15["ts"] >= open_ts) & (df15["ts"] < be)]
+                if (
+                    len(chunk) == need
+                    and int(chunk.iloc[0]["ts"]) == open_ts
+                    and int(chunk.iloc[-1]["ts"]) == be - _15M
+                ):
+                    rows.append(
+                        {
+                            "ts": open_ts,
+                            "open": float(chunk.iloc[0]["open"]),
+                            "high": float(chunk["high"].max()),
+                            "low": float(chunk["low"].min()),
+                            "close": float(chunk.iloc[-1]["close"]),
+                            "volume": float(chunk["volume"].sum()),
+                            "turnover": float(chunk["turnover"].sum())
+                            if "turnover" in chunk.columns
+                            else 0.0,
+                        }
+                    )
+                open_ts += period
+            self.ohlc[symbol][key] = pd.DataFrame(rows)
+            seen_key = (symbol.upper(), key)
+            if rows:
+                self._seen_bars[seen_key] = int(rows[-1]["ts"])
+            else:
+                self._seen_bars.pop(seen_key, None)
+        try:
             self.features[symbol] = build_features(
                 self.ohlc[symbol]["15m"],
                 self.ohlc[symbol]["1h"],
                 self.ohlc[symbol]["4h"],
             )
+        except ValueError:
+            pass
 
-            # 3) fills / SL-TP на этом символе
-            if self.paper:
-                self.paper.on_bar_close_15m(symbol, bar)
-            if self.shadow and symbol in set(self.cfg.shadow_symbols) | {self.cfg.btc_symbol}:
-                self.shadow.on_bar_close_15m(symbol, bar)
+    def gap_heal_15m(self, symbol: str, new_ts: int) -> int:
+        """Доклеить пропуск 15m перед new_ts. Без сигналов на старых барах. Возвращает n healed.
 
-            if symbol == self.cfg.btc_symbol:
+        На каждом доклеенном баре: expire TTL + SL/TP (SL первым). Затем HTF с нуля.
+        """
+        with self._bar_lock:
+            last = self._last_15m_ts(symbol)
+        if last is None:
+            return 0
+        delta = int(new_ts) - int(last)
+        if delta <= _15M:
+            return 0
+        n_missing = int(delta // _15M) - 1
+        if n_missing < 1:
+            return 0
+        limit = min(n_missing + 5, 1000)
+        logger.warning(
+            "[linear] gap-heal %s: ≈%d missing 15m (last=%s → new=%s), REST limit=%d",
+            symbol,
+            n_missing,
+            last,
+            new_ts,
+            limit,
+        )
+        try:
+            fetched = self._fetch_gap_klines_15m(symbol, limit=limit)
+        except Exception as exc:
+            logger.warning("[linear] gap-heal %s REST failed: %s", symbol, exc)
+            if self._is_net_error(exc):
+                self._enter_net_backoff("gap-heal")
+            return 0
+
+        # пауза после REST, чтобы не штормить при heal нескольких символов подряд
+        time.sleep(self._gap_heal_pause_sec)
+        healed = [b for b in fetched if int(last) < int(b["ts"]) < int(new_ts)]
+        healed.sort(key=lambda b: int(b["ts"]))
+        n = 0
+        with self._bar_lock:
+            for bar in healed:
+                if self._ingest_closed_15m(symbol, bar, emit_signal=False):
+                    n += 1
+            if n:
+                self._rebuild_htf_from_15m(symbol)
+        if n:
+            logger.info("[linear] gap-heal %s: dokleeno %d bars + HTF rebuild", symbol, n)
+            self._persist_paper_books()
+        return n
+
+    def _handle_closed_15m(self, symbol: str, bar: dict[str, Any]) -> None:
+        """Единая обработка закрытой 15m (WS или REST) под lock + дедуп + gap-heal."""
+        ts = int(bar["ts"])
+        self._last_bar_wall = time.time()
+        if self._net_down_since > 0:
+            # бар пришёл — сеть/WS ожили
+            down_for = time.time() - self._net_down_since
+            logger.info("[linear] net recovered after %.0fs (bar %s)", down_for, symbol)
+            self._net_down_since = 0.0
+            self._net_alert_sent = False
+            self._confirm_backoff_until = 0.0
+        with self._bar_lock:
+            if symbol not in self.ohlc:
                 return
-            self._emit_signal(symbol)
+            last = self._last_15m_ts(symbol)
+            need_heal = last is not None and ts - int(last) > _15M
+        if need_heal:
+            self.gap_heal_15m(symbol, ts)
+        with self._bar_lock:
+            self._ingest_closed_15m(symbol, bar, emit_signal=True)
 
     def _rollup_htf_from_15m(self, symbol: str, key: str) -> None:
         """Собрать закрытый 1h/4h бар из уже известных 15m — без Bybit REST."""
@@ -271,14 +590,30 @@ class LinearDesk:
     def _rest_confirm_poll(self) -> None:
         """Fallback один раз на 15m-слот: REST только по символам без WS-бара.
 
-        Раньше цикл секунд 2–12 × 4 символа → десятки kline/слот и 10006.
+        При DNS/ConnectionError — тихий cooldown + probe /v5/market/time,
+        без шторма 4×kline каждый слот. После восстановления — gap-heal через handle.
         """
         now = datetime.now(timezone.utc)
         if now.minute % 15 != 0 or now.second < 8 or now.second > 14:
             return
+        wall = time.time()
+        if wall < self._confirm_backoff_until:
+            return
         slot = now.strftime("%Y-%m-%d %H:%M")
         if slot == self._last_confirm_slot:
             return
+
+        # если уже были в net-down — сначала лёгкий probe
+        if self._net_down_since > 0:
+            if not self._probe_network():
+                self._enter_net_backoff("probe still down")
+                self._last_confirm_slot = slot
+                self._maybe_net_alert()
+                return
+            logger.info("[linear] net probe OK — REST confirm + gap-heal")
+            self._net_down_since = 0.0
+            self._net_alert_sent = False
+
         # ожидаемый open ts только что закрытого 15m
         expect_ts = (int(now.timestamp() * 1000) // _15M - 1) * _15M
         want = set(self.cfg.symbols) | set(self.cfg.shadow_symbols) | {self.cfg.btc_symbol}
@@ -291,6 +626,7 @@ class LinearDesk:
             self._last_confirm_slot = slot
             return
         logger.info("[linear] REST confirm fallback %s missing=%s", slot, missing)
+        net_fail = False
         for sym in missing:
             try:
                 data = self.rest.public_get(
@@ -311,9 +647,138 @@ class LinearDesk:
                     "confirm": True,
                 }
                 self._handle_closed_15m(sym, bar)
+                time.sleep(self._gap_heal_pause_sec)
             except Exception as exc:
                 logger.warning("[linear] REST confirm %s: %s", sym, exc)
+                if self._is_net_error(exc):
+                    net_fail = True
+                    break  # не долбить остальные символы
+        if net_fail:
+            self._enter_net_backoff("REST confirm")
+            self._maybe_net_alert()
         self._last_confirm_slot = slot
+
+    def _maybe_net_alert(self) -> None:
+        if self._net_alert_sent or self._net_down_since <= 0:
+            return
+        if time.time() - self._net_down_since < _NET_ALERT_SEC:
+            return
+        self._net_alert_sent = True
+        mins = int((time.time() - self._net_down_since) / 60)
+        text = f"Linear: сеть/WS молчит >{mins} мин (DNS/connect). Тихий backoff, gap-heal после восстановления."
+        self._tg_send(text)
+
+    def _tg_send(self, text: str) -> None:
+        try:
+            from skills.utils import send_telegram_notification, telegram_configured
+
+            if not telegram_configured():
+                return
+            send_telegram_notification(text, background=True)
+        except Exception:
+            logger.debug("[linear] telegram send failed", exc_info=True)
+
+    def format_daily_digest(self) -> str:
+        """Короткая суточная сводка Core/Shadow для Telegram."""
+        day = datetime.now(_MSK).strftime("%d.%m")
+        lines = [f"Linear paper за {day}:"]
+
+        def _side(name: str, eng: PaperEngine | None, port: PortfolioGuard) -> None:
+            if eng is None:
+                return
+            opens = [
+                f"{s} {p.side}@{p.entry:.4g}" for s, p in eng.book.positions.items()
+            ]
+            pend = list(eng.book.pending.keys())
+            kill = "KILL" if port.state.kill else "ok"
+            lines.append(
+                f"· {name}: eq ${eng.equity:.2f} (day {port.state.day_realized_pnl:+.2f}), "
+                f"open {len(eng.book.positions)}/{self.cfg.max_open_plus_pending}, "
+                f"pending {len(pend)}, kill={kill}"
+            )
+            if opens:
+                lines.append(f"  pos: {', '.join(opens)}")
+            if pend:
+                lines.append(f"  pend: {', '.join(pend)}")
+            if port.state.kill and port.state.kill_reason:
+                lines.append(f"  reason: {port.state.kill_reason}")
+
+        _side("Core", self.paper, self.portfolio)
+        if self.shadow:
+            _side("Shadow", self.shadow, self.shadow_portfolio)
+
+        try:
+            since = (datetime.now(_MSK) - timedelta(hours=30)).astimezone(timezone.utc)
+            since_s = since.isoformat()
+            ttl = sl = tp = 0
+            ev = self.cfg.path("paper_events.jsonl")
+            if ev.is_file():
+                for line in ev.read_text(encoding="utf-8").splitlines()[-500:]:
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if str(obj.get("ts_utc") or "") < since_s:
+                        continue
+                    if obj.get("type") == "ttl_cancel":
+                        ttl += 1
+            for name in ("paper_trades.jsonl", "shadow_aave_trades.jsonl"):
+                tp_path = self.cfg.path(name)
+                if not tp_path.is_file():
+                    continue
+                for line in tp_path.read_text(encoding="utf-8").splitlines()[-300:]:
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if obj.get("event") != "close":
+                        continue
+                    if str(obj.get("ts_utc") or "") < since_s:
+                        continue
+                    if obj.get("reason") == "sl":
+                        sl += 1
+                    elif obj.get("reason") == "tp":
+                        tp += 1
+            lines.append(f"· counters ~24h: TTL={ttl} SL={sl} TP={tp}")
+        except Exception:
+            logger.debug("[linear] digest counters failed", exc_info=True)
+        return "\n".join(lines)
+
+    def _maybe_telegram_daily(self) -> None:
+        """1 сводка в сутки после 21:00 МСК."""
+        now = datetime.now(_MSK)
+        if now.hour < 21:
+            return
+        day = now.strftime("%Y-%m-%d")
+        if day == self._tg_daily_day:
+            return
+        meta_path = self.cfg.path("linear_daily_meta.json")
+        try:
+            if meta_path.is_file():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                if isinstance(meta, dict) and meta.get("last_report_day") == day:
+                    self._tg_daily_day = day
+                    return
+        except Exception:
+            pass
+        text = self.format_daily_digest()
+        self._tg_send(text)
+        self._tg_daily_day = day
+        try:
+            tmp = str(meta_path) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"last_report_day": day}, fh, ensure_ascii=False, indent=2)
+                fh.write("\n")
+            os.replace(tmp, meta_path)
+        except Exception:
+            logger.debug("[linear] daily meta write failed", exc_info=True)
+        # kill — отдельный редкий алерт
+        if self.portfolio.state.kill:
+            self._tg_send(f"Linear Core KILL: {self.portfolio.state.kill_reason}")
+        if self.shadow and self.shadow_portfolio.state.kill:
+            self._tg_send(f"Linear Shadow KILL: {self.shadow_portfolio.state.kill_reason}")
 
     def _funding_tick(self) -> None:
         now = datetime.now(timezone.utc)
@@ -384,6 +849,8 @@ class LinearDesk:
                         eq = self.paper.equity
                     self.portfolio.update_equity(eq)
                     self._maybe_daily_snap(eq)
+                    self._maybe_telegram_daily()
+                    self._maybe_net_alert()
                 except Exception:
                     logger.exception("[linear] reconcile/snap cycle failed")
             time.sleep(0.2)
